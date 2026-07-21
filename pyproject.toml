@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "finance-agent"
+version = "2.1.0"
+description = "金融智能投顾系统 —— 基于多 Agent 的 A 股投资顾问"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Finance Agent Team"}
+]
+keywords = ["finance", "investment", "multi-agent", "langgraph", "a-shares"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    "langchain",
+    "langgraph",
+    "langchain-community",
+    "langchain-deepseek",
+    "python-dotenv",
+    "redis",
+    "fastapi",
+    "uvicorn[standard]",
+    "baostock>=0.9.2",
+    "pandas",
+    "numpy",
+    "scipy",
+    "pydantic",
+    "requests",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio",
+    "httpx",
+]
+
+[tool.setuptools.packages.find]
+include = ["finance_agent*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
