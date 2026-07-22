@@ -46,21 +46,30 @@ SQLITE_PATH = os.getenv(
 # BaoStock 数据缓存；请求失败时可回退到最近一次成功缓存
 STOCK_CACHE_DIR = os.getenv("STOCK_CACHE_DIR", ".cache/finance_agent")
 STOCK_CACHE_TTL = int(os.getenv("STOCK_CACHE_TTL", "3600"))
+BAOSTOCK_SOCKET_TIMEOUT = float(os.getenv("BAOSTOCK_SOCKET_TIMEOUT", "15"))
 
 # 百度千帆智能搜索（行业/主题选股时使用）
 QIANFAN_API_KEY = os.getenv("QIANFAN_API_KEY", "").strip()
 QIANFAN_SEARCH_MODEL = os.getenv("QIANFAN_SEARCH_MODEL", "deepseek-v4-flash").strip()
 QIANFAN_SEARCH_TIMEOUT = int(os.getenv("QIANFAN_SEARCH_TIMEOUT", "60"))
+LLM_REQUEST_TIMEOUT = float(os.getenv("LLM_REQUEST_TIMEOUT", "45"))
+LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "1"))
 
 if not DEEPSEEK_API_KEY or DEEPSEEK_API_KEY == "sk-your-api-key-here":
     raise ValueError("请在操作系统环境变量中设置真实的 DEEPSEEK_API_KEY")
 
-model = init_chat_model("deepseek:deepseek-v4-pro", api_key=DEEPSEEK_API_KEY)
+model = init_chat_model(
+    "deepseek:deepseek-v4-pro",
+    api_key=DEEPSEEK_API_KEY,
+    timeout=LLM_REQUEST_TIMEOUT,
+    max_retries=LLM_MAX_RETRIES,
+)
 
 # Agent 温度策略：不同任务使用不同温度
 AGENT_TEMPERATURES = {
     "supervisor": 0.2,        # 监督者：低温保证分类稳定
     "profile": 0.1,          # 画像抽取：低温保证抽取准确
+    "slot_extraction": 0.1, # 画像与股票槽位：低温保证抽取准确
     "data_fetch": 0.0,        # 数据获取：零温度保证工具调用准确
     "fundamental": 0.3,      # 基本面分析：适度温度保证分析深度
     "allocation": 0.2,        # 资产配置：低温保证计算严谨
@@ -71,4 +80,10 @@ AGENT_TEMPERATURES = {
 def get_model_for_agent(agent_name: str):
     """根据 Agent 名称获取对应温度的模型实例。"""
     temperature = AGENT_TEMPERATURES.get(agent_name, 0.3)
-    return init_chat_model("deepseek:deepseek-v4-pro", api_key=DEEPSEEK_API_KEY, temperature=temperature)
+    return init_chat_model(
+        "deepseek:deepseek-v4-pro",
+        api_key=DEEPSEEK_API_KEY,
+        temperature=temperature,
+        timeout=LLM_REQUEST_TIMEOUT,
+        max_retries=LLM_MAX_RETRIES,
+    )

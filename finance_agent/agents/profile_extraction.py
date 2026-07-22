@@ -1,4 +1,4 @@
-"""用户画像抽取 Agent。
+"""关键信息槽位提取 Agent。
 
 职责：从用户输入中抽取结构化投资参数
 - 风险偏好（R1-R5）
@@ -23,7 +23,7 @@ from finance_agent.agents.base import BaseFinanceAgent
 from finance_agent.config import get_model_for_agent, safe_parse_json
 
 
-_PROFILE_EXTRACTION_PROMPT = """你是金融投顾系统的用户画像抽取专家。
+_PROFILE_EXTRACTION_PROMPT = """你是金融投顾系统的关键信息槽位提取专家。
 
 ## 职责
 从用户输入中抽取结构化投资参数，补全正则无法识别的语义字段。
@@ -57,10 +57,10 @@ _PROFILE_EXTRACTION_PROMPT = """你是金融投顾系统的用户画像抽取专
 """
 
 
-class ProfileExtractionAgent(BaseFinanceAgent):
-    """用户画像抽取 Agent。"""
+class SlotExtractionAgent(BaseFinanceAgent):
+    """统一提取用户画像和股票等关键槽位。"""
 
-    agent_name: str = "profile"
+    agent_name: str = "slot_extraction"
 
     def __init__(self, shared_memory=None):
         super().__init__(shared_memory=shared_memory)
@@ -80,7 +80,7 @@ class ProfileExtractionAgent(BaseFinanceAgent):
                 ("system", _PROFILE_EXTRACTION_PROMPT),
                 ("human", "用户输入：{message}\n\n已有画像信息：{existing}\n\n请抽取/更新用户画像："),
             ])
-            self._extract_chain = prompt | get_model_for_agent("profile") | StrOutputParser()
+            self._extract_chain = prompt | get_model_for_agent("slot_extraction") | StrOutputParser()
         return self._extract_chain
 
     def extract_profile(
@@ -140,15 +140,6 @@ class ProfileExtractionAgent(BaseFinanceAgent):
 
         # 股票代码（6位A股代码，不用\b词边界，中文/数字交界处不生效）
         stock_codes = re.findall(r"(?<!\d)(60\d{4}|00\d{4}|30\d{4}|68\d{4}|8\d{5}|4\d{5})(?!\d)", message)
-        # 高频名称采用确定性映射，避免 LLM/网络异常时错误沿用上一轮股票。
-        known_stocks = {
-            "贵州茅台": "600519", "茅台": "600519", "浦发银行": "600000",
-            "招商银行": "600036", "招行": "600036", "中国平安": "601318",
-            "平安银行": "000001", "五粮液": "000858", "宁德时代": "300750",
-        }
-        for name, code in known_stocks.items():
-            if name in message and code not in stock_codes:
-                stock_codes.append(code)
         if stock_codes:
             profile["stock_codes"] = list(dict.fromkeys(stock_codes))
 
@@ -159,6 +150,13 @@ class ProfileExtractionAgent(BaseFinanceAgent):
 
         # 当前消息已明确给出股票时，正则信息足以驱动数据流程，避免额外模型调用拖慢请求。
         if stock_codes:
+            return profile
+
+        # 行业/主题筛选请求没有具体画像可抽取，直接交给候选搜索，避免一次无意义的
+        # LLM 调用把整个流程阻塞在“槽位提取”阶段。
+        screening_markers = ("推荐", "选股", "筛选", "候选", "行业", "板块", "概念股")
+        if any(marker in message for marker in screening_markers):
+            profile["stock_codes"] = []
             return profile
 
         # 2. LLM 补全投资目标等语义字段
@@ -194,6 +192,37 @@ class ProfileExtractionAgent(BaseFinanceAgent):
             pass
 
         return profile
+
+    @staticmethod
+    def extract_explicit_stocks(message: str) -> List[Dict[str, Any]]:
+        """提取当前输入中明确出现的股票代码。"""
+        stocks: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for code in re.findall(
+            r"(?<!\d)(60\d{4}|00\d{4}|30\d{4}|68\d{4}|8\d{5}|4\d{5})(?!\d)",
+            message,
+        ):
+            if code not in seen:
+                stocks.append({"code": code, "name": "", "industry": ""})
+                seen.add(code)
+        return stocks[:5]
+
+    def extract_slots(
+        self, message: str, existing_profile: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        """一次返回画像槽位与结构化股票身份。"""
+        profile = self.extract_profile(message, existing_profile)
+        stocks = self.extract_explicit_stocks(message)
+        stock_by_code = {stock["code"]: stock for stock in stocks}
+        resolved = [
+            stock_by_code.get(code, {"code": code, "name": "", "industry": ""})
+            for code in profile.get("stock_codes", [])
+        ]
+        for stock in stocks:
+            if stock["code"] not in {item["code"] for item in resolved}:
+                resolved.append(stock)
+        profile["stock_codes"] = [item["code"] for item in resolved[:5]]
+        return {"user_profile": profile, "resolved_stocks": resolved[:5]}
 
     def handle(
         self,
@@ -233,3 +262,7 @@ class ProfileExtractionAgent(BaseFinanceAgent):
             parts.append("  暂未识别到明确的投资参数")
 
         return "\n".join(parts)
+
+
+# 兼容已有外部导入。
+ProfileExtractionAgent = SlotExtractionAgent

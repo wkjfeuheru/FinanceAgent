@@ -10,7 +10,7 @@
 - 合规规则预检 + LLM 深度审查
 
 工作流:
-  START → supervisor → profile_extraction → resolve_stocks(LLM识别)
+  START → supervisor → slot_extraction（画像与股票识别）
        → [data_fetch_single(code) × N 并行] → data_fetch_join
        → [fundamental_single(code) × N 并行] → fundamental_join
        → asset_allocation → compliance → final_snapshot → END
@@ -36,12 +36,11 @@ from finance_agent.config import model
 from finance_agent.core.shared_state import SharedWorkingMemory
 from finance_agent.core.memory import AgentMemoryContext, RedisMemoryStore
 from finance_agent.agents.supervisor import SupervisorAgent, needs_investment_profile
-from finance_agent.agents.profile_extraction import ProfileExtractionAgent
+from finance_agent.agents.profile_extraction import SlotExtractionAgent
 from finance_agent.agents.data_fetch import DataFetchAgent
 from finance_agent.agents.fundamental_analysis import FundamentalAnalysisAgent
 from finance_agent.agents.asset_allocation import AssetAllocationAgent
 from finance_agent.agents.compliance import ComplianceAgent
-from finance_agent.tools.baostock import get_datasource
 from finance_agent.tools.qianfan_search import QianfanSearchError, QianfanStockSearch
 
 
@@ -161,7 +160,7 @@ class AdvisorSystem:
         self.memory = AgentMemoryContext(RedisMemoryStore())
         self.compressor = ContextCompressor()
         self.supervisor = SupervisorAgent(shared_memory=self.shared_memory)
-        self.profile_agent = ProfileExtractionAgent(shared_memory=self.shared_memory)
+        self.slot_agent = SlotExtractionAgent(shared_memory=self.shared_memory)
         self.data_fetch_agent = DataFetchAgent(shared_memory=self.shared_memory)
         self.fundamental_agent = FundamentalAnalysisAgent(shared_memory=self.shared_memory)
         self.allocation_agent = AssetAllocationAgent(shared_memory=self.shared_memory)
@@ -169,12 +168,19 @@ class AdvisorSystem:
         self.stock_search = QianfanStockSearch()
         self._session_counter: Dict[str, int] = {}
         self._progress_context = threading.local()
+        self._progress_callbacks: Dict[str, Callable[[str, str], None]] = {}
+        self._progress_lock = threading.Lock()
         self._trace_lock = threading.Lock()
         self._trace_sequences: Dict[str, int] = {}
         self.graph = self._build_graph()
 
-    def _emit_progress(self, stage: str, message: str) -> None:
-        callback = getattr(self._progress_context, "callback", None)
+    def _emit_progress(self, stage: str, message: str, thread_id: str = "") -> None:
+        callback = None
+        if thread_id:
+            with self._progress_lock:
+                callback = self._progress_callbacks.get(thread_id)
+        if callback is None:
+            callback = getattr(self._progress_context, "callback", None)
         if callback:
             callback(stage, message)
 
@@ -202,6 +208,10 @@ class AdvisorSystem:
             "哪种方案", "哪个方案", "这种方案", "这些方案", "上述方案",
             "选哪个", "选择哪个", "如何选择", "怎么选", "怎样选", "哪个更",
             "哪一个更", "更适合", "哪种更", "两者", "三者", "方案一", "方案二",
+            # 组合构建/配置类追问 — 用户已看过分析，想让系统配置组合
+            "构建组合", "组组合", "建组合", "怎么组合", "如何组合",
+            "怎样组合", "组合一下", "配一下", "配置一下", "调整组合",
+            "分配", "仓位", "权重", "怎么配", "如何配", "怎么买",
         )
         if any(word in message for word in references):
             return True
@@ -211,7 +221,14 @@ class AdvisorSystem:
             r"(?:选|选择|比较|对比).{0,10}(?:哪|哪个|哪种|更适合|更好)|"
             r"(?:哪|哪个|哪种).{0,10}(?:选|选择|适合|更好)"
         )
-        return bool(selection_pattern.search(message))
+        if selection_pattern.search(message):
+            return True
+        # Portfolio construction follow-ups: user asks to build/adjust/allocate
+        # after seeing a stock analysis, without repeating stock names.
+        portfolio_pattern = re.compile(
+            r"(?:帮|给|为)(?:我|我们).{0,6}(?:构建|组成|搭配|组合|配置|分配|调整)",
+        )
+        return bool(portfolio_pattern.search(message))
 
     @staticmethod
     def _history_stock_codes(history: List[Dict[str, str]]) -> List[str]:
@@ -239,15 +256,29 @@ class AdvisorSystem:
         prompt = ChatPromptTemplate.from_messages([
             (
                 "system",
-                "你是专业、审慎的金融分析助手。请把系统生成的已验证数据底稿重新组织成"
-                "对用户当前问题的直接回答，而不是照抄固定报告模板。先回应用户究竟想知道"
-                "什么，再结合候选公司的业务关联、盈利、成长、估值、财务健康和风险说明"
-                "为什么入选、彼此差异以及在什么条件下值得继续关注。结论要有取舍，不能只"
-                "逐项罗列指标；数据缺失时明确说明其如何限制判断。不得虚构底稿外的数据、"
-                "不得承诺收益、不得把研究候选说成确定买入建议。若底稿含来源链接，应保留"
-                "与结论直接相关的链接。标题和措辞必须贴合用户提到的行业或主题。仅输出"
-                "最终中文回复。",
+                "你是专业、审慎的金融分析助手，为机构投资者提供严谨的研究分析。"
+                "请把系统生成的已验证数据底稿重新组织成对用户当前问题的直接回答，"
+                "而不是照抄固定报告模板。先回应用户究竟想知道什么，再结合候选公司"
+                "的业务关联、盈利、成长、估值、财务健康和风险说明为什么入选、"
+                "彼此差异以及在什么条件下值得继续关注。结论要有取舍，不能只逐项罗列"
+                "指标；数据缺失时明确说明其如何限制判断。不得虚构底稿外的数据、不得"
+                "承诺收益、不得把研究候选说成确定买入建议。若底稿含来源链接，应保留"
+                "与结论直接相关的链接。标题和措辞必须贴合用户提到的行业或主题。\n\n"
+                "语言风格要求：使用正式、专业、客观的书面中文。不得使用\"挺不错\"、"
+                "\"还不赖\"、\"可以的\"、\"还行\"、\"蛮好\"、\"OK\"等口语化或网络用语表述。"
+                "不得使用\"咱们\"、\"啦\"、\"哦\"、\"哈\"等随意用语。指标评价使用\"优秀/良好/"
+                "一般/需关注\"等专业评级术语。仅输出最终中文回复。",
             ),
+            (
+                "human",
+                "历史对话：\n{history}\n\n当前问题：{message}\n\n"
+                "本轮已验证的数据底稿：\n{draft}\n\n"
+                "请围绕当前问题给出综合回答，不要复刻底稿的固定章节顺序：",
+            ),
+        ])
+        chain = prompt | model | StrOutputParser()
+        return chain.invoke({
+            "history": self._format_chat_history(state.get("chat_history", [])),
             (
                 "human",
                 "历史对话：\n{history}\n\n当前问题：{message}\n\n"
@@ -371,33 +402,20 @@ class AdvisorSystem:
             )
             return state
 
-        # ── 节点 2: 用户画像抽取 ──
-        def profile_extraction_handler(state: AdvisorState) -> AdvisorState:
-            self._trace_agent(state, "ProfileExtractionAgent")
-            self._emit_progress("profile_extraction", "正在提取本次分析所需信息")
-            # Start from this customer's persisted profile, never from another
-            # request's process-global shared-memory residue.
-            existing = state.get("user_profile", {}) or {}
-            profile = self.profile_agent.extract_profile(state["user_message"], existing)
-            state["user_profile"] = profile
-            # 写入共享内存
-            self.shared_memory.publish_fact("user_profile", profile, source="profile")
-            if "data_fetch" not in (state.get("task_plan", []) or []):
-                state["agent_response"] = self.profile_agent.handle(state["user_message"])
-            return state
-
-        # ── 节点 3: 股票识别（LLM 识别用户消息中的股票名称→代码）──
-        def resolve_stocks_handler(state: AdvisorState) -> AdvisorState:
-            self._trace_agent(state, "StockResolverAgent")
-            self._emit_progress("resolve_stocks", "正在识别并核验股票")
+        # ── 节点 2: 关键信息槽位提取（画像 + 股票识别）──
+        def slot_extraction_handler(state: AdvisorState) -> AdvisorState:
+            self._trace_agent(state, "SlotExtractionAgent")
+            self._emit_progress("slot_extraction", "正在提取画像与股票等关键信息")
             """用 LLM 识别用户消息中的股票名称，返回代码+名称+行业。
 
-            如果 profile_extraction 已通过正则提取到 6 位代码，跳过 LLM 调用。
+            统一提取画像与股票槽位；明确代码可直接走确定性解析。
             """
-            user_profile = state.get("user_profile", {}) or {}
             message = state["user_message"]
-            explicit = self.data_fetch_agent.extract_explicit_stocks(message)
-            detected = explicit or self.data_fetch_agent.resolve_stocks(message)
+            slots = self.slot_agent.extract_slots(message, state.get("user_profile", {}) or {})
+            user_profile = slots["user_profile"]
+            state["user_profile"] = user_profile
+            explicit = slots["resolved_stocks"]
+            detected = explicit
             # 只把当前输入中确实出现的名称/代码视为明确标的，防止模型把行业扩展成股票。
             resolved = list(explicit)
             explicit_codes = re.findall(
@@ -436,18 +454,15 @@ class AdvisorSystem:
             if (not resolved and not state.get("contextual_follow_up")
                     and "data_fetch" in (state.get("task_plan", []) or [])):
                 try:
+                    self._emit_progress("stock_search", "正在搜索相关行业的A股候选")
                     searched = self.stock_search.search(message)
-                    verified = []
-                    datasource = get_datasource()
-                    for stock in searched:
-                        identity = datasource.validate_stock_identity(stock["code"], stock["name"])
-                        if "error" not in identity:
-                            stock["name"] = identity["name"]
-                            verified.append(stock)
-                    if not verified:
-                        raise QianfanSearchError("搜索候选均未通过 BaoStock 代码与名称校验")
-                    resolved = verified
-                    state["candidate_stocks"] = verified
+                    # 搜索工具已经校验代码格式和资料来源。不要在这里再串行登录
+                    # BaoStock 做身份校验：BaoStock SDK 没有请求超时，连接异常会
+                    # 永久占有全局 session 锁。名称以随后 data_fetch 获取的
+                    # basic_info 为最终权威值。
+                    resolved = searched
+                    state["candidate_stocks"] = searched
+                    self._emit_progress("stock_validation", "候选代码已确认，准备获取权威证券信息")
                 except QianfanSearchError as exc:
                     state["stock_search_error"] = str(exc)
                     resolved = []
@@ -456,14 +471,14 @@ class AdvisorSystem:
             if not resolved and isinstance(user_profile, dict):
                 user_profile["stock_codes"] = []
                 state["user_profile"] = user_profile
-                self.shared_memory.publish_fact("user_profile", user_profile, source="resolve_stocks")
+                self.shared_memory.publish_fact("user_profile", user_profile, source="slot_extraction")
             if resolved:
                 codes = list(dict.fromkeys(s["code"] for s in resolved))
                 if isinstance(user_profile, dict):
                     user_profile["stock_codes"] = codes
                     state["user_profile"] = user_profile
                     self.shared_memory.publish_fact(
-                        "user_profile", user_profile, source="resolve_stocks"
+                        "user_profile", user_profile, source="slot_extraction"
                     )
 
             state["resolved_stocks"] = resolved
@@ -474,13 +489,15 @@ class AdvisorSystem:
                     self.shared_memory.publish_fact(
                         f"stock_basic_info_{s['code']}",
                         {"code": s["code"], "name": s["name"], "industry": s.get("industry", "")},
-                        source="resolve_stocks",
+                        source="slot_extraction",
                     )
                 if s.get("source") == "baidu_qianfan_search":
                     self.shared_memory.publish_fact(
                         f"stock_search_candidate_{s['code']}", s, source="baidu_qianfan_search"
                     )
 
+            if "data_fetch" not in (state.get("task_plan", []) or []):
+                state["agent_response"] = self.slot_agent.handle(message)
             return state
 
         # ── 节点 4: 金融数据获取（Send fan-out 按股票并行）──
@@ -518,8 +535,10 @@ class AdvisorSystem:
             }
             return [Send("data_fetch_single", {"code": c, **trace_context}) for c in codes]
 
-        def route_after_profile(state: AdvisorState) -> str:
-            return "resolve_stocks" if "data_fetch" in (state.get("task_plan", []) or []) else "compliance"
+        def route_after_slots(state: AdvisorState):
+            if "data_fetch" not in (state.get("task_plan", []) or []):
+                return "compliance"
+            return route_data_fetch(state)
 
         def route_after_data_fetch(state: AdvisorState):
             if state.get("stock_search_error"):
@@ -535,7 +554,10 @@ class AdvisorSystem:
             """单股票并行节点：调用 agent.handle_single_stock 写入共享内存。"""
             code = state["code"]
             self._trace_agent(state, "DataFetchAgent", code)
-            self._emit_progress("data_fetch", f"正在获取 {code} 的行情与财务数据")
+            self._emit_progress(
+                "data_fetch", f"正在获取 {code} 的行情与财务数据",
+                str(state.get("thread_id", "")),
+            )
             entry = self.data_fetch_agent.handle_single_stock(code)
             # 通过 operator.add reducer 累积到 stock_data_entries
             return {"stock_data_entries": [entry]}
@@ -593,7 +615,10 @@ class AdvisorSystem:
             """单股票并行节点：调用 agent.handle_single_stock 进行 LLM 分析。"""
             code = state["code"]
             self._trace_agent(state, "FundamentalAnalysisAgent", code)
-            self._emit_progress("fundamental_analysis", f"正在分析 {code} 的基本面")
+            self._emit_progress(
+                "fundamental_analysis", f"正在分析 {code} 的基本面",
+                str(state.get("thread_id", "")),
+            )
             entry = self.fundamental_agent.handle_single_stock(code)
             return {"fundamental_entries": [entry]}
 
@@ -732,7 +757,7 @@ class AdvisorSystem:
             return state
 
         # ── 构建图 ─────────────────────────────────────────
-        # START → supervisor → profile_extraction
+        # START → supervisor → slot_extraction（画像与股票识别）
         #       → [data_fetch_single × N 并行] → data_fetch_join
         #       → [fundamental_single × N 并行] → fundamental_join
         #       → route_after_fundamental ─┬─ asset_allocation → compliance
@@ -742,8 +767,7 @@ class AdvisorSystem:
         graph = StateGraph(AdvisorState)
 
         graph.add_node("supervisor", supervisor_handler)
-        graph.add_node("profile_extraction", profile_extraction_handler)
-        graph.add_node("resolve_stocks", resolve_stocks_handler)
+        graph.add_node("slot_extraction", slot_extraction_handler)
 
         # data_fetch fan-out 拆分
         graph.add_node("data_fetch_single", data_fetch_single_handler)
@@ -759,16 +783,11 @@ class AdvisorSystem:
 
         # 边：顺序段
         graph.add_edge(START, "supervisor")
-        graph.add_edge("supervisor", "profile_extraction")
+        graph.add_edge("supervisor", "slot_extraction")
         graph.add_conditional_edges(
-            "profile_extraction", route_after_profile, ["resolve_stocks", "compliance"]
-        )
-
-        # resolve_stocks → fan-out 到 data_fetch_single（条件边 + Send）
-        graph.add_conditional_edges(
-            "resolve_stocks",
-            route_data_fetch,
-            ["data_fetch_single", "data_fetch_join"],
+            "slot_extraction",
+            route_after_slots,
+            ["data_fetch_single", "data_fetch_join", "compliance"],
         )
         # 所有 data_fetch_single 收敛到 data_fetch_join
         graph.add_edge("data_fetch_single", "data_fetch_join")
@@ -820,9 +839,12 @@ class AdvisorSystem:
                 if content:
                     database.append_conversation_message(conversation_id, role, content)
         thread_id = conversation_id
+        if progress_callback:
+            with self._progress_lock:
+                self._progress_callbacks[thread_id] = progress_callback
         fallback_history = chat_history or []
-        memory_data = self.memory.load_context(customer_id, fallback_history)
-        self.memory.append_window_message(customer_id, "user", message)
+        memory_data = self.memory.load_context(customer_id, conversation_id, fallback_history)
+        self.memory.append_window_message(conversation_id, "user", message)
         effective_history = memory_data.get("sliding_window") or fallback_history[-5:]
 
         # 上下文压缩
@@ -860,6 +882,8 @@ class AdvisorSystem:
             result = self.graph.invoke(initial_state)
         finally:
             self._progress_context.callback = None
+            with self._progress_lock:
+                self._progress_callbacks.pop(thread_id, None)
             with self._trace_lock:
                 self._trace_sequences.pop(thread_id, None)
 
@@ -876,19 +900,19 @@ class AdvisorSystem:
             "conversation_id": conversation_id,
         }
 
-        # 更新记忆
+        # 更新记忆（按对话隔离）
         database.rename_conversation_from_message(conversation_id, message)
         database.append_conversation_message(conversation_id, "user", message)
         database.append_conversation_message(
             conversation_id, "assistant", output["response"], {"task_plan": output["task_plan"]},
         )
         self.memory.append_window_message(
-            customer_id, "assistant", output["response"],
+            conversation_id, "assistant", output["response"],
             {"task_plan": output["task_plan"]},
         )
         self.memory.update_profile_from_result(customer_id, message, output)
         self.memory.update_recent_summary(
-            customer_id,
+            conversation_id,
             fallback_history + [
                 {"role": "user", "content": message},
                 {"role": "assistant", "content": output["response"], "metadata": output},
@@ -921,11 +945,17 @@ class AdvisorSystem:
         task = asyncio.create_task(asyncio.to_thread(
             self.handle_message, message, chat_history, customer_id, report, conversation_id
         ))
+        heartbeat_elapsed = 0.0
         while not task.done() or not progress_queue.empty():
             try:
-                yield await asyncio.wait_for(progress_queue.get(), timeout=0.1)
+                yield await asyncio.wait_for(progress_queue.get(), timeout=1.0)
+                heartbeat_elapsed = 0.0
             except asyncio.TimeoutError:
-                continue
+                heartbeat_elapsed += 1.0
+                if heartbeat_elapsed >= 15.0:
+                    # 保持 SSE 连接活跃，避免代理或浏览器把长耗时分析误判为超时。
+                    yield {"type": "heartbeat"}
+                    heartbeat_elapsed = 0.0
         result = await task
 
         # 发送最终回复

@@ -232,9 +232,10 @@ async def list_conversations(customer_id: str) -> dict[str, Any]:
     system = get_system()
     database = system.memory.database
     items = database.list_conversations(customer_id)
-    # One-time migration of the pre-conversation Redis sliding window.
+    # One-time migration of the pre-conversation Redis sliding window
+    # (by customer_id, not conversation_id).
     if not items:
-        legacy_messages = system.memory.get_window_messages(customer_id)
+        legacy_messages = system.memory.store.get_messages(customer_id)
         if legacy_messages:
             first_user = next(
                 (str(item.get("content", "")) for item in legacy_messages if item.get("role") == "user"),

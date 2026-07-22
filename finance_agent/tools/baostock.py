@@ -1,11 +1,13 @@
-"""BaoStock A 股数据工具：附带本地缓存降级。"""
+"""BaoStock A 股数据工具：附带本地缓存降级与硬超时保护。"""
 
 from __future__ import annotations
 
 import json
 import re
+import socket
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
@@ -13,9 +15,10 @@ from typing import Any, Callable
 import baostock as bs
 import pandas as pd
 
-from finance_agent.config import STOCK_CACHE_DIR, STOCK_CACHE_TTL
+from finance_agent.config import BAOSTOCK_SOCKET_TIMEOUT, STOCK_CACHE_DIR, STOCK_CACHE_TTL
 
 _A_SHARE_CODE = re.compile(r"^(?:(?:60|68|00|30)\d{4}|[84]\d{5})$")
+_HARD_TIMEOUT = max(BAOSTOCK_SOCKET_TIMEOUT + 10, 25)
 
 
 def _number(value: Any, default: float = 0.0) -> float:
@@ -25,11 +28,44 @@ def _number(value: Any, default: float = 0.0) -> float:
         return default
 
 
+class _BaoStockTimeout(Exception):
+    """BaoStock 操作在硬超时内未完成。"""
+
+
+def _run_with_timeout(func: Callable[[], Any], timeout: float = _HARD_TIMEOUT) -> Any:
+    """在子线程中执行 func，超时则抛出 _BaoStockTimeout。
+
+    这是最后的防线：socket.setdefaulttimeout 覆盖 TCP 读写，子线程
+    join(timeout) 覆盖 DNS/SSL/协议握手等无法被 socket timeout 保护的情况。
+    """
+    result: list[Any] = []
+    error: list[Exception | None] = [None]
+    done = threading.Event()
+
+    def _target() -> None:
+        try:
+            result.append(func())
+        except Exception as exc:
+            error[0] = exc
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=_target, daemon=True)
+    thread.start()
+    if not done.wait(timeout):
+        raise _BaoStockTimeout(f"BaoStock 操作超时（{timeout:.0f}s 未完成）")
+    if error[0] is not None:
+        raise error[0]
+    return result[0] if result else None
+
+
 class BaostockDataSource:
     """BaoStock 适配器，对外保持原有行情/基本面字段格式。"""
 
     _session_lock = threading.RLock()
     _cache_lock = threading.RLock()
+    _unavailable_until = 0.0
+    _last_connection_error = ""
 
     def __init__(self, cache_dir: str = STOCK_CACHE_DIR, cache_ttl: int = STOCK_CACHE_TTL):
         self.cache_dir = Path(cache_dir)
@@ -56,22 +92,65 @@ class BaostockDataSource:
     def _error(code: str, kind: str, exc: Exception | str) -> dict[str, Any]:
         return {"code": code, "error": f"获取{kind}失败: {exc}", "source": "baostock"}
 
+    # ── 批量查询：一次登录完成多个查询，大幅减少网络往返 ──────────
+
+    @classmethod
+    def _query_batch(cls, queries: list[Callable[[], Any]]) -> list[pd.DataFrame]:
+        """在单次登录会话中执行多个查询，返回与 queries 等长的 DataFrame 列表。
+
+        每个 query 是 () -> bs query result 的无参可调用对象。
+        """
+        if not queries:
+            return []
+
+        with cls._session_lock:
+            if time.monotonic() < cls._unavailable_until:
+                raise RuntimeError(
+                    cls._last_connection_error or "BaoStock 暂时不可用，已跳过重复联网请求"
+                )
+
+            previous_timeout = socket.getdefaulttimeout()
+            socket.setdefaulttimeout(BAOSTOCK_SOCKET_TIMEOUT)
+            try:
+                login = bs.login()
+                if login.error_code != "0":
+                    raise RuntimeError(login.error_msg)
+
+                results: list[pd.DataFrame] = []
+                for query in queries:
+                    result = query()
+                    if result.error_code != "0":
+                        raise RuntimeError(result.error_msg)
+                    rows: list[list[str]] = []
+                    while result.next():
+                        rows.append(result.get_row_data())
+                    results.append(
+                        pd.DataFrame(rows, columns=result.fields) if rows
+                        else pd.DataFrame(columns=result.fields or [])
+                    )
+
+                cls._unavailable_until = 0.0
+                cls._last_connection_error = ""
+                return results
+            except Exception as exc:
+                cls._last_connection_error = f"BaoStock 连接失败: {exc}"
+                cls._unavailable_until = time.monotonic() + 60.0
+                raise
+            finally:
+                try:
+                    bs.logout()
+                finally:
+                    socket.setdefaulttimeout(previous_timeout)
+
     @classmethod
     def _query(cls, query: Callable[[], Any]) -> pd.DataFrame:
-        with cls._session_lock:
-            login = bs.login()
-            if login.error_code != "0":
-                raise RuntimeError(login.error_msg)
-            try:
-                result = query()
-                if result.error_code != "0":
-                    raise RuntimeError(result.error_msg)
-                rows: list[list[str]] = []
-                while result.next():
-                    rows.append(result.get_row_data())
-                return pd.DataFrame(rows, columns=result.fields)
-            finally:
-                bs.logout()
+        """执行单个查询（登录→查询→登出），带硬超时保护。"""
+        return _run_with_timeout(
+            lambda: cls._query_batch([query])[0],
+            _HARD_TIMEOUT,
+        )
+
+    # ── 缓存管理 ────────────────────────────────────────────────
 
     @staticmethod
     def _safe_cache_key(key: str) -> str:
@@ -176,6 +255,45 @@ class BaostockDataSource:
                 return cached, True
             raise
 
+    # ── 批量加载：一次远端请求获取多条缓存缺失数据（减少 login/logout）──
+
+    def _load_or_fetch_batch(self, entries: list[tuple[str, Callable[[], pd.DataFrame]]]) -> list[tuple[str, pd.DataFrame, bool]]:
+        """批量加载多条数据。
+
+        每条 entry 是 (cache_key, loader)。返回 [(key, df, from_cache), ...]。
+        先检查缓存，只对未命中且未过期的条目做一次批量远端请求。
+        """
+        results: list[tuple[str, pd.DataFrame, bool]] = []
+        missing: list[tuple[str, Callable[[], pd.DataFrame]]] = []
+
+        for key, loader in entries:
+            cached, cached_at = self._read_cache_entry(key)
+            if cached is not None and time.time() - cached_at <= self.cache_ttl:
+                results.append((key, cached, True))
+            else:
+                missing.append((key, loader))
+
+        if missing:
+            # 一次登录完成所有远端查询
+            try:
+                frames = self._query_batch([loader for _, loader in missing])
+                for (key, _), frame in zip(missing, frames):
+                    self._write_cache_entry(
+                        key,
+                        {"cached_at": time.time(), "data": frame.to_dict(orient="records")},
+                    )
+                    results.append((key, frame, False))
+            except Exception:
+                # 远端失败时尝试回退到过期缓存
+                for key, _loader in missing:
+                    cached, _ = self._read_cache_entry(key)
+                    if cached is not None and not cached.empty:
+                        results.append((key, cached, True))
+                    else:
+                        raise
+
+        return results
+
     def _history_frame(self, code: str, period: str, start: str, end: str, adjust: str) -> tuple[pd.DataFrame, bool]:
         frequency = {"daily": "d", "weekly": "w", "monthly": "m"}[period]
         adjustflag = {"qfq": "2", "hfq": "1", "": "3"}.get(adjust, "2")
@@ -277,32 +395,81 @@ class BaostockDataSource:
             return self._error(str(stock_code).strip(), "股票身份校验", exc)
 
     def get_financial_indicators(self, stock_code: str) -> dict[str, Any]:
+        """获取财务指标。
+
+        优化：一次登录批量查询 profit + growth + balance，以及最多 8 个季度
+        的 profit 数据。从原来的 11 次 login/logout 压缩为最多 1-2 次。
+        """
         try:
             code = self._code(stock_code)
             now = datetime.now()
+
+            # 先尝试最近一个季度的缓存命中
             frame = pd.DataFrame()
+            year = 0
+            quarter = 0
             for offset in range(8):
                 index = now.year * 4 + (now.month - 1) // 3 - offset
-                year, q0 = divmod(index - 1, 4)
-                quarter = q0 + 1
-                frame, _ = self._load_or_fetch(f"profit_{code}_{year}_{quarter}", lambda y=year, q=quarter: self._query(lambda: bs.query_profit_data(code=self._bs_code(code), year=y, quarter=q)))
-                if not frame.empty:
+                y, q0 = divmod(index - 1, 4)
+                q = q0 + 1
+                cached_key = f"profit_{code}_{y}_{q}"
+                cached, cached_at = self._read_cache_entry(cached_key)
+                if cached is not None and time.time() - cached_at <= self.cache_ttl:
+                    frame = cached
+                    year, quarter = y, q
                     break
+
+            # 无缓存命中：批量查询最近几个季度的 profit 数据
             if frame.empty:
-                return self._error(code, "财务指标", "最近八个季度均无数据")
+                entries: list[tuple[str, Callable[[], pd.DataFrame]]] = []
+                quarters_searched: list[tuple[int, int]] = []
+                for offset in range(4):  # 只批量查询最近 4 个季度
+                    index = now.year * 4 + (now.month - 1) // 3 - offset
+                    y, q0 = divmod(index - 1, 4)
+                    q = q0 + 1
+                    key = f"profit_{code}_{y}_{q}"
+                    quarters_searched.append((y, q))
+                    entries.append((
+                        key,
+                        lambda yy=y, qq=q: bs.query_profit_data(
+                            code=self._bs_code(code), year=yy, quarter=qq,
+                        ),
+                    ))
+                try:
+                    batch_results = self._load_or_fetch_batch(entries)
+                    for (key, df, _), (y_found, q_found) in zip(batch_results, quarters_searched):
+                        if not df.empty:
+                            frame = df
+                            year, quarter = y_found, q_found
+                            break
+                except Exception:
+                    pass
+
+            if frame.empty:
+                return self._error(code, "财务指标", "最近季度均无财务数据")
+
+            # 批量获取同季度的 growth 和 balance 数据
+            growth = pd.DataFrame()
+            balance = pd.DataFrame()
+            try:
+                growth_balance_entries = [
+                    (f"growth_{code}_{year}_{quarter}", lambda: bs.query_growth_data(
+                        code=self._bs_code(code), year=year, quarter=quarter,
+                    )),
+                    (f"balance_{code}_{year}_{quarter}", lambda: bs.query_balance_data(
+                        code=self._bs_code(code), year=year, quarter=quarter,
+                    )),
+                ]
+                gb_results = self._load_or_fetch_batch(growth_balance_entries)
+                for key, df, _ in gb_results:
+                    if "growth" in key:
+                        growth = df
+                    elif "balance" in key:
+                        balance = df
+            except Exception:
+                pass
+
             row = frame.iloc[0]
-            growth, _ = self._load_or_fetch(
-                f"growth_{code}_{year}_{quarter}",
-                lambda: self._query(lambda: bs.query_growth_data(
-                    code=self._bs_code(code), year=year, quarter=quarter
-                )),
-            )
-            balance, _ = self._load_or_fetch(
-                f"balance_{code}_{year}_{quarter}",
-                lambda: self._query(lambda: bs.query_balance_data(
-                    code=self._bs_code(code), year=year, quarter=quarter
-                )),
-            )
             growth_row = growth.iloc[0] if not growth.empty else {}
             balance_row = balance.iloc[0] if not balance.empty else {}
             return {

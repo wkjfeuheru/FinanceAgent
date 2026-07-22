@@ -31,7 +31,7 @@ _SUPERVISOR_PROMPT = """你是金融投顾系统的任务规划器。
   missing_info 必须为空，且不执行 asset_allocation。
 
 ## 可用的子Agent
-- profile_extraction: 抽取用户画像（风险偏好、预算、股票代码、持有时间）
+- slot_extraction: 提取关键槽位（风险偏好、预算、持有时间、股票身份）
 - data_fetch: 从 BaoStock 获取股票行情和财务指标
 - fundamental_analysis: 基本面分析（盈利能力、成长性、估值、财务健康）
 - asset_allocation: 资产配置建议（MPT均值-方差优化）
@@ -47,10 +47,10 @@ _SUPERVISOR_PROMPT = """你是金融投顾系统的任务规划器。
 
 ## 示例
 用户输入："我想投资10万元，关注贵州茅台(600519)和招商银行(600036)，持有3个月"
-输出：{{"missing_info": ["risk_preference"], "task_plan": ["profile_extraction", "data_fetch", "fundamental_analysis", "asset_allocation", "compliance"], "reason": "需要先提取参数、获取数据、分析基本面，再进行组合优化与合规审查"}}
+输出：{{"missing_info": ["risk_preference"], "task_plan": ["slot_extraction", "data_fetch", "fundamental_analysis", "asset_allocation", "compliance"], "reason": "需要先提取参数、获取数据、分析基本面，再进行组合优化与合规审查"}}
 
 用户输入："推荐几只AI行业股票"
-输出：{{"missing_info": ["risk_preference", "budget_amount", "holding_period"], "task_plan": ["profile_extraction", "data_fetch", "fundamental_analysis", "compliance"], "reason": "建立AI研究候选池后获取数据并比较基本面"}}
+输出：{{"missing_info": ["risk_preference", "budget_amount", "holding_period"], "task_plan": ["slot_extraction", "data_fetch", "fundamental_analysis", "compliance"], "reason": "建立AI研究候选池后获取数据并比较基本面"}}
 """
 
 
@@ -58,15 +58,24 @@ _INVESTMENT_ADVICE_MARKERS = (
     "推荐", "选股", "筛选", "候选", "值得投资", "投资建议",
     "买入", "卖出", "能买吗", "能不能买", "该不该买", "怎么买",
     "资产配置", "组合配置", "配置方案", "如何配置", "怎么配置", "配置比例",
-    "各配多少", "哪种方案", "哪个方案", "仓位", "分配资金",
+    "各配多少", "哪种方案", "哪个方案", "仓位", "分配资金", "分配下资金",
     "投多少钱", "持有多久", "组合优化", "最大夏普", "最小方差",
+    "构建组合", "组组合", "建组合", "怎么组合", "如何组合", "组合一下",
+    "配一下", "配置一下", "调整组合", "调整权重", "调整下权重", "权重", "怎么配", "如何配",
+    "优化组合", "优化下组合",
 )
 
 
 def needs_investment_profile(message: str) -> bool:
     """仅对明确涉及投资决策或配置的请求收集风险、资金和期限。"""
     normalized = (message or "").strip().lower()
-    return any(marker in normalized for marker in _INVESTMENT_ADVICE_MARKERS)
+    if any(marker in normalized for marker in _INVESTMENT_ADVICE_MARKERS):
+        return True
+    # 组合构建/配置追问：用户已看过股票分析，想让系统组合
+    return bool(re.search(
+        r"(?:帮|给|为)(?:我|我们).{0,6}(?:构建|组成|搭配|组合|配置|分配|调整)",
+        normalized,
+    ))
 
 
 def needs_asset_allocation(message: str) -> bool:
@@ -76,10 +85,26 @@ def needs_asset_allocation(message: str) -> bool:
         "资产配置", "组合配置", "配置方案", "配置比例", "各配多少",
         "哪种方案", "哪个方案", "仓位分配", "分配资金", "组合优化",
         "最大夏普", "最小方差",
+        "构建组合", "组组合", "建组合", "组合一下",
+        "配一下", "配置一下", "调整组合", "调整权重", "调整下权重",
+        "权重分配", "怎么组合", "如何组合", "怎样组合", "怎么配", "如何配",
+        "分配下", "资金分配", "配比", "配置权重", "组合权重",
+        # 含"权重"的追问几乎总是组合配置意图
+        "权重",
     )
     if any(marker in normalized for marker in direct_markers):
         return True
-    return bool(re.search(r"(?:组合|股票|标的).{0,12}(?:如何|怎么|怎样|应该如何)?配置", normalized))
+    # 正则兜底：
+    # 1. "组合/股票/标的 + 如何/怎么/怎样/应该如何 + 配置"
+    if re.search(r"(?:组合|股票|标的).{0,12}(?:如何|怎么|怎样|应该如何)?配置", normalized):
+        return True
+    # 2. "帮/给/为我 + 构建/组成/搭配/组合/配置/分配/调整 组合"
+    if re.search(r"(?:帮|给|为)(?:我|我们).{0,6}(?:构建|组成|搭配|组合|配置|分配|调整|优化)", normalized):
+        return True
+    # 3. "组合/配置/分配/调整/优化 + 一下/权重/比例"
+    if re.search(r"(?:组合|配置|分配|调整|优化)(?:一下|权重|比例)", normalized):
+        return True
+    return False
 
 
 class SupervisorAgent(BaseFinanceAgent):
@@ -126,7 +151,7 @@ class SupervisorAgent(BaseFinanceAgent):
             return {
                 "missing_info": ["risk_preference", "budget_amount", "holding_period"],
                 "task_plan": [
-                    "profile_extraction", "data_fetch", "fundamental_analysis",
+                    "slot_extraction", "data_fetch", "fundamental_analysis",
                     "asset_allocation", "compliance",
                 ],
                 "reason": "用户明确要求多标的组合配置，需获取行情与历史数据后执行资产配置优化",
@@ -136,14 +161,14 @@ class SupervisorAgent(BaseFinanceAgent):
         if any(word in message for word in screening_words):
             return {
                 "missing_info": ["risk_preference", "budget_amount", "holding_period"],
-                "task_plan": ["profile_extraction", "data_fetch", "fundamental_analysis", "compliance"],
+                "task_plan": ["slot_extraction", "data_fetch", "fundamental_analysis", "compliance"],
                 "reason": "当前消息需要先搜索相关行业或主题的A股候选，再获取数据并分析",
             }
 
         if any(word in message for word in ("基本面", "财务分析", "公司分析")):
             return {
                 "missing_info": [],
-                "task_plan": ["profile_extraction", "data_fetch", "fundamental_analysis", "compliance"],
+                "task_plan": ["slot_extraction", "data_fetch", "fundamental_analysis", "compliance"],
                 "reason": "基本面问题需要提取股票、获取财务数据、执行基本面分析和敏感词检查",
             }
 
@@ -154,30 +179,30 @@ class SupervisorAgent(BaseFinanceAgent):
             })
             parsed = safe_parse_json(result, {
                 "missing_info": [],
-                "task_plan": ["profile_extraction", "data_fetch", "fundamental_analysis", "asset_allocation", "compliance"],
+                "task_plan": ["slot_extraction", "data_fetch", "fundamental_analysis", "asset_allocation", "compliance"],
                 "reason": "任务计划解析失败，使用完整分析流程",
             })
         except Exception:
             parsed = {
                 "missing_info": [],
-                "task_plan": ["profile_extraction", "data_fetch", "fundamental_analysis", "asset_allocation", "compliance"],
+                "task_plan": ["slot_extraction", "data_fetch", "fundamental_analysis", "asset_allocation", "compliance"],
                 "reason": "任务规划异常，使用完整分析流程",
             }
 
         if not parsed.get("task_plan"):
-            parsed["task_plan"] = ["profile_extraction", "data_fetch", "fundamental_analysis", "asset_allocation", "compliance"]
+            parsed["task_plan"] = ["slot_extraction", "data_fetch", "fundamental_analysis", "asset_allocation", "compliance"]
 
-        allowed = ["profile_extraction", "data_fetch", "fundamental_analysis", "asset_allocation", "compliance"]
+        allowed = ["slot_extraction", "data_fetch", "fundamental_analysis", "asset_allocation", "compliance"]
         requested = {step for step in parsed["task_plan"] if step in allowed}
         if needs_asset_allocation(message):
             requested.add("asset_allocation")
         # 自动补齐数据依赖，但不添加与问题无关的下游 Agent。
         if "asset_allocation" in requested:
-            requested.update({"profile_extraction", "data_fetch", "fundamental_analysis"})
+            requested.update({"slot_extraction", "data_fetch", "fundamental_analysis"})
         elif "fundamental_analysis" in requested:
-            requested.update({"profile_extraction", "data_fetch"})
+            requested.update({"slot_extraction", "data_fetch"})
         elif "data_fetch" in requested:
-            requested.add("profile_extraction")
+            requested.add("slot_extraction")
         requested.add("compliance")
         parsed["task_plan"] = [step for step in allowed if step in requested]
 

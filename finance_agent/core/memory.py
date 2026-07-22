@@ -13,11 +13,11 @@ from finance_agent.core.database import SQLiteStore, get_database
 
 @dataclass
 class UserProfileCard:
-    """金融投顾用户画像卡。"""
+    """金融投顾用户画像卡 —— 用户级别的长期档案，跨对话共享。"""
     customer_id: str
     risk_preference: str = ""          # 风险偏好：R1低风险 ~ R5高风险
     budget_amount: float = 0.0          # 预算金额（元）
-    stock_codes: list[str] = field(default_factory=list)  # 关注的A股代码
+    stock_codes: list[str] = field(default_factory=list)  # 用户主动关注的A股代码（跨对话持久）
     holding_period: str = ""           # 持有时间（如 "3个月"、"1年"）
     investment_goal: str = ""          # 投资目标（如 "稳健增值"、"高收益"）
     confirmed_facts: dict[str, Any] = field(default_factory=dict)
@@ -25,9 +25,7 @@ class UserProfileCard:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "UserProfileCard":
-        """从字典创建画像卡，忽略未知字段以兼容旧数据。"""
         known_fields = {f.name for f in cls.__dataclass_fields__.values()}
-        # 兼容旧字段名 investment_horizon -> holding_period
         if "investment_horizon" in data and "holding_period" not in data:
             data["holding_period"] = data.pop("investment_horizon")
         filtered = {k: v for k, v in data.items() if k in known_fields}
@@ -35,6 +33,16 @@ class UserProfileCard:
 
 
 class RedisMemoryStore:
+    """对话级别的 Redis 记忆存储。
+
+    每个 conversation_id 独立拥有：
+    - 滑动窗口消息（最近 N 条）
+    - 近期摘要
+    - 用户画像缓存（从 SQLite 同步过来的快照）
+
+    对话之间完全隔离。
+    """
+
     def __init__(self, redis_url: str = REDIS_URL):
         self.redis_url = redis_url
         self._client = None
@@ -53,6 +61,8 @@ class RedisMemoryStore:
             self._last_error = str(exc)
             return False
 
+    # ── 消息历史（按 conversation 隔离，保留兼容旧接口）─────────
+
     def append_message(
         self,
         customer_id: str,
@@ -60,6 +70,7 @@ class RedisMemoryStore:
         content: str,
         metadata: dict[str, Any] | None = None,
     ) -> bool:
+        """Deprecated: 旧接口，写入 customer-scoped 消息列表。"""
         payload = {
             "role": role,
             "content": content,
@@ -67,7 +78,9 @@ class RedisMemoryStore:
             "timestamp": datetime.now().isoformat(timespec="seconds"),
         }
         try:
-            self._get_client().rpush(self._key(customer_id), json.dumps(payload, ensure_ascii=False))
+            self._get_client().rpush(
+                self._key(customer_id), json.dumps(payload, ensure_ascii=False)
+            )
             self._last_error = ""
             return True
         except redis.RedisError as exc:
@@ -81,11 +94,7 @@ class RedisMemoryStore:
         except redis.RedisError as exc:
             self._last_error = str(exc)
             return []
-
-        messages = []
-        for value in values:
-            messages.append(json.loads(value))
-        return messages
+        return [json.loads(value) for value in values]
 
     def clear_messages(self, customer_id: str) -> bool:
         try:
@@ -97,6 +106,92 @@ class RedisMemoryStore:
         except redis.RedisError as exc:
             self._last_error = str(exc)
             return False
+
+    # ── 对话级窗口消息 ─────────────────────────────────────────
+
+    def append_window_message(
+        self,
+        conversation_id: str,
+        role: str,
+        content: str,
+        metadata: dict[str, Any] | None = None,
+        window_size: int = 5,
+    ) -> bool:
+        """向指定对话的滑动窗口追加一条消息。"""
+        payload = {
+            "role": role,
+            "content": content,
+            "metadata": metadata or {},
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+        }
+        try:
+            client = self._get_client()
+            key = self._window_key(conversation_id)
+            client.rpush(key, json.dumps(payload, ensure_ascii=False))
+            client.ltrim(key, -abs(window_size), -1)
+            self._last_error = ""
+            return True
+        except redis.RedisError as exc:
+            self._last_error = str(exc)
+            return False
+
+    def get_window_messages(self, conversation_id: str, window_size: int = 5) -> list[dict[str, Any]]:
+        try:
+            values = self._get_client().lrange(
+                self._window_key(conversation_id), -abs(window_size), -1,
+            )
+            self._last_error = ""
+        except redis.RedisError as exc:
+            self._last_error = str(exc)
+            return []
+        return [json.loads(value) for value in values]
+
+    def set_window_messages(
+        self,
+        conversation_id: str,
+        messages: list[dict[str, Any]],
+        window_size: int = 5,
+    ) -> bool:
+        """用给定消息列表替换指定对话的滑动窗口。"""
+        try:
+            client = self._get_client()
+            key = self._window_key(conversation_id)
+            client.delete(key)
+            for msg in messages[-window_size:]:
+                payload = {
+                    "role": msg.get("role", ""),
+                    "content": msg.get("content", ""),
+                    "metadata": msg.get("metadata", {}),
+                    "timestamp": msg.get("timestamp", datetime.now().isoformat(timespec="seconds")),
+                }
+                client.rpush(key, json.dumps(payload, ensure_ascii=False))
+            self._last_error = ""
+            return True
+        except redis.RedisError as exc:
+            self._last_error = str(exc)
+            return False
+
+    # ── 对话级摘要 ─────────────────────────────────────────────
+
+    def get_summary(self, conversation_id: str) -> str:
+        try:
+            value = self._get_client().get(self._summary_key(conversation_id))
+            self._last_error = ""
+            return value or ""
+        except redis.RedisError as exc:
+            self._last_error = str(exc)
+            return ""
+
+    def set_summary(self, conversation_id: str, summary: str) -> bool:
+        try:
+            self._get_client().set(self._summary_key(conversation_id), summary)
+            self._last_error = ""
+            return True
+        except redis.RedisError as exc:
+            self._last_error = str(exc)
+            return False
+
+    # ── Redis key 命名 ──────────────────────────────────────────
 
     def _get_client(self):
         if self._client is None:
@@ -111,20 +206,45 @@ class RedisMemoryStore:
         return self._client
 
     def _key(self, customer_id: str) -> str:
+        """Deprecated: 旧版 customer-scoped 消息列表键。"""
         return f"finance_cs:{customer_id.upper()}:messages"
 
+    # 用户级别的 profile 缓存（SQLite 是持久主存储，Redis 是加速缓存）
     def _profile_key(self, customer_id: str) -> str:
         return f"finance_cs:{customer_id.upper()}:profile"
 
-    def _summary_key(self, customer_id: str) -> str:
-        return f"finance_cs:{customer_id.upper()}:recent_summary"
+    def _summary_key(self, conversation_id: str) -> str:
+        """对话级摘要键。"""
+        return f"finance_cs:conv:{conversation_id}:summary"
 
-    def _window_key(self, customer_id: str) -> str:
-        return f"finance_cs:{customer_id.upper()}:window"
+    def _window_key(self, conversation_id: str) -> str:
+        """对话级滑动窗口键。"""
+        return f"finance_cs:conv:{conversation_id}:window"
+
+    def clear_conversation(self, conversation_id: str) -> bool:
+        """清除指定对话的记忆数据（窗口 + 摘要）。"""
+        try:
+            self._get_client().delete(
+                self._window_key(conversation_id),
+                self._summary_key(conversation_id),
+            )
+            self._last_error = ""
+            return True
+        except redis.RedisError as exc:
+            self._last_error = str(exc)
+            return False
 
 
 class AgentMemoryContext:
-    """三层 Agent memory：长期档案、近期摘要、滑动窗口。"""
+    """按对话隔离的 Agent 记忆上下文。
+
+    三层记忆：
+    1. 用户档案卡 —— SQLite 持久化，跨对话共享（风险偏好、预算等）
+    2. 对话摘要 —— 当前对话的压缩历史（Redis，按 conversation_id）
+    3. 滑动窗口 —— 当前对话的最近 N 条消息（Redis，按 conversation_id）
+
+    对话 A 的窗口和摘要不会泄露到对话 B。
+    """
 
     def __init__(
         self,
@@ -139,15 +259,28 @@ class AgentMemoryContext:
         self.summary_size = summary_size
         self.max_context_chars = max_context_chars
 
+    # ── 对话级 load/save ────────────────────────────────────────
+
     def load_context(
         self,
         customer_id: str,
+        conversation_id: str,
         fallback_messages: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        """加载当前对话的完整上下文。
+
+        Args:
+            customer_id: 用户 ID（用于加载长期画像）
+            conversation_id: 对话 ID（用于加载对话级记忆）
+            fallback_messages: 当 Redis 中无窗口消息时的回退
+
+        Returns:
+            包含 profile、summary、sliding_window、context_text 的字典
+        """
         profile = self.get_profile(customer_id)
         profile_text = self.format_profile(profile)
-        recent_summary = self.get_recent_summary(customer_id)
-        sliding_window = self.get_window_messages(customer_id)
+        recent_summary = self.store.get_summary(conversation_id)
+        sliding_window = self.store.get_window_messages(conversation_id, self.window_size)
         if not sliding_window and fallback_messages:
             sliding_window = fallback_messages[-self.window_size:]
         sliding_window_text = self.format_messages(sliding_window)
@@ -163,43 +296,32 @@ class AgentMemoryContext:
 
     def append_window_message(
         self,
-        customer_id: str,
+        conversation_id: str,
         role: str,
         content: str,
         metadata: dict[str, Any] | None = None,
     ) -> bool:
-        payload = {
-            "role": role,
-            "content": content,
-            "metadata": metadata or {},
-            "timestamp": datetime.now().isoformat(timespec="seconds"),
-        }
-        try:
-            client = self.store._get_client()
-            client.rpush(self.store._window_key(customer_id), json.dumps(payload, ensure_ascii=False))
-            client.ltrim(self.store._window_key(customer_id), -self.window_size, -1)
-            self.store._last_error = ""
-            return True
-        except redis.RedisError as exc:
-            self.store._last_error = str(exc)
-            return False
+        """向当前对话的滑动窗口追加一条消息。"""
+        return self.store.append_window_message(
+            conversation_id, role, content, metadata, self.window_size,
+        )
 
-    def get_window_messages(self, customer_id: str) -> list[dict[str, Any]]:
-        try:
-            values = self.store._get_client().lrange(
-                self.store._window_key(customer_id),
-                -self.window_size,
-                -1,
-            )
-            self.store._last_error = ""
-        except redis.RedisError as exc:
-            self.store._last_error = str(exc)
-            return []
-        return [json.loads(value) for value in values]
+    def update_recent_summary(
+        self,
+        conversation_id: str,
+        messages: list[dict[str, Any]],
+        summary_text: str = "",
+    ) -> bool:
+        """更新当前对话的近期摘要。"""
+        recent = messages[-self.summary_size:]
+        summary = summary_text.strip() or self.build_rule_summary(recent)
+        return self.store.set_summary(conversation_id, summary)
+
+    # ── 用户档案（跨对话共享的长期信息） ────────────────────────
 
     def get_profile(self, customer_id: str) -> UserProfileCard:
         data = self.database.get_profile(customer_id)
-        # One-time compatibility migration for profiles created before SQLite.
+        # One-time compatibility migration from Redis profile cache to SQLite.
         if not data:
             try:
                 raw = self.store._get_client().get(self.store._profile_key(customer_id))
@@ -224,38 +346,17 @@ class AgentMemoryContext:
             self.store._last_error = str(exc)
             return False
 
-    def get_recent_summary(self, customer_id: str) -> str:
-        try:
-            value = self.store._get_client().get(self.store._summary_key(customer_id))
-            self.store._last_error = ""
-            return value or ""
-        except redis.RedisError as exc:
-            self.store._last_error = str(exc)
-            return ""
-
-    def update_recent_summary(
-        self,
-        customer_id: str,
-        messages: list[dict[str, Any]],
-        summary_text: str = "",
-    ) -> bool:
-        recent = messages[-self.summary_size:]
-        summary = summary_text.strip() or self.build_rule_summary(recent)
-        try:
-            self.store._get_client().set(self.store._summary_key(customer_id), summary)
-            self.store._last_error = ""
-            return True
-        except redis.RedisError as exc:
-            self.store._last_error = str(exc)
-            return False
-
     def update_profile_from_result(
         self,
         customer_id: str,
         user_message: str,
         result: dict[str, Any],
     ) -> bool:
-        """从用户消息中抽取投资参数更新画像。"""
+        """从用户消息和本轮结果中抽取投资参数，更新用户长期画像。
+
+        注意：只有用户在消息中明确输入的股票代码才进入长期画像。
+        行业/主题搜索返回的推荐候选不进入。
+        """
         profile = self.get_profile(customer_id)
         changed = False
         message = user_message.lower()
@@ -275,7 +376,7 @@ class AgentMemoryContext:
                     changed = True
                 break
 
-        # 持有时间抽取（X天/周/月/年）
+        # 持有时间抽取
         horizon_match = re.search(r"(\d+)\s*(天|周|个月|月|年)", user_message)
         if horizon_match:
             horizon = "".join(horizon_match.groups())
@@ -283,7 +384,7 @@ class AgentMemoryContext:
                 profile.holding_period = horizon
                 changed = True
 
-        # 预算金额抽取（支持 万/元，转换为元）
+        # 预算金额抽取
         for amount_str in re.findall(r"(\d+(?:\.\d+)?)\s*万", user_message):
             try:
                 value = float(amount_str) * 10000
@@ -297,15 +398,14 @@ class AgentMemoryContext:
             for amount_str in re.findall(r"(\d+(?:\.\d+)?)\s*元", user_message):
                 try:
                     value = float(amount_str)
-                    if value >= 100:  # 过滤小额
+                    if value >= 100:
                         profile.budget_amount = value
                         changed = True
                         break
                 except ValueError:
                     pass
 
-        # 只持久化用户在当前消息中明确输入名称或代码的股票。
-        # 行业/主题搜索返回的推荐候选只用于本轮分析，不进入关注列表。
+        # 只持久化用户在当前消息中明确输入的股票代码
         stock_codes = re.findall(
             r"(?<!\d)(60\d{4}|00\d{4}|30\d{4}|68\d{4}|8\d{5}|4\d{5})(?!\d)",
             user_message,
@@ -331,6 +431,8 @@ class AgentMemoryContext:
             return self.save_profile(profile)
         return True
 
+    # ── 格式化工具 ───────────────────────────────────────────────
+
     def compose_context(self, profile_text: str, recent_summary: str, sliding_window_text: str) -> str:
         sections = []
         if profile_text:
@@ -340,13 +442,13 @@ class AgentMemoryContext:
         if recent_summary and remaining > 0:
             summary = self._fit_text(recent_summary, max(0, remaining))
             if summary:
-                sections.append(f"[近期对话摘要 - 最近10次]\n{summary}")
+                sections.append(f"[对话摘要 - 当前对话]\n{summary}")
         remaining = self.max_context_chars - sum(len(section) for section in sections)
 
         if sliding_window_text and remaining > 0:
             window = self._fit_window_text(sliding_window_text, remaining)
             if window:
-                sections.append(f"[滑动窗口 - 最近5条]\n{window}")
+                sections.append(f"[滑动窗口 - 当前对话最近 {self.window_size} 条]\n{window}")
 
         return "\n\n".join(sections)
 

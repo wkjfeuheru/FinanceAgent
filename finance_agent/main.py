@@ -60,4 +60,6 @@ async def root():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("finance_agent.main:app", host="127.0.0.1", port=8000, reload=True)
+    # 默认使用单进程运行。自动重载会创建父子进程；当分析线程仍在执行时，
+    # reloader 关闭可能等待 executor 数分钟，并留下占用端口的子进程。
+    uvicorn.run("finance_agent.main:app", host="127.0.0.1", port=8000, reload=False)

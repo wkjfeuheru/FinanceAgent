@@ -129,7 +129,13 @@ export async function healthCheck(): Promise<HealthResponse> {
 export async function chatStream(req: ChatRequest, callbacks: StreamCallbacks): Promise<void> {
   let response: Response
   const controller = new AbortController()
-  const timeoutId = window.setTimeout(() => controller.abort(), 300000)
+  const idleTimeoutMs = 600000
+  let timeoutId = 0
+  const resetIdleTimeout = () => {
+    if (timeoutId) window.clearTimeout(timeoutId)
+    timeoutId = window.setTimeout(() => controller.abort(), idleTimeoutMs)
+  }
+  resetIdleTimeout()
   let terminalEventReceived = false
 
   const guardedCallbacks: StreamCallbacks = {
@@ -157,6 +163,7 @@ export async function chatStream(req: ChatRequest, callbacks: StreamCallbacks): 
       body: JSON.stringify(req),
       signal: controller.signal,
     })
+    resetIdleTimeout()
   } catch (err: any) {
     window.clearTimeout(timeoutId)
     guardedCallbacks.onError(
@@ -180,6 +187,7 @@ export async function chatStream(req: ChatRequest, callbacks: StreamCallbacks): 
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
+      resetIdleTimeout()
       buffer += decoder.decode(value, { stream: true })
 
       // 按 SSE 事件块分割（每个事件以两个换行结尾）

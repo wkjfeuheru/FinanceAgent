@@ -105,12 +105,6 @@ const isEmpty = computed(
             v-if="msg.data?.allocation_result && Object.keys(msg.data.allocation_result).length"
             class="extra-data"
           >
-            <div v-if="false && msg.data.task_plan && msg.data.task_plan.length" class="task-plan">
-              <div class="plan-title">任务计划：</div>
-              <ol>
-                <li v-for="(t, i) in msg.data.task_plan" :key="i">{{ t }}</li>
-              </ol>
-            </div>
             <div
               v-if="msg.data.allocation_result && Object.keys(msg.data.allocation_result).length"
               class="alloc-summary"
