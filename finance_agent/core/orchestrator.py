@@ -279,16 +279,6 @@ class AdvisorSystem:
         chain = prompt | model | StrOutputParser()
         return chain.invoke({
             "history": self._format_chat_history(state.get("chat_history", [])),
-            (
-                "human",
-                "历史对话：\n{history}\n\n当前问题：{message}\n\n"
-                "本轮已验证的数据底稿：\n{draft}\n\n"
-                "请围绕当前问题给出综合回答，不要复刻底稿的固定章节顺序：",
-            ),
-        ])
-        chain = prompt | model | StrOutputParser()
-        return chain.invoke({
-            "history": self._format_chat_history(state.get("chat_history", [])),
             "message": state["user_message"],
             "draft": state.get("agent_response", "")[:12000],
         }).strip()
