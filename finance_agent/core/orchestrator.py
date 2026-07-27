@@ -532,24 +532,47 @@ class AdvisorSystem:
                         self._format_chat_history(state.get("chat_history", [])),
                     )
                     result = slot_tool.invoke(args)
+                    if not isinstance(result, dict):
+                        raise ValueError("槽位工具返回值必须是字典")
+
+                    extracted_profile = result.get("user_profile", {}) or {}
+                    stocks = result.get("resolved_stocks", []) or []
+                    result_explicit_codes = result.get("explicit_stock_codes", []) or []
+                    if not isinstance(extracted_profile, dict):
+                        raise ValueError("user_profile 必须是字典")
+                    if not isinstance(stocks, list) or not all(
+                        isinstance(stock, dict) for stock in stocks
+                    ):
+                        raise ValueError("resolved_stocks 必须是字典列表")
+                    if not isinstance(result_explicit_codes, list):
+                        raise ValueError("explicit_stock_codes 必须是列表")
+
+                    next_profile = dict(user_profile)
+                    for key, value in extracted_profile.items():
+                        if key != "stock_codes" and value not in (None, "", 0, [], {}):
+                            next_profile[key] = value
+                    next_all_stocks = list(all_stocks)
+                    known = {
+                        str(stock.get("code"))
+                        for stock in next_all_stocks
+                        if isinstance(stock, dict) and stock.get("code")
+                    }
+                    for stock in stocks:
+                        if stock.get("code") and str(stock["code"]) not in known:
+                            next_all_stocks.append(stock)
+                            known.add(str(stock["code"]))
+                    next_explicit_codes = list(explicit_codes)
+                    next_explicit_codes.extend(
+                        str(code) for code in result_explicit_codes if code
+                    )
                 except Exception as exc:
                     errors.append(f"{intent}: {exc}")
                     continue
 
-                extracted_profile = result.get("user_profile", {}) or {}
-                for key, value in extracted_profile.items():
-                    if key != "stock_codes" and value not in (None, "", 0, [], {}):
-                        user_profile[key] = value
-                stocks = list(result.get("resolved_stocks", []) or [])
+                user_profile = next_profile
+                all_stocks = next_all_stocks
+                explicit_codes = next_explicit_codes
                 intent_stocks[intent] = stocks
-                known = {str(stock.get("code")) for stock in all_stocks if stock.get("code")}
-                for stock in stocks:
-                    if stock.get("code") and str(stock["code"]) not in known:
-                        all_stocks.append(stock)
-                        known.add(str(stock["code"]))
-                explicit_codes.extend(
-                    str(code) for code in result.get("explicit_stock_codes", []) if code
-                )
 
             pending = state.get("business_state", {}) or {}
             if not all_stocks and pending.get("status") == "waiting_for_input":

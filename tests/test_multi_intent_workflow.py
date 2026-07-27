@@ -1,3 +1,6 @@
+import pytest
+
+import finance_agent.core.orchestrator as orchestrator_module
 from finance_agent.core.orchestrator import AdvisorSystem
 
 
@@ -149,3 +152,78 @@ def test_malformed_model_tool_calls_use_deterministic_fallback():
     assert result["slot_tool_source"] == "deterministic_fallback"
     assert result["slot_tool_called"] is True
     assert calls == [query]
+
+
+@pytest.mark.parametrize("bad_result", [
+    None,
+    {
+        "user_profile": {},
+        "resolved_stocks": [None],
+        "explicit_stock_codes": [],
+    },
+])
+def test_malformed_tool_result_does_not_block_other_intents(monkeypatch, bad_result):
+    system = AdvisorSystem()
+    market_query = "分析600519基本面"
+    allocation_query = "用10万元做稳健配置"
+    system.supervisor.plan_tasks = lambda *_args, **_kwargs: {
+        "intents": [
+            {
+                "intent": "market_query", "query": market_query,
+                "confidence": 0.95, "reason": "基本面",
+            },
+            {
+                "intent": "asset_allocation", "query": allocation_query,
+                "confidence": 0.95, "reason": "配置",
+            },
+        ],
+        "finance_related": True,
+        "intent_source": "model",
+        "task_plan": [
+            "data_fetch", "fundamental_analysis", "asset_allocation", "compliance",
+        ],
+    }
+    system.supervisor.decide_slot_tool_calls = lambda *_args, **_kwargs: [
+        {
+            "name": "extract_finance_slots",
+            "args": {"intent": "market_query", "query": market_query},
+            "id": "market-call",
+        },
+        {
+            "name": "extract_finance_slots",
+            "args": {"intent": "asset_allocation", "query": allocation_query},
+            "id": "allocation-call",
+        },
+    ]
+
+    class FakeSlotTool:
+        def invoke(self, args):
+            if args["intent"] == "market_query":
+                return bad_result
+            return {
+                "user_profile": {
+                    "risk_preference": "R2 中低风险",
+                    "budget_amount": 100000,
+                    "holding_period": "1年",
+                    "investment_goal": "稳健增值",
+                    "stock_codes": [],
+                },
+                "resolved_stocks": [],
+                "explicit_stock_codes": [],
+            }
+
+    monkeypatch.setattr(
+        orchestrator_module,
+        "create_extract_finance_slots_tool",
+        lambda *_args, **_kwargs: FakeSlotTool(),
+    )
+
+    thread_id = "bad-tool-result-none" if bad_result is None else "bad-tool-result-stock"
+    result = system.graph.invoke(
+        make_state("分析600519基本面，并用10万元稳健配置", thread_id),
+        config={"configurable": {"thread_id": thread_id}},
+    )
+
+    assert result["user_profile"]["budget_amount"] == 100000
+    assert "market_query" in result["slot_tool_error"]
+    assert result["slot_tool_called"] is True
