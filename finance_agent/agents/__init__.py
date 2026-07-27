@@ -2,7 +2,6 @@
 
 from finance_agent.agents.base import BaseFinanceAgent
 from finance_agent.agents.supervisor import SupervisorAgent
-from finance_agent.agents.profile_extraction import ProfileExtractionAgent, SlotExtractionAgent
 from finance_agent.agents.data_fetch import DataFetchAgent
 from finance_agent.agents.fundamental_analysis import FundamentalAnalysisAgent
 from finance_agent.agents.asset_allocation import AssetAllocationAgent
@@ -11,8 +10,6 @@ from finance_agent.agents.compliance import ComplianceAgent
 __all__ = [
     "BaseFinanceAgent",
     "SupervisorAgent",
-    "ProfileExtractionAgent",
-    "SlotExtractionAgent",
     "DataFetchAgent",
     "FundamentalAnalysisAgent",
     "AssetAllocationAgent",

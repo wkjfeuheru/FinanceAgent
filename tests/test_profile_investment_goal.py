@@ -4,8 +4,8 @@ from unittest.mock import Mock
 
 os.environ.setdefault("DEEPSEEK_API_KEY", "sk-test-placeholder")
 
-from finance_agent.agents.profile_extraction import (
-    SlotExtractionAgent,
+from finance_agent.tools.finance_slots import (
+    FinanceSlotsExtractor,
     extract_investment_goal,
 )
 from finance_agent.core.memory import AgentMemoryContext, UserProfileCard
@@ -20,7 +20,7 @@ class InvestmentGoalExtractionTests(unittest.TestCase):
         self.assertEqual(extract_investment_goal("我希望长期增值"), "长期增值")
 
     def test_screening_fast_path_keeps_investment_goal(self):
-        agent = SlotExtractionAgent()
+        agent = FinanceSlotsExtractor()
         profile = agent.extract_profile(
             "我的投资目标是财富增值，推荐一只AI行业股票",
             existing_profile={},
@@ -28,7 +28,7 @@ class InvestmentGoalExtractionTests(unittest.TestCase):
         self.assertEqual(profile["investment_goal"], "财富增值")
 
     def test_stock_code_fast_path_keeps_investment_goal(self):
-        agent = SlotExtractionAgent()
+        agent = FinanceSlotsExtractor()
         profile = agent.extract_profile(
             "投资目标为稳健增值，分析一下600519",
             existing_profile={},
@@ -52,6 +52,17 @@ class InvestmentGoalPersistenceTests(unittest.TestCase):
         self.assertTrue(saved)
         self.assertEqual(profile.investment_goal, "财富增值")
         memory.save_profile.assert_called_once_with(profile)
+
+
+class FinanceSlotsExtractorTests(unittest.TestCase):
+    def test_extractor_is_not_an_agent(self):
+        extractor = FinanceSlotsExtractor()
+
+        self.assertFalse(hasattr(extractor, "handle"))
+        self.assertEqual(
+            extractor.extract_slots("分析600519")["explicit_stock_codes"],
+            ["600519"],
+        )
 
 
 if __name__ == "__main__":

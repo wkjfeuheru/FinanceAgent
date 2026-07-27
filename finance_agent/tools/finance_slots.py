@@ -20,7 +20,6 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import BaseTool, tool
 
-from finance_agent.agents.base import BaseFinanceAgent
 from finance_agent.config import get_model_for_agent, safe_parse_json
 
 
@@ -86,20 +85,11 @@ def extract_investment_goal(message: str) -> str:
     return next((goal for goal in known_goals if goal in text), "")
 
 
-class SlotExtractionAgent(BaseFinanceAgent):
+class FinanceSlotsExtractor:
     """统一提取用户画像和股票等关键槽位。"""
 
-    agent_name: str = "slot_extraction"
-
-    def __init__(self, shared_memory=None, checkpointer=None):
-        super().__init__(shared_memory=shared_memory, checkpointer=checkpointer)
+    def __init__(self):
         self._extract_chain = None
-
-    def _get_tools(self) -> list:
-        return []
-
-    def _get_system_prompt(self) -> str:
-        return _PROFILE_EXTRACTION_PROMPT
 
     @property
     def extract_chain(self):
@@ -283,47 +273,8 @@ class SlotExtractionAgent(BaseFinanceAgent):
             "explicit_stock_codes": explicit_codes,
         }
 
-    def handle(
-        self,
-        message: str,
-        customer_id: str = "",
-        chat_history: List[Dict[str, str]] | None = None,
-        thread_id: str | None = None,
-        memory_context: str = "",
-    ) -> str:
-        """抽取画像并写入共享内存。"""
-        # 从共享内存读取已有画像
-        existing = {}
-        if self.shared_memory:
-            existing = self.shared_memory.query("user_profile", {}) or {}
-
-        profile = self.extract_profile(message, existing)
-
-        # 写入共享内存
-        if self.shared_memory:
-            self.shared_memory.publish_fact("user_profile", profile, source=self.agent_name)
-
-        # 生成摘要回复
-        parts = ["已抽取用户画像："]
-        if profile.get("risk_preference"):
-            parts.append(f"  风险偏好：{profile['risk_preference']}")
-        if profile.get("budget_amount"):
-            parts.append(f"  预算金额：{profile['budget_amount']:,.0f} 元")
-        if profile.get("stock_codes"):
-            parts.append(f"  关注股票：{', '.join(profile['stock_codes'])}")
-        if profile.get("holding_period"):
-            parts.append(f"  持有时间：{profile['holding_period']}")
-        if profile.get("investment_goal"):
-            parts.append(f"  投资目标：{profile['investment_goal']}")
-
-        if len(parts) == 1:
-            parts.append("  暂未识别到明确的投资参数")
-
-        return "\n".join(parts)
-
-
 def create_extract_finance_slots_tool(
-    agent: SlotExtractionAgent,
+    extractor: FinanceSlotsExtractor,
     existing_profile: Dict[str, Any] | None = None,
     conversation_context: str = "",
 ) -> BaseTool:
@@ -339,7 +290,7 @@ def create_extract_finance_slots_tool(
         仅在具体个股行情/基本面、明确股票比较或资产配置时调用。
         板块行情、主题候选搜索、泛化选股和理财闲聊不得调用。
         """
-        result = agent.extract_slots(
+        result = extractor.extract_slots(
             query,
             existing_profile=existing_profile or {},
             conversation_context=conversation_context,
@@ -347,7 +298,3 @@ def create_extract_finance_slots_tool(
         return {"intent": intent, **result}
 
     return extract_finance_slots
-
-
-# 兼容已有外部导入。
-ProfileExtractionAgent = SlotExtractionAgent
