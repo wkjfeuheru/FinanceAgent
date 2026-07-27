@@ -13,5 +13,3 @@ numpy
 scipy
 pydantic
 requests
-transformers>=4.44
-torch>=2.2

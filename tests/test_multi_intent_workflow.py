@@ -16,10 +16,10 @@ def test_classifier_failure_returns_explicit_error_instead_of_chat_response():
     system = AdvisorSystem()
 
     class FailedClassifier:
-        def predict(self, *_args, **_kwargs):
+        def classify(self, *_args, **_kwargs):
             raise TimeoutError("timed out")
 
-    system.supervisor._zero_shot_classifier = FailedClassifier()
+    system.supervisor._intent_classifier = FailedClassifier()
     system.compliance_agent.review = lambda **_kwargs: {"pass": True, "reason": ""}
     state = make_state("列出中际旭创的一些基本面指标", "classification-error")
 
@@ -41,12 +41,57 @@ def make_state(message, thread_id):
         "candidate_stocks": [], "stock_search_error": "", "stock_resolution_error": "",
         "stock_data": {}, "fundamental_analysis": {}, "allocation_result": {},
         "agent_response": "", "compliance_result": {}, "memory_context": "",
+        "intent_context": "",
         "shared_memory_snapshot": {}, "thread_id": thread_id, "run_id": "run-1",
         "explicit_user_stock_codes": [], "stock_data_entries": [],
         "fundamental_entries": [], "detected_intents": [], "intent_results": {},
         "intent_source": "", "finance_related": True, "intent_stocks": {},
         "slot_tool_calls": [], "slot_tool_called": False,
         "slot_tool_source": "skipped", "slot_tool_error": "",
+    }
+
+
+def test_supervisor_receives_intent_context_and_pending_fields():
+    system = AdvisorSystem()
+    captured = {}
+
+    def plan_tasks(message, context_summary, pending_allocation, pending_fields):
+        captured.update({
+            "message": message,
+            "context_summary": context_summary,
+            "pending_allocation": pending_allocation,
+            "pending_fields": pending_fields,
+        })
+        return {
+            "intents": [{
+                "intent": "casual_chat", "query": message, "confidence": 0.9,
+                "reason": "测试", "evidence": message,
+                "execution_mode": "conversation", "requires_slot_extraction": False,
+            }],
+            "finance_related": True, "intent_source": "glm",
+            "task_plan": ["casual_chat", "compliance"],
+        }
+
+    system.supervisor.plan_tasks = plan_tasks
+    system.supervisor.chat = lambda *_args, **_kwargs: "收到"
+    system.compliance_agent.review = lambda **_kwargs: {"pass": True, "reason": ""}
+    state = make_state("2万元", "pending-context")
+    state["intent_context"] = "最近对话摘要"
+    state["business_state"] = {
+        "status": "waiting_for_input",
+        "intent": "asset_allocation",
+        "missing_fields": ["budget_amount", "holding_period"],
+    }
+
+    system.graph.invoke(
+        state, config={"configurable": {"thread_id": "pending-context"}},
+    )
+
+    assert captured == {
+        "message": "2万元",
+        "context_summary": "最近对话摘要",
+        "pending_allocation": True,
+        "pending_fields": ["budget_amount", "holding_period"],
     }
 
 

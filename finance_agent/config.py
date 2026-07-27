@@ -71,13 +71,17 @@ BAOSTOCK_SOCKET_TIMEOUT = float(os.getenv("BAOSTOCK_SOCKET_TIMEOUT", "15"))
 QIANFAN_API_KEY = os.getenv("QIANFAN_API_KEY", "").strip()
 QIANFAN_SEARCH_MODEL = os.getenv("QIANFAN_SEARCH_MODEL", "deepseek-v4-flash").strip()
 QIANFAN_SEARCH_TIMEOUT = int(os.getenv("QIANFAN_SEARCH_TIMEOUT", "60"))
+ZHIPU_API_KEY = os.getenv("ZHIPU_API_KEY", "").strip()
+ZHIPU_BASE_URL = os.getenv(
+    "ZHIPU_BASE_URL",
+    "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+).strip()
+ZHIPU_INTENT_MODEL = os.getenv("ZHIPU_INTENT_MODEL", "glm-4.7-flash").strip()
+ZHIPU_INTENT_TIMEOUT = float(os.getenv("ZHIPU_INTENT_TIMEOUT", "30"))
+ZHIPU_INTENT_MAX_RETRIES = int(os.getenv("ZHIPU_INTENT_MAX_RETRIES", "1"))
 LLM_REQUEST_TIMEOUT = float(os.getenv("LLM_REQUEST_TIMEOUT", "45"))
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "1"))
 FINAL_SYNTHESIS_TIMEOUT = float(os.getenv("FINAL_SYNTHESIS_TIMEOUT", "20"))
-INTENT_MODEL_CACHE_DIR = os.getenv("INTENT_MODEL_CACHE_DIR", "").strip()
-INTENT_MAX_LENGTH = int(os.getenv("INTENT_MAX_LENGTH", "256"))
-INTENT_SCORE_THRESHOLD = float(os.getenv("INTENT_SCORE_THRESHOLD", "0.5"))
-INTENT_DEVICE = int(os.getenv("INTENT_DEVICE", "-1"))
 
 if not DEEPSEEK_API_KEY or DEEPSEEK_API_KEY == "sk-your-api-key-here":
     raise ValueError("请在操作系统环境变量中设置真实的 DEEPSEEK_API_KEY")

@@ -559,6 +559,19 @@ class AgentMemoryContext:
             facts.append(f"{role}: {content}")
         return "\n".join(facts[-self.summary_size:])
 
+    def build_intent_context(self, messages: list[dict[str, Any]]) -> str:
+        """为意图模型压缩最近三轮对话，不包含长期画像或累计摘要。"""
+        lines: list[str] = []
+        for item in list(messages or [])[-6:]:
+            role = "用户" if item.get("role") == "user" else "客服"
+            content = str(item.get("content", "")).strip().replace("\n", " ")
+            if len(content) > 180:
+                content = content[:177] + "..."
+            if content:
+                lines.append(f"{role}: {content}")
+        summary = "\n".join(lines)
+        return self._fit_text(summary, 1500)
+
     def _fit_text(self, text: str, limit: int) -> str:
         if limit <= 0:
             return ""

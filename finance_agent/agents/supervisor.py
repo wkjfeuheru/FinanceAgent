@@ -10,9 +10,9 @@ from __future__ import annotations
 import json
 import logging
 import math
-import re
-import time
 from typing import Any, Callable, Dict, List
+
+import requests
 
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
@@ -20,146 +20,130 @@ from langchain_core.tools import BaseTool
 
 from finance_agent.agents.base import BaseFinanceAgent
 from finance_agent.config import (
-    INTENT_DEVICE,
-    INTENT_MAX_LENGTH,
-    INTENT_MODEL_CACHE_DIR,
-    INTENT_SCORE_THRESHOLD,
+    ZHIPU_API_KEY,
+    ZHIPU_BASE_URL,
+    ZHIPU_INTENT_MAX_RETRIES,
+    ZHIPU_INTENT_MODEL,
+    ZHIPU_INTENT_TIMEOUT,
     get_supervisor_model,
 )
 
 
-INTENT_LABELS = (
-    "market_query",
-    "stock_recommendation",
-    "asset_allocation",
-    "casual_chat",
-)
-CANDIDATE_LABELS = {
-    "market_query": (
-        "查询具体股票的价格、走势、估值、财务、业绩或基本面指标，"
-        "以及指数、行业、板块或市场行情"
-    ),
-    "stock_recommendation": "推荐股票或判断某只股票是否值得买入",
-    "asset_allocation": "根据金额、期限和风险偏好制定资产配置方案",
-    "casual_chat": "一般理财知识、投资心态或非任务型金融交流",
+_GLM_INTENT_PROMPT = """你是金融工作流的多意图分类器，只分类当前用户消息，不回答问题。
+近期上下文摘要只能用于解析“它、这些股票、继续配置”等指代，不得从上下文新增当前消息未表达的意图。
+历史中出现预算、风险偏好、期限或配置任务，不代表本轮要求资产配置。
+只有当前消息明确要求资金分配、仓位、权重、组合构建，或者 pending_allocation=true 且当前消息在补充待填字段时，才能输出 asset_allocation。
+“最近AI行业有什么值得投资的股票，为我推荐几个”只能输出 stock_recommendation，execution_mode=candidate_search。
+
+允许的意图与 execution_mode：
+- market_query: security_analysis | market_overview
+- stock_recommendation: candidate_search | security_comparison
+- asset_allocation: allocation
+- casual_chat: conversation
+
+每个意图必须包含 intent、query、confidence、reason、evidence、execution_mode、requires_slot_extraction。
+evidence 必须逐字摘自 current_message，不能来自上下文。query 只包含该意图对应的当前轮子请求。
+只输出 JSON 对象：{"intents": [...], "finance_related": true}。"""
+
+_CLASSIFIER_MODES = {
+    "market_query": {"security_analysis", "market_overview"},
+    "stock_recommendation": {"candidate_search", "security_comparison"},
+    "asset_allocation": {"allocation"},
+    "casual_chat": {"conversation"},
 }
-HYPOTHESIS_TEMPLATE = "这段用户消息的意图是{}。"
-_INTENT_ZERO_SHOT_MODEL = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"
-_SPLIT_PATTERN = re.compile(
-    r"(?:[。！？!?；;\n]+|(?:，|,)?\s*(?:同时|另外|然后|顺便|并且|而且|再者)\s*)"
-)
-_FINANCIAL_TERMS = (
-    "投资", "理财", "股票", "基金", "行情", "市场", "板块", "行业", "资产",
-    "配置", "组合", "股价", "指数", "证券", "买入", "卖出", "仓位", "收益",
-)
 
 
-def split_intent_queries(message: str) -> list[str]:
-    """Split explicit independent clauses, preserving the original on ambiguity."""
-    text = (message or "").strip()
-    if not text:
-        return []
-    parts = [part.strip(" ，,") for part in _SPLIT_PATTERN.split(text)]
-    parts = [part for part in parts if len(part) >= 2]
-    return parts if len(parts) > 1 else [text]
+class IntentClassificationError(RuntimeError):
+    """GLM 意图识别不可用或返回非法协议。"""
 
 
-class ZeroShotIntentClassifier:
-    """Lazy multilingual NLI classifier with stable internal intent names."""
+class GLMIntentClassifier:
+    """通过智谱 OpenAI 兼容接口执行多轮上下文意图分类。"""
 
     def __init__(
         self,
-        model_name: str,
-        max_length: int = 256,
-        score_threshold: float = 0.5,
-        device: int = -1,
-        cache_dir: str | None = None,
-        pipeline_factory: Callable[..., Any] | None = None,
+        api_key: str,
+        base_url: str,
+        model: str,
+        timeout: float = 30,
+        max_retries: int = 1,
+        requester: Callable[..., Any] = requests.post,
     ) -> None:
-        self.model_name = model_name
-        self.max_length = max_length
-        self.score_threshold = score_threshold
-        self.device = device
-        self.cache_dir = cache_dir or None
-        self._pipeline_factory = pipeline_factory
-        self._pipeline = None
-
-    def _load(self) -> None:
-        if self._pipeline is not None:
-            return
-        if self._pipeline_factory is None:
-            from transformers import pipeline
-
-            self._pipeline_factory = pipeline
-        kwargs: dict[str, Any] = {"model": self.model_name, "device": self.device}
-        if self.cache_dir:
-            kwargs["model_kwargs"] = {"cache_dir": self.cache_dir}
-        self._pipeline = self._pipeline_factory("zero-shot-classification", **kwargs)
+        self.api_key = api_key.strip()
+        self.base_url = base_url.strip()
+        self.model = model.strip()
+        self.timeout = timeout
+        self.max_retries = max(0, max_retries)
+        self.requester = requester
 
     @staticmethod
-    def _input_text(message: str, context: str, pending_allocation: bool) -> str:
-        if not context and not pending_allocation:
-            return message
-        pending = "是" if pending_allocation else "否"
-        return f"[上下文] {context or '无'} [待补充配置] {pending} [当前输入] {message}"
+    def _validate(payload: Any, message: str) -> dict[str, Any]:
+        if not isinstance(payload, dict) or not isinstance(payload.get("intents"), list):
+            raise IntentClassificationError("GLM 意图响应必须包含 intents 列表")
+        raw_intents = payload["intents"]
+        valid: list[dict[str, Any]] = []
+        for item in raw_intents:
+            if not isinstance(item, dict):
+                continue
+            intent = str(item.get("intent", "")).strip()
+            mode = str(item.get("execution_mode", "")).strip()
+            evidence = str(item.get("evidence", "")).strip()
+            if intent not in _CLASSIFIER_MODES or mode not in _CLASSIFIER_MODES[intent]:
+                continue
+            if not evidence or evidence not in message:
+                continue
+            valid.append(dict(item))
+        if raw_intents and not valid:
+            raise IntentClassificationError("GLM 意图响应没有可验证的当前轮证据")
+        return {
+            "intents": valid,
+            "finance_related": bool(payload.get("finance_related", False)),
+        }
 
-    def _scores(
-        self, message: str, context: str, pending_allocation: bool,
-    ) -> dict[str, float]:
-        self._load()
-        result = self._pipeline(
-            self._input_text(message, context, pending_allocation),
-            list(CANDIDATE_LABELS.values()),
-            multi_label=True,
-            hypothesis_template=HYPOTHESIS_TEMPLATE,
-            truncation=True,
-            max_length=self.max_length,
-        )
-        label_to_intent = {label: intent for intent, label in CANDIDATE_LABELS.items()}
-        scores = {intent: 0.0 for intent in INTENT_LABELS}
-        for label, score in zip(result["labels"], result["scores"]):
-            intent = label_to_intent.get(label)
-            if intent is not None:
-                scores[intent] = float(score)
-        return scores
-
-    def predict(
+    def classify(
         self,
         message: str,
-        context: str = "",
+        context_summary: str = "",
         pending_allocation: bool = False,
+        pending_fields: list[str] | None = None,
     ) -> dict[str, Any]:
-        started = time.perf_counter()
-        whole = self._scores(message, context, pending_allocation)
-        segments = split_intent_queries(message)
-        segment_scores = (
-            [(segment, self._scores(segment, context, pending_allocation)) for segment in segments]
-            if len(segments) > 1 else []
-        )
-        intents: list[dict[str, Any]] = []
-        for intent in INTENT_LABELS:
-            matched = [
-                (text, scores[intent])
-                for text, scores in segment_scores
-                if scores[intent] >= self.score_threshold
-            ]
-            confidence = max([whole[intent], *(score for _, score in matched)])
-            if confidence < self.score_threshold:
-                continue
-            query = "；".join(text for text, _ in matched) if matched else message.strip()
-            intents.append({
-                "intent": intent,
-                "query": query,
-                "confidence": confidence,
-                "reason": "多语言 NLI 零样本分类",
-            })
-        business_match = any(item["intent"] != "casual_chat" for item in intents)
-        normalized = message.strip()
-        return {
-            "intents": intents,
-            "finance_related": business_match or any(term in normalized for term in _FINANCIAL_TERMS),
-            "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+        if not self.api_key:
+            raise IntentClassificationError("缺少 ZHIPU_API_KEY")
+        request_input = {
+            "current_message": message.strip(),
+            "recent_context_summary": context_summary.strip(),
+            "pending_allocation": bool(pending_allocation),
+            "pending_fields": list(pending_fields or []),
         }
+        body = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": _GLM_INTENT_PROMPT},
+                {"role": "user", "content": json.dumps(request_input, ensure_ascii=False)},
+            ],
+            "temperature": 0,
+            "thinking": {"type": "disabled"},
+            "response_format": {"type": "json_object"},
+        }
+        error: Exception | None = None
+        for _attempt in range(self.max_retries + 1):
+            try:
+                response = self.requester(
+                    self.base_url,
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=body,
+                    timeout=self.timeout,
+                )
+                response.raise_for_status()
+                content = response.json()["choices"][0]["message"]["content"]
+                parsed = json.loads(content)
+                return self._validate(parsed, message)
+            except Exception as exc:
+                error = exc
+        raise IntentClassificationError(f"GLM 意图识别失败：{error}") from error
 
 
 _SUPERVISOR_PROMPT = """你是金融投顾系统的监督者，负责根据已识别意图编排工作流。
@@ -172,12 +156,6 @@ _EXECUTION_MODES = {
     "stock_recommendation": {"candidate_search": False, "security_comparison": True},
     "asset_allocation": {"allocation": True},
     "casual_chat": {"conversation": False},
-}
-_NLI_MODE_DEFAULTS = {
-    "market_query": "unsupported",
-    "stock_recommendation": "candidate_search",
-    "asset_allocation": "allocation",
-    "casual_chat": "conversation",
 }
 _LOGGER = logging.getLogger(__name__)
 
@@ -207,6 +185,7 @@ def normalize_intent_item(
         "query": str(item.get("query", "")).strip() or fallback_query.strip(),
         "confidence": min(max(confidence, 0.0), 1.0),
         "reason": str(item.get("reason", "")).strip(),
+        "evidence": str(item.get("evidence", "")).strip(),
         "execution_mode": mode,
         "requires_slot_extraction": bool(
             _EXECUTION_MODES[intent].get(mode, False)
@@ -231,7 +210,7 @@ class SupervisorAgent(BaseFinanceAgent):
 
     def __init__(self, shared_memory=None, checkpointer=None):
         super().__init__(shared_memory=shared_memory, checkpointer=checkpointer)
-        self._zero_shot_classifier = None
+        self._intent_classifier = None
 
     def _get_tools(self) -> list:
         return []
@@ -240,39 +219,51 @@ class SupervisorAgent(BaseFinanceAgent):
         return _SUPERVISOR_PROMPT
 
     @property
-    def zero_shot_classifier(self) -> ZeroShotIntentClassifier:
-        if self._zero_shot_classifier is None:
-            self._zero_shot_classifier = ZeroShotIntentClassifier(
-                _INTENT_ZERO_SHOT_MODEL,
-                max_length=INTENT_MAX_LENGTH,
-                score_threshold=INTENT_SCORE_THRESHOLD,
-                device=INTENT_DEVICE,
-                cache_dir=INTENT_MODEL_CACHE_DIR,
+    def intent_classifier(self) -> GLMIntentClassifier:
+        if self._intent_classifier is None:
+            self._intent_classifier = GLMIntentClassifier(
+                api_key=ZHIPU_API_KEY,
+                base_url=ZHIPU_BASE_URL,
+                model=ZHIPU_INTENT_MODEL,
+                timeout=ZHIPU_INTENT_TIMEOUT,
+                max_retries=ZHIPU_INTENT_MAX_RETRIES,
             )
-        return self._zero_shot_classifier
+        return self._intent_classifier
 
-    def _predict_zero_shot(
-        self, message: str, context: str, pending_allocation: bool
+    def _classify_with_glm(
+        self,
+        message: str,
+        context_summary: str,
+        pending_allocation: bool,
+        pending_fields: list[str],
     ) -> Dict[str, Any]:
-        return self.zero_shot_classifier.predict(message, context, pending_allocation)
+        return self.intent_classifier.classify(
+            message, context_summary, pending_allocation, pending_fields,
+        )
 
     def classify_intents(
         self,
         message: str,
-        context: str = "",
+        context_summary: str = "",
         pending_allocation: bool = False,
+        pending_fields: list[str] | None = None,
     ) -> Dict[str, Any]:
-        """使用固定多语言 NLI 分类器识别并合并本轮全部意图。"""
-        source = "zero_shot"
+        """使用 GLM 结合近期摘要识别并合并本轮全部意图。"""
+        source = "glm"
         classification_error = False
         try:
-            parsed = self._predict_zero_shot(message, context, pending_allocation)
+            parsed = self._classify_with_glm(
+                message,
+                context_summary,
+                pending_allocation,
+                list(pending_fields or []),
+            )
         except Exception as exc:
-            _LOGGER.warning("intent_zero_shot_unavailable error=%s", exc)
+            _LOGGER.warning("intent_glm_unavailable error=%s", exc)
             parsed = {}
             classification_error = True
 
-        def merge_valid(payload: Any, classifier_source: str) -> dict[str, dict[str, Any]]:
+        def merge_valid(payload: Any) -> dict[str, dict[str, Any]]:
             merged_items: dict[str, dict[str, Any]] = {}
             raw_intents = payload.get("intents", []) if isinstance(payload, dict) else []
             if not isinstance(raw_intents, list):
@@ -282,12 +273,10 @@ class SupervisorAgent(BaseFinanceAgent):
                     continue
                 candidate = dict(raw_item)
                 intent = str(candidate.get("intent", "")).strip()
-                if classifier_source == "zero_shot" and intent in _NLI_MODE_DEFAULTS:
-                    candidate["execution_mode"] = _NLI_MODE_DEFAULTS[intent]
                 item = normalize_intent_item(candidate, message)
                 if item is None:
                     continue
-                if item["confidence"] < INTENT_SCORE_THRESHOLD:
+                if item["confidence"] <= 0:
                     continue
                 intent = item["intent"]
                 if intent in merged_items:
@@ -300,7 +289,7 @@ class SupervisorAgent(BaseFinanceAgent):
                     merged_items[intent] = item
             return merged_items
 
-        merged = merge_valid(parsed, source)
+        merged = merge_valid(parsed)
         if classification_error:
             source = "classification_error"
             merged = {}
@@ -340,11 +329,14 @@ class SupervisorAgent(BaseFinanceAgent):
     def plan_tasks(
         self,
         message: str,
-        context: str = "",
+        context_summary: str = "",
         pending_allocation: bool = False,
+        pending_fields: list[str] | None = None,
     ) -> Dict[str, Any]:
         """把多意图确定性映射为共享数据工作流。"""
-        classified = self.classify_intents(message, context, pending_allocation)
+        classified = self.classify_intents(
+            message, context_summary, pending_allocation, pending_fields,
+        )
         modes = {
             str(item.get("execution_mode", ""))
             for item in classified["intents"]

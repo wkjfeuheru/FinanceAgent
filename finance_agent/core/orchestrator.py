@@ -84,6 +84,7 @@ class AdvisorState(TypedDict):
     agent_response: str               # 最终投顾回复
     compliance_result: Dict[str, Any]       # 合规审查结果
     memory_context: str
+    intent_context: str
     shared_memory_snapshot: Dict[str, Any]
     thread_id: str
     run_id: str
@@ -406,9 +407,12 @@ class AdvisorSystem:
             self._emit_progress("supervisor", "正在判断需要执行的分析步骤")
             result = self.supervisor.plan_tasks(
                 state["user_message"],
-                state.get("memory_context", ""),
+                state.get("intent_context", ""),
                 pending_allocation=(
                     (state.get("business_state", {}) or {}).get("status") == "waiting_for_input"
+                ),
+                pending_fields=list(
+                    (state.get("business_state", {}) or {}).get("missing_fields", []) or []
                 ),
             )
             pending = state.get("business_state", {}) or {}
@@ -1314,6 +1318,7 @@ class AdvisorSystem:
             "agent_response": "",
             "compliance_result": {},
             "memory_context": memory_data.get("context_text", ""),
+            "intent_context": self.memory.build_intent_context(effective_history),
             "shared_memory_snapshot": {},
             "thread_id": thread_id,
             "run_id": uuid.uuid4().hex,
