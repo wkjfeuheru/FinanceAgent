@@ -144,10 +144,10 @@ const isEmpty = computed(
 .message-list {
   flex: 1;
   overflow-y: auto;
-  padding: 20px 24px;
+  padding: 28px clamp(18px, 4vw, 48px);
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 24px;
   scroll-behavior: smooth;
 }
 
@@ -169,7 +169,7 @@ const isEmpty = computed(
   color: #fff;
 }
 .avatar-assistant {
-  background: linear-gradient(135deg, #3b5bdb 0%, #1e3a8a 100%);
+  background: var(--color-primary);
   color: #fff;
 }
 
@@ -201,21 +201,22 @@ const isEmpty = computed(
 }
 
 .bubble {
-  padding: 10px 14px;
-  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  border-radius: 0;
   background: var(--color-assistant-bubble);
   color: var(--color-text);
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
+  box-shadow: none;
+  border: 1px solid var(--color-border);
   word-break: break-word;
   white-space: pre-wrap;
 }
 .message-item.user .bubble {
   background: var(--color-user-bubble);
   color: #fff;
-  border-top-right-radius: 4px;
+  border-color: var(--color-primary);
 }
 .message-item.assistant .bubble {
-  border-top-left-radius: 4px;
+  border-left: 3px solid var(--color-primary);
 }
 
 .typing {
@@ -227,6 +228,8 @@ const isEmpty = computed(
 }
 .progress-panel {
   min-width: 260px;
+  border-left: 1px solid var(--color-border);
+  padding-left: 14px;
 }
 .progress-title {
   font-weight: 700;
@@ -252,6 +255,7 @@ const isEmpty = computed(
   justify-content: center;
   flex-shrink: 0;
 }
+.progress-marker > span { font-family: var(--font-mono); }
 .typing-dot {
   animation: pulse 1.2s ease-in-out infinite;
 }
@@ -264,7 +268,8 @@ const isEmpty = computed(
   color: var(--color-primary-light);
   background: var(--color-primary-soft);
   padding: 4px 10px;
-  border-radius: 20px;
+  border-radius: 0;
+  border: 1px solid var(--color-border);
   margin-bottom: 8px;
   width: fit-content;
 }
@@ -277,7 +282,7 @@ const isEmpty = computed(
   padding: 10px 12px;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
+  border-radius: 0;
   font-size: 12px;
   color: var(--color-text-secondary);
   width: fit-content;
@@ -316,13 +321,14 @@ const isEmpty = computed(
   flex-wrap: wrap;
   gap: 12px;
   padding-top: 8px;
-  border-top: 1px dashed var(--color-border);
+  border-top: 1px solid var(--color-border);
 }
 .alloc-item {
   color: var(--color-text-secondary);
 }
 .alloc-item b {
   color: var(--color-primary);
+  font-family: var(--font-mono);
 }
 
 .empty-tip {

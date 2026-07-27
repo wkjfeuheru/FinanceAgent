@@ -111,8 +111,8 @@ function formatBudget(v?: number): string {
 
 <style scoped>
 .profile-panel {
-  border-radius: var(--radius-md);
-  border: none;
+  border-radius: 0;
+  border: 1px solid var(--color-border);
   box-shadow: var(--shadow-card);
 }
 .profile-panel :deep(.el-card__header) {
@@ -133,6 +133,7 @@ function formatBudget(v?: number): string {
   font-weight: 700;
   color: var(--color-text);
 }
+.panel-title::after { content: ' / PROFILE'; margin-left: 6px; color: var(--color-text-secondary); font: 11px/1 var(--font-mono); letter-spacing: .06em; }
 
 .profile-grid {
   display: flex;
@@ -143,8 +144,11 @@ function formatBudget(v?: number): string {
 .profile-item {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 7px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--color-border);
 }
+.profile-item:last-child { padding-bottom: 0; border-bottom: 0; }
 
 .item-label {
   display: flex;
@@ -171,10 +175,11 @@ function formatBudget(v?: number): string {
   font-size: 16px;
   font-weight: 700;
   color: var(--color-primary);
+  font-family: var(--font-mono);
 }
 
 .stock-tag {
-  font-family: 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-weight: 600;
 }
 
@@ -186,7 +191,8 @@ function formatBudget(v?: number): string {
 .updated-at {
   margin-top: 12px;
   padding-top: 10px;
-  border-top: 1px dashed var(--color-border);
+  border-top: 1px solid var(--color-border);
+  font-family: var(--font-mono);
   font-size: 11px;
   color: var(--color-text-muted);
 }

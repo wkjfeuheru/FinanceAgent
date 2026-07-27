@@ -122,7 +122,13 @@ onMounted(() => {
     <!-- 顶部导航 -->
     <header class="app-header">
       <div class="header-inner">
-        <button class="menu-toggle" @click="toggleSidebar" aria-label="切换侧边栏">
+        <button
+          class="menu-toggle"
+          aria-label="切换侧边栏"
+          :aria-expanded="sidebarOpen"
+          aria-controls="advisor-sidebar"
+          @click="toggleSidebar"
+        >
           <el-icon size="22"><Menu /></el-icon>
         </button>
         <div class="brand">
@@ -165,8 +171,8 @@ onMounted(() => {
       </section>
 
       <!-- 侧边栏 30% -->
-      <aside class="sidebar-area" :class="{ open: sidebarOpen }">
-        <div class="sidebar-backdrop" @click="toggleSidebar"></div>
+      <div class="sidebar-backdrop" :class="{ open: sidebarOpen }" @click="toggleSidebar"></div>
+      <aside id="advisor-sidebar" class="sidebar-area" :class="{ open: sidebarOpen }">
         <div class="sidebar-content">
           <ProfilePanel :profile="profile" :loading="profileLoading" />
           <HistoryPanel
@@ -212,6 +218,7 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
 }
 
 .brand-mark {
@@ -228,7 +235,9 @@ onMounted(() => {
 }
 
 .brand-copy { display: flex; flex-direction: column; line-height: 1.15; }
-.brand-meta { margin-top: 4px; color: var(--color-text-muted); font: 9px/1 var(--font-mono); letter-spacing: .12em; }
+.brand-copy { min-width: 0; }
+.brand-copy .app-title { margin: 0; color: var(--color-text); }
+.brand-meta { margin-top: 4px; color: var(--color-text-secondary); font: 11px/1 var(--font-mono); letter-spacing: .1em; white-space: nowrap; }
 
 .menu-toggle {
   display: none;
@@ -249,7 +258,9 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
 }
+.header-right :deep(.el-tag) { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 2px; }
 
 .logout-btn {
   background: transparent;
@@ -311,7 +322,15 @@ onMounted(() => {
   }
   .app-title {
     font-size: 16px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
+  .brand-meta, .system-status { display: none; }
+  .header-inner { padding: 0 12px; }
+  .brand { flex: 1; }
+  .brand-mark { flex-shrink: 0; }
+  .header-right { gap: 6px; flex-shrink: 0; }
   .chat-area {
     flex: 1 1 100%;
     max-width: 100%;
@@ -334,17 +353,22 @@ onMounted(() => {
     transform: translateX(0);
   }
   .sidebar-backdrop {
-    display: block;
+    display: none;
     position: fixed;
     top: 64px;
     left: 0;
     right: 0;
     bottom: 0;
     background: rgba(15, 23, 42, 0.4);
-    z-index: -1;
+    z-index: 89;
   }
-  .sidebar-area:not(.open) .sidebar-backdrop {
-    display: none;
+  .sidebar-backdrop.open {
+    display: block;
   }
+}
+
+@media (max-width: 480px) {
+  .header-right :deep(.el-tag) { display: none; }
+  .brand-mark { width: 30px; height: 30px; }
 }
 </style>

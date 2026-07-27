@@ -139,8 +139,9 @@ defineExpose({ loadHistoryMessages, startNewConversation })
   <div class="chat-window">
     <div class="chat-toolbar">
       <div class="toolbar-left">
-        <el-icon color="#1e3a8a" size="18"><ChatDotRound /></el-icon>
-        <span class="toolbar-title">智能对话</span>
+        <span class="toolbar-index">01</span>
+        <el-icon color="#1a3c2b" size="18"><ChatDotRound /></el-icon>
+        <div class="toolbar-copy"><span class="toolbar-title">智能对话</span><small>ADVISOR SESSION</small></div>
       </div>
       <div class="toolbar-right">
         <span class="status-dot" :class="{ active: !loading }"></span>
@@ -159,7 +160,7 @@ defineExpose({ loadHistoryMessages, startNewConversation })
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: var(--color-bg);
+  background: rgba(247, 247, 245, .72);
   min-height: 0;
 }
 
@@ -178,6 +179,9 @@ defineExpose({ loadHistoryMessages, startNewConversation })
   align-items: center;
   gap: 8px;
 }
+.toolbar-index { color: var(--color-text-muted); font: 10px/1 var(--font-mono); }
+.toolbar-copy { display: flex; flex-direction: column; gap: 3px; }
+.toolbar-copy small { color: var(--color-text-secondary); font: 11px/1 var(--font-mono); letter-spacing: .08em; }
 .toolbar-title {
   font-size: 15px;
   font-weight: 700;
@@ -188,19 +192,21 @@ defineExpose({ loadHistoryMessages, startNewConversation })
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  border: 1px solid var(--color-border);
+  padding: 5px 10px;
+  font: 10px/1 var(--font-mono);
+  letter-spacing: .08em;
   color: var(--color-text-secondary);
 }
 
 .status-dot {
   width: 8px;
   height: 8px;
-  border-radius: 50%;
+  border-radius: 0;
   background: #cbd5e1;
   transition: background 0.3s;
 }
 .status-dot.active {
   background: var(--color-success);
-  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.15);
 }
 </style>

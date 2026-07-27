@@ -86,7 +86,7 @@ function handleClear() {
 .message-input {
   border-top: 1px solid var(--color-border);
   background: var(--color-surface);
-  padding: 14px 20px 12px;
+  padding: 16px 20px 12px;
   flex-shrink: 0;
 }
 
@@ -105,13 +105,13 @@ function handleClear() {
   width: 100%;
   resize: none;
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  border-radius: 2px;
   padding: 10px 14px;
   font-size: 14px;
   line-height: 1.6;
   font-family: inherit;
   color: var(--color-text);
-  background: var(--color-surface-alt);
+  background: var(--color-surface);
   transition: border-color 0.2s, box-shadow 0.2s;
   outline: none;
   max-height: 140px;
@@ -119,7 +119,7 @@ function handleClear() {
 }
 .custom-textarea:focus {
   border-color: var(--color-primary-light);
-  box-shadow: 0 0 0 3px rgba(59, 91, 219, 0.12);
+  box-shadow: 0 0 0 2px rgba(26, 60, 43, 0.1);
   background: #fff;
 }
 .custom-textarea:disabled {
@@ -131,19 +131,22 @@ function handleClear() {
   height: 42px;
   padding: 0 20px;
   font-weight: 600;
+  border-radius: 2px;
 }
 
 .clear-btn {
   height: 42px;
   width: 42px;
   flex-shrink: 0;
+  border-radius: 2px;
 }
 
 .hint {
   margin-top: 6px;
   font-size: 12px;
   color: var(--color-text-muted);
-  text-align: center;
+  text-align: right;
+  font-family: var(--font-mono);
 }
 
 @media (max-width: 768px) {

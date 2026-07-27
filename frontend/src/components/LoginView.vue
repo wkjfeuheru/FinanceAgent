@@ -447,11 +447,17 @@ function switchTab(tab: TabKey) {
   text-decoration: underline;
 }
 
-@media (max-width: 480px) {
-  .login-view { padding: 20px; }
+@media (max-width: 900px) {
+  .login-view { padding: 24px; }
   .trust-panel { display: none; }
   .login-card {
     margin: 0;
+  }
+}
+
+@media (max-width: 480px) {
+  .login-view { padding: 20px; }
+  .login-card {
     padding: 28px 20px 20px;
   }
   .brand-title {

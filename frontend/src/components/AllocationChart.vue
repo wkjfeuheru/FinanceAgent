@@ -14,16 +14,16 @@ const props = defineProps<{
 }>()
 
 const palette = [
-  '#1e3a8a',
-  '#3b5bdb',
-  '#60a5fa',
-  '#fbbf24',
-  '#10b981',
-  '#f97316',
-  '#ef4444',
-  '#8b5cf6',
-  '#06b6d4',
-  '#84cc16',
+  '#1a3c2b',
+  '#26734a',
+  '#9effbf',
+  '#f4d35e',
+  '#ff8c69',
+  '#527561',
+  '#b74432',
+  '#88a092',
+  '#d4b83f',
+  '#62665f',
 ]
 
 const chartData = computed(() => {
@@ -50,7 +50,7 @@ const option = computed<EChartsOption>(() => ({
     orient: 'horizontal',
     bottom: 0,
     type: 'scroll',
-    textStyle: { fontSize: 11, color: '#64748b' },
+    textStyle: { fontSize: 11, color: '#62665f', fontFamily: 'monospace' },
     itemWidth: 10,
     itemHeight: 10,
   },
@@ -62,7 +62,7 @@ const option = computed<EChartsOption>(() => ({
       center: ['50%', '42%'],
       avoidLabelOverlap: true,
       itemStyle: {
-        borderRadius: 6,
+        borderRadius: 0,
         borderColor: '#fff',
         borderWidth: 2,
       },
@@ -70,7 +70,7 @@ const option = computed<EChartsOption>(() => ({
         show: true,
         formatter: '{b}\n{d}%',
         fontSize: 11,
-        color: '#475569',
+        color: '#62665f',
       },
       emphasis: {
         label: { show: true, fontSize: 13, fontWeight: 'bold' },

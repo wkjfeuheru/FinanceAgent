@@ -177,29 +177,34 @@ async function openHistory() {
 </template>
 
 <style scoped>
-.history-panel { border: none; border-radius: var(--radius-md); box-shadow: var(--shadow-card); }
+.history-panel { border: 1px solid var(--color-border); border-radius: 0; box-shadow: none; }
 .history-panel :deep(.el-card__body) { padding: 0; }
 .history-entry { width: 100%; padding: 15px 16px; border: 0; background: transparent; display: flex; justify-content: space-between; cursor: pointer; color: var(--color-text); }
-.history-entry:hover { background: var(--color-primary-soft); }
+.history-entry:hover { background: var(--color-primary-soft); color: var(--color-primary); }
 .entry-label, .drawer-title, .message-meta span { display: inline-flex; align-items: center; gap: 8px; font-weight: 700; }
 .entry-label .el-icon, .drawer-title > .el-icon { color: var(--color-primary); }
-.entry-action, .view-link { color: var(--color-primary-light); font-size: 13px; }
+.entry-action, .view-link { color: var(--color-primary-light); font: 11px/1 var(--font-mono); letter-spacing: .06em; }
 .drawer-header, .list-tools { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .drawer-title { min-width: 0; font-size: 17px; color: var(--color-text); }
 .drawer-title span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .drawer-body { min-height: 180px; display: flex; flex-direction: column; gap: 12px; }
 .list-tools { color: var(--color-text-muted); font-size: 12px; }
-.conversation-item { border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-surface); padding: 13px 14px; display: flex; align-items: center; justify-content: space-between; text-align: left; cursor: pointer; }
+.conversation-item { border: 1px solid var(--color-border); border-radius: 0; background: var(--color-surface); padding: 13px 14px; display: flex; align-items: center; justify-content: space-between; text-align: left; cursor: pointer; }
 .conversation-item:hover, .conversation-item.active { border-color: var(--color-primary-light); background: var(--color-primary-soft); }
 .conversation-main { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .conversation-main strong { color: var(--color-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .conversation-main small { color: var(--color-text-muted); }
 .conversation-actions { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
-.delete-button { opacity: 0.72; }
+.delete-button { opacity: 0; transition: opacity .16s ease; }
+.conversation-item:hover .delete-button, .delete-button:focus-visible { opacity: 1; }
 .delete-button:hover { opacity: 1; }
-.history-message { padding: 12px 14px; border: 1px solid var(--color-border); border-radius: 12px; background: var(--color-assistant-bubble); }
+.history-message { padding: 12px 14px; border: 1px solid var(--color-border); border-radius: 0; background: var(--color-assistant-bubble); }
 .history-message.user { margin-left: 32px; background: var(--color-primary-soft); }
 .history-message.assistant { margin-right: 32px; }
-.message-meta { display: flex; justify-content: space-between; margin-bottom: 8px; color: var(--color-text-muted); font-size: 12px; }
+.message-meta { display: flex; justify-content: space-between; margin-bottom: 8px; color: var(--color-text-muted); font: 11px/1.4 var(--font-mono); }
 .message-content { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--color-text); line-height: 1.65; font-size: 14px; }
+
+@media (hover: none), (max-width: 768px) {
+  .delete-button { opacity: 1; }
+}
 </style>
