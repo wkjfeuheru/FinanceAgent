@@ -396,30 +396,18 @@ class AdvisorSystem:
                 ),
             )
             pending = state.get("business_state", {}) or {}
-            message = state["user_message"].strip()
-            cancel_markers = ("取消", "不用了", "停止", "放弃", "先不配置")
-            cancel_pending = any(marker in message for marker in cancel_markers)
-            if cancel_pending:
-                state["task_plan"] = ["compliance"]
+            state["task_plan"] = result["task_plan"]
+            state["detected_intents"] = result["intents"]
+            state["intent_source"] = result["intent_source"]
+            state["finance_related"] = bool(result["finance_related"])
+            allocation_plan = self._intent_plan(state, "asset_allocation")
+            continues_allocation = (
+                allocation_plan.get("execution_mode") == "allocation"
+            )
+            if pending.get("status") == "waiting_for_input" and continues_allocation:
+                state["resolved_stocks"] = list(pending.get("resolved_stocks", []) or [])
+            elif pending.get("status") == "waiting_for_input":
                 state["business_state"] = {}
-                state["agent_response"] = "已取消待处理的资产配置任务。"
-                state["detected_intents"] = [{
-                    "intent": "casual_chat", "query": message,
-                    "confidence": 1.0, "reason": "取消待处理任务",
-                }]
-                state["intent_results"] = {
-                    "casual_chat": {"status": "success", "content": state["agent_response"]}
-                }
-            else:
-                state["task_plan"] = result["task_plan"]
-                state["detected_intents"] = result["intents"]
-                state["intent_source"] = result["intent_source"]
-                state["finance_related"] = bool(result["finance_related"])
-                names = self._intent_names(state)
-                if pending.get("status") == "waiting_for_input" and "asset_allocation" in names:
-                    state["resolved_stocks"] = list(pending.get("resolved_stocks", []) or [])
-                elif pending.get("status") == "waiting_for_input":
-                    state["business_state"] = {}
             print(
                 f"[Agent Plan] {state['customer_id']} | {state['thread_id']} | "
                 + " -> ".join(state["task_plan"]),

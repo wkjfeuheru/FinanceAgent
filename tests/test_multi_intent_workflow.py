@@ -21,13 +21,79 @@ def make_state(message, thread_id):
     }
 
 
+def test_pending_state_does_not_override_supervisor_plan_from_cancel_keyword():
+    system = AdvisorSystem()
+    query = "取消"
+    system.supervisor.plan_tasks = lambda *_args, **_kwargs: {
+        "intents": [{
+            "intent": "market_query",
+            "query": query,
+            "confidence": 0.99,
+            "reason": "监督者确认市场概览",
+            "execution_mode": "market_overview",
+            "requires_slot_extraction": False,
+        }],
+        "finance_related": True,
+        "intent_source": "model",
+        "task_plan": ["compliance"],
+    }
+    system.stock_search.search_market_overview = lambda _query: "监督者计划已执行"
+    state = make_state(query, "pending-plan-authority")
+    state["business_state"] = {
+        "status": "waiting_for_input",
+        "intent": "asset_allocation",
+        "missing_fields": ["budget_amount"],
+    }
+
+    result = system.graph.invoke(
+        state,
+        config={"configurable": {"thread_id": "pending-plan-authority"}},
+    )
+
+    assert [item["intent"] for item in result["detected_intents"]] == ["market_query"]
+    assert result["intent_results"]["market_query"]["content"] == "监督者计划已执行"
+
+
+def test_pending_allocation_clears_for_supervisor_conversation_plan():
+    system = AdvisorSystem()
+    query = "这件事到此为止"
+    system.supervisor.plan_tasks = lambda *_args, **_kwargs: {
+        "intents": [{
+            "intent": "casual_chat",
+            "query": query,
+            "confidence": 0.99,
+            "reason": "终止等待任务",
+            "execution_mode": "conversation",
+            "requires_slot_extraction": False,
+        }],
+        "finance_related": True,
+        "intent_source": "model",
+        "task_plan": ["casual_chat", "compliance"],
+    }
+    system.supervisor.chat = lambda *_args, **_kwargs: "已结束此前的配置任务。"
+    state = make_state(query, "pending-plan-stop")
+    state["business_state"] = {
+        "status": "waiting_for_input",
+        "intent": "asset_allocation",
+        "missing_fields": ["budget_amount"],
+    }
+
+    result = system.graph.invoke(
+        state,
+        config={"configurable": {"thread_id": "pending-plan-stop"}},
+    )
+
+    assert result["business_state"] == {}
+    assert "asset_allocation" not in result["task_plan"]
+
+
 def test_recommendation_allocation_and_chat_are_combined():
     system = AdvisorSystem()
     system.supervisor.plan_tasks = lambda *_args, **_kwargs: {
         "intents": [
-            {"intent": "stock_recommendation", "query": "推荐两只银行股", "confidence": 0.95, "reason": "推荐"},
-            {"intent": "asset_allocation", "query": "将10万元配置到推荐股票", "confidence": 0.94, "reason": "配置"},
-            {"intent": "casual_chat", "query": "回应投资焦虑", "confidence": 0.9, "reason": "情绪"},
+                {"intent": "stock_recommendation", "query": "推荐两只银行股", "confidence": 0.95, "reason": "推荐", "execution_mode": "candidate_search", "requires_slot_extraction": False},
+                {"intent": "asset_allocation", "query": "将10万元配置到推荐股票", "confidence": 0.94, "reason": "配置", "execution_mode": "allocation", "requires_slot_extraction": True},
+                {"intent": "casual_chat", "query": "回应投资焦虑", "confidence": 0.9, "reason": "情绪", "execution_mode": "conversation", "requires_slot_extraction": False},
         ],
         "finance_related": True,
         "intent_source": "model",
@@ -116,6 +182,7 @@ def test_malformed_model_tool_calls_use_deterministic_fallback():
         "intents": [{
             "intent": "asset_allocation", "query": query,
             "confidence": 0.95, "reason": "配置",
+            "execution_mode": "allocation", "requires_slot_extraction": True,
         }],
         "finance_related": True,
         "intent_source": "model",
@@ -169,12 +236,16 @@ def test_malformed_tool_result_does_not_block_other_intents(monkeypatch, bad_res
     system.supervisor.plan_tasks = lambda *_args, **_kwargs: {
         "intents": [
             {
-                "intent": "market_query", "query": market_query,
-                "confidence": 0.95, "reason": "基本面",
+                    "intent": "market_query", "query": market_query,
+                    "confidence": 0.95, "reason": "基本面",
+                    "execution_mode": "security_analysis",
+                    "requires_slot_extraction": True,
             },
             {
-                "intent": "asset_allocation", "query": allocation_query,
-                "confidence": 0.95, "reason": "配置",
+                    "intent": "asset_allocation", "query": allocation_query,
+                    "confidence": 0.95, "reason": "配置",
+                    "execution_mode": "allocation",
+                    "requires_slot_extraction": True,
             },
         ],
         "finance_related": True,
