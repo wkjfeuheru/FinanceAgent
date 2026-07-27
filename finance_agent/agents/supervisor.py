@@ -79,6 +79,12 @@ _EXECUTION_MODES = {
     "asset_allocation": {"allocation": True},
     "casual_chat": {"conversation": False},
 }
+_NLI_MODE_DEFAULTS = {
+    "market_query": "unsupported",
+    "stock_recommendation": "candidate_search",
+    "asset_allocation": "allocation",
+    "casual_chat": "conversation",
+}
 _CONFIDENCE_THRESHOLD = 0.65
 _SHADOW_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="intent-shadow")
 _LOGGER = logging.getLogger(__name__)
@@ -112,59 +118,6 @@ def normalize_intent_item(
             _EXECUTION_MODES[intent].get(mode, False)
         ),
     }
-
-
-_INVESTMENT_ADVICE_MARKERS = (
-    "推荐", "选股", "筛选", "候选", "值得投资", "投资建议",
-    "买入", "卖出", "能买吗", "能不能买", "该不该买", "怎么买",
-    "资产配置", "组合配置", "配置方案", "如何配置", "怎么配置", "配置比例",
-    "各配多少", "哪种方案", "哪个方案", "仓位", "分配资金", "分配下资金",
-    "投多少钱", "持有多久", "组合优化", "最大夏普", "最小方差",
-    "构建组合", "组组合", "建组合", "怎么组合", "如何组合", "组合一下",
-    "配一下", "配置一下", "调整组合", "调整权重", "调整下权重", "权重", "怎么配", "如何配",
-    "优化组合", "优化下组合",
-)
-
-
-def needs_investment_profile(message: str) -> bool:
-    """仅对明确涉及投资决策或配置的请求收集风险、资金和期限。"""
-    normalized = (message or "").strip().lower()
-    if any(marker in normalized for marker in _INVESTMENT_ADVICE_MARKERS):
-        return True
-    # 组合构建/配置追问：用户已看过股票分析，想让系统组合
-    return bool(re.search(
-        r"(?:帮|给|为)(?:我|我们).{0,6}(?:构建|组成|搭配|组合|配置|分配|调整)",
-        normalized,
-    ))
-
-
-def needs_asset_allocation(message: str) -> bool:
-    """确定性识别组合配置意图，避免监督模型漏掉 AssetAllocationAgent。"""
-    normalized = (message or "").strip().lower()
-    direct_markers = (
-        "资产配置", "组合配置", "配置方案", "配置比例", "各配多少",
-        "哪种方案", "哪个方案", "仓位分配", "分配资金", "组合优化",
-        "最大夏普", "最小方差",
-        "构建组合", "组组合", "建组合", "组合一下",
-        "配一下", "配置一下", "调整组合", "调整权重", "调整下权重",
-        "权重分配", "怎么组合", "如何组合", "怎样组合", "怎么配", "如何配",
-        "分配下", "资金分配", "配比", "配置权重", "组合权重",
-        # 含"权重"的追问几乎总是组合配置意图
-        "权重",
-    )
-    if any(marker in normalized for marker in direct_markers):
-        return True
-    # 正则兜底：
-    # 1. "组合/股票/标的 + 如何/怎么/怎样/应该如何 + 配置"
-    if re.search(r"(?:组合|股票|标的).{0,12}(?:如何|怎么|怎样|应该如何)?配置", normalized):
-        return True
-    # 2. "帮/给/为我 + 构建/组成/搭配/组合/配置/分配/调整 组合"
-    if re.search(r"(?:帮|给|为)(?:我|我们).{0,6}(?:构建|组成|搭配|组合|配置|分配|调整|优化)", normalized):
-        return True
-    # 3. "组合/配置/分配/调整/优化 + 一下/权重/比例"
-    if re.search(r"(?:组合|配置|分配|调整|优化)(?:一下|权重|比例)", normalized):
-        return True
-    return False
 
 
 def needs_stock_screening(message: str) -> bool:
@@ -314,67 +267,6 @@ class SupervisorAgent(BaseFinanceAgent):
 
         _SHADOW_EXECUTOR.submit(run)
 
-    @staticmethod
-    def _rule_intents(message: str, pending_allocation: bool = False) -> List[Dict[str, Any]]:
-        """模型不可用时使用的确定性多标签分类。"""
-        normalized = (message or "").strip().lower()
-        matches: list[dict[str, Any]] = []
-
-        def add(intent: str, reason: str) -> None:
-            if not any(item["intent"] == intent for item in matches):
-                matches.append({
-                    "intent": intent,
-                    "query": message.strip(),
-                    "confidence": 0.8,
-                    "reason": reason,
-                })
-
-        market_markers = (
-            "行情", "股价", "涨幅", "跌幅", "走势", "成交量", "市盈率", "市净率",
-            "估值", "财务", "基本面", "业绩", "公告", "指数", "板块表现", "资金流",
-        )
-        recommendation_markers = (
-            "推荐", "选股", "筛选", "候选", "股票池", "龙头", "值得买",
-            "值得投资", "更值得", "哪只好", "买哪只", "能买吗", "该不该买",
-        )
-        casual_markers = (
-            "焦虑", "难受", "亏了", "亏损", "踏空", "后悔", "心态", "经验",
-            "习惯", "纪律", "复盘", "聊聊", "怎么看待", "什么是", "你好", "谢谢",
-        )
-        if any(marker in normalized for marker in market_markers) or needs_market_overview_search(message):
-            # 一般知识问句不属于具体数据查询。
-            if not re.search(r"^(?:什么是|如何理解|解释一下)", normalized):
-                add("market_query", "规则识别到具体市场数据或标的分析需求")
-        if any(marker in normalized for marker in recommendation_markers):
-            add("stock_recommendation", "规则识别到标的筛选或推荐需求")
-        allocation_phrase = (
-            "配置" in normalized
-            and bool(re.search(r"\d+(?:\.\d+)?\s*(?:万|元)", normalized))
-        )
-        allocation_followup = pending_allocation and bool(
-            re.search(r"\d+(?:\.\d+)?\s*(?:万|元|天|周|个月|月|年)", normalized)
-            or any(word in normalized for word in (
-                "保守", "稳健", "平衡", "进取", "高风险", "低风险",
-            ))
-            or re.search(r"(?<!\d)(?:60|68|00|30)\d{4}(?!\d)", normalized)
-        )
-        if needs_asset_allocation(message) or allocation_phrase or allocation_followup:
-            add("asset_allocation", "规则识别到组合配置需求或配置任务续接")
-        if any(marker in normalized for marker in casual_markers):
-            add("casual_chat", "规则识别到理财知识、经验或情绪交流")
-        if not matches:
-            add("casual_chat", "未识别到数据、推荐或配置需求")
-        return matches
-
-    @staticmethod
-    def _finance_related(message: str) -> bool:
-        markers = (
-            "投资", "理财", "股票", "基金", "行情", "市场", "板块", "行业", "资产",
-            "组合", "仓位", "收益", "亏损", "估值", "财务", "市盈率", "风险", "资金",
-            "焦虑", "踏空", "复盘", "心态",
-        )
-        return any(marker in (message or "") for marker in markers)
-
     def classify_intents(
         self,
         message: str,
@@ -390,7 +282,6 @@ class SupervisorAgent(BaseFinanceAgent):
             except Exception as exc:
                 _LOGGER.warning("intent_zero_shot_unavailable error=%s", exc)
                 parsed = {}
-                source = "rule_fallback"
         else:
             try:
                 raw = self.intent_chain.invoke({
@@ -399,7 +290,8 @@ class SupervisorAgent(BaseFinanceAgent):
                     "pending_allocation": "是" if pending_allocation else "否",
                 })
                 parsed = safe_parse_json(raw, {})
-            except Exception:
+            except Exception as exc:
+                _LOGGER.warning("intent_model_unavailable error=%s", exc)
                 parsed = {}
 
             if (
@@ -414,62 +306,64 @@ class SupervisorAgent(BaseFinanceAgent):
                     round((time.perf_counter() - classification_started) * 1000, 2),
                 )
 
-        merged: dict[str, dict[str, Any]] = {}
-        raw_intents = parsed.get("intents", []) if isinstance(parsed, dict) else []
-        if isinstance(raw_intents, list):
-            for item in raw_intents:
-                if not isinstance(item, dict):
+        def merge_valid(payload: Any, classifier_source: str) -> dict[str, dict[str, Any]]:
+            merged_items: dict[str, dict[str, Any]] = {}
+            raw_intents = payload.get("intents", []) if isinstance(payload, dict) else []
+            if not isinstance(raw_intents, list):
+                return merged_items
+            for raw_item in raw_intents:
+                if not isinstance(raw_item, dict):
                     continue
-                normalized_item = normalize_intent_item(item, message)
-                if normalized_item is None:
+                candidate = dict(raw_item)
+                intent = str(candidate.get("intent", "")).strip()
+                if classifier_source == "zero_shot" and intent in _NLI_MODE_DEFAULTS:
+                    candidate["execution_mode"] = _NLI_MODE_DEFAULTS[intent]
+                item = normalize_intent_item(candidate, message)
+                if item is None:
                     continue
-                intent = normalized_item["intent"]
-                try:
-                    confidence = float(normalized_item.get("confidence", 0))
-                except (TypeError, ValueError):
-                    confidence = 0.0
-                confidence_floor = 0.0 if source == "zero_shot" else _CONFIDENCE_THRESHOLD
-                if intent not in _INTENTS or confidence < confidence_floor:
+                confidence_floor = (
+                    0.0 if classifier_source == "zero_shot" else _CONFIDENCE_THRESHOLD
+                )
+                if item["confidence"] < confidence_floor:
                     continue
-                query = normalized_item["query"]
-                reason = normalized_item["reason"]
-                if intent in merged:
-                    if query not in merged[intent]["query"]:
-                        merged[intent]["query"] += "；" + query
-                    merged[intent]["confidence"] = max(
-                        merged[intent]["confidence"], confidence,
+                intent = item["intent"]
+                if intent in merged_items:
+                    if item["query"] not in merged_items[intent]["query"]:
+                        merged_items[intent]["query"] += "；" + item["query"]
+                    merged_items[intent]["confidence"] = max(
+                        merged_items[intent]["confidence"], item["confidence"],
                     )
                 else:
-                    merged[intent] = normalized_item
+                    merged_items[intent] = item
+            return merged_items
+
+        merged = merge_valid(parsed, source)
+        if not merged and source != "zero_shot":
+            try:
+                parsed = self._predict_zero_shot(message, context, pending_allocation)
+                source = "zero_shot"
+                merged = merge_valid(parsed, source)
+            except Exception as exc:
+                _LOGGER.warning("intent_zero_shot_unavailable error=%s", exc)
 
         if not merged:
-            source = "rule_fallback"
-            merged = {item["intent"]: item for item in self._rule_intents(
-                message, pending_allocation,
-            )}
+            source = "safe_fallback"
+            fallback = normalize_intent_item({
+                "intent": "casual_chat",
+                "query": message,
+                "confidence": 0.0,
+                "reason": "意图分类服务暂不可用",
+                "execution_mode": "conversation",
+            }, message)
+            assert fallback is not None
+            merged = {"casual_chat": fallback}
+            finance_related = False
         else:
-            # 模型负责语义拆分，确定性规则补充明显但被遗漏的独立目标。
-            for item in self._rule_intents(message, pending_allocation):
-                if (
-                    item["intent"] not in merged
-                    and item["reason"] != "未识别到数据、推荐或配置需求"
-                ):
-                    merged[item["intent"]] = item
-                    if source == "zero_shot":
-                        source = "zero_shot+rule"
-                    elif source != "rule_fallback":
-                        source = "model+rule"
-
-        model_finance_related = (
-            bool(parsed.get("finance_related"))
-            if isinstance(parsed, dict) and "finance_related" in parsed
-            else self._finance_related(message)
-        )
-        finance_related = (
-            model_finance_related
-            or any(intent != "casual_chat" for intent in merged)
-            or self._finance_related(message)
-        )
+            finance_related = bool(
+                parsed.get("finance_related")
+                if isinstance(parsed, dict) and "finance_related" in parsed
+                else any(intent != "casual_chat" for intent in merged)
+            )
         order = {name: index for index, name in enumerate(_INTENTS)}
         intents = sorted(merged.values(), key=lambda item: order[item["intent"]])
         print(

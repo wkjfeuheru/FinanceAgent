@@ -17,6 +17,11 @@ class ExplodingChain:
         raise AssertionError("classification LLM must not be invoked")
 
 
+class RaisingChain:
+    def invoke(self, _payload):
+        raise RuntimeError("primary unavailable")
+
+
 class FakeZeroShotClassifier:
     def __init__(self, result):
         self.result = result
@@ -76,14 +81,12 @@ def test_emotion_and_market_query_both_execute():
     assert "data_fetch" in result["task_plan"]
 
 
-def test_invalid_model_output_uses_multilabel_rule_fallback():
+def test_invalid_model_output_without_nli_uses_safe_fallback():
     supervisor = object.__new__(SupervisorAgent)
     supervisor._intent_chain = FakeChain("not-json")
     result = supervisor.plan_tasks("推荐三只银行股，用10万元做稳健配置")
-    assert {item["intent"] for item in result["intents"]} == {
-        "stock_recommendation", "asset_allocation",
-    }
-    assert result["intent_source"] == "rule_fallback"
+    assert [item["intent"] for item in result["intents"]] == ["casual_chat"]
+    assert result["intent_source"] == "safe_fallback"
 
 
 def test_low_confidence_intents_are_not_executed():
@@ -95,7 +98,7 @@ def test_low_confidence_intents_are_not_executed():
     })
     result = supervisor.plan_tasks("随便聊聊投资")
     assert [item["intent"] for item in result["intents"]] == ["casual_chat"]
-    assert result["intent_source"] == "rule_fallback"
+    assert result["intent_source"] == "safe_fallback"
 
 
 def test_zero_shot_mode_does_not_invoke_llm(monkeypatch):
@@ -119,7 +122,7 @@ def test_zero_shot_mode_does_not_invoke_llm(monkeypatch):
     assert result["intent_source"] in {"zero_shot", "zero_shot+rule"}
 
 
-def test_zero_shot_failure_uses_rules_without_llm(monkeypatch):
+def test_zero_shot_failure_uses_safe_fallback_without_llm(monkeypatch):
     class BrokenClassifier:
         def predict(self, *_args, **_kwargs):
             raise RuntimeError("broken model")
@@ -131,13 +134,11 @@ def test_zero_shot_failure_uses_rules_without_llm(monkeypatch):
 
     result = agent.plan_tasks("推荐三只银行股，用10万元做稳健配置")
 
-    assert {item["intent"] for item in result["intents"]} == {
-        "stock_recommendation", "asset_allocation",
-    }
-    assert result["intent_source"] == "rule_fallback"
+    assert [item["intent"] for item in result["intents"]] == ["casual_chat"]
+    assert result["intent_source"] == "safe_fallback"
 
 
-def test_rule_fallback_business_intent_is_finance_related(monkeypatch):
+def test_empty_zero_shot_result_does_not_restore_business_intent_from_keywords(monkeypatch):
     agent = object.__new__(SupervisorAgent)
     agent._zero_shot_classifier = FakeZeroShotClassifier({
         "intents": [],
@@ -148,8 +149,8 @@ def test_rule_fallback_business_intent_is_finance_related(monkeypatch):
 
     result = agent.plan_tasks("推荐银行股")
 
-    assert [item["intent"] for item in result["intents"]] == ["stock_recommendation"]
-    assert result["finance_related"] is True
+    assert [item["intent"] for item in result["intents"]] == ["casual_chat"]
+    assert result["finance_related"] is False
 
 
 def test_shadow_mode_keeps_llm_primary_and_logs_zero_shot(monkeypatch):
@@ -225,3 +226,47 @@ def test_invalid_execution_mode_does_not_infer_route_from_query():
     assert result["intents"][0]["execution_mode"] == "unsupported"
     assert result["intents"][0]["requires_slot_extraction"] is False
     assert result["task_plan"] == ["compliance"]
+
+
+def test_primary_failure_uses_zero_shot_without_keyword_rules(monkeypatch):
+    agent = object.__new__(SupervisorAgent)
+    agent._intent_chain = RaisingChain()
+    agent._zero_shot_classifier = FakeZeroShotClassifier({
+        "intents": [{
+            "intent": "asset_allocation",
+            "query": "替我安排这笔钱",
+            "confidence": 0.88,
+            "reason": "NLI",
+        }],
+        "finance_related": True,
+    })
+    monkeypatch.setattr(supervisor_module, "INTENT_CLASSIFIER_MODE", "model")
+
+    result = agent.plan_tasks("替我安排这笔钱")
+
+    assert result["intent_source"] == "zero_shot"
+    assert result["intents"][0]["execution_mode"] == "allocation"
+
+
+def test_primary_and_nli_failure_ignore_business_keywords(monkeypatch):
+    class BrokenClassifier:
+        def predict(self, *_args, **_kwargs):
+            raise RuntimeError("nli unavailable")
+
+    agent = object.__new__(SupervisorAgent)
+    agent._intent_chain = RaisingChain()
+    agent._zero_shot_classifier = BrokenClassifier()
+    monkeypatch.setattr(supervisor_module, "INTENT_CLASSIFIER_MODE", "model")
+
+    result = agent.plan_tasks("推荐股票并配置10万元")
+
+    assert result["intent_source"] == "safe_fallback"
+    assert result["finance_related"] is False
+    assert result["intents"] == [{
+        "intent": "casual_chat",
+        "query": "推荐股票并配置10万元",
+        "confidence": 0.0,
+        "reason": "意图分类服务暂不可用",
+        "execution_mode": "conversation",
+        "requires_slot_extraction": False,
+    }]
