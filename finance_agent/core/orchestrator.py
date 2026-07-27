@@ -101,6 +101,9 @@ class AdvisorState(TypedDict):
     slot_tool_called: bool
     slot_tool_source: str
     slot_tool_error: str
+    uncertain_intents: List[Dict[str, Any]]
+    intent_clarification_state: Dict[str, Any]
+    intent_clarification_response: str
 
 
 # ── 主编排系统 ────────────────────────────────────────────────
@@ -143,6 +146,79 @@ class AdvisorSystem:
         self._workflow_lock = threading.RLock()
         self._trace_sequences: Dict[str, int] = {}
         self.graph = self._build_graph()
+
+    @staticmethod
+    def _advance_intent_clarification(
+        previous: Dict[str, Any],
+        uncertain: List[Dict[str, Any]],
+        confident: List[Dict[str, Any]] | None = None,
+    ) -> tuple[Dict[str, Any], str]:
+        """Advance conversation-scoped clarification without touching business state."""
+        confident_ids: set[str] = set()
+        for item in confident or []:
+            if not isinstance(item, dict):
+                continue
+            confident_ids.update(
+                str(value).strip()
+                for value in (item.get("clarification_ids", []) or [])
+                if str(value).strip()
+            )
+            clarification_id = str(item.get("clarification_id", "")).strip()
+            if clarification_id:
+                confident_ids.add(clarification_id)
+        previous_round = (
+            int(previous.get("round", 0) or 0)
+            if previous.get("status") == "waiting_for_clarification"
+            else 0
+        )
+        remaining_previous = [
+            dict(item) for item in (previous.get("items", []) or [])
+            if isinstance(item, dict)
+            and str(item.get("clarification_id", "")) not in confident_ids
+        ]
+        if not uncertain:
+            if remaining_previous:
+                return {
+                    "status": "waiting_for_clarification",
+                    "round": previous_round,
+                    "items": remaining_previous,
+                }, ""
+            return {}, ""
+        if previous_round >= 3:
+            return {}, "仍无法准确判断您的意图，请使用完整句子重新描述您的需求。"
+
+        previous_items = {
+            str(item.get("clarification_id", "")): item
+            for item in (previous.get("items", []) or [])
+            if isinstance(item, dict) and item.get("clarification_id")
+        }
+        items: list[dict[str, Any]] = []
+        questions: list[str] = []
+        for index, item in enumerate(uncertain):
+            clarification_id = str(item.get("clarification_id", "")).strip()
+            if not clarification_id:
+                clarification_id = f"{item.get('intent', 'unknown')}:{index}"
+            prior = previous_items.get(clarification_id, {})
+            question = str(item.get("clarification_question", "")).strip()
+            items.append({
+                "clarification_id": clarification_id,
+                "original_query": prior.get("original_query") or item.get("query", ""),
+                "candidate_intent": item.get("intent", ""),
+                "execution_mode": item.get("execution_mode", ""),
+                "question": question,
+            })
+            if question and question not in questions:
+                questions.append(question)
+        updated_ids = {str(item.get("clarification_id", "")) for item in items}
+        items = [
+            item for item in remaining_previous
+            if str(item.get("clarification_id", "")) not in updated_ids
+        ] + items
+        return {
+            "status": "waiting_for_clarification",
+            "round": previous_round + 1,
+            "items": items,
+        }, "\n".join(questions)
 
     def _emit_progress(self, stage: str, message: str, thread_id: str = "") -> None:
         callback = None
@@ -405,23 +481,36 @@ class AdvisorSystem:
         def supervisor_handler(state: AdvisorState) -> AdvisorState:
             self._trace_agent(state, "SupervisorAgent")
             self._emit_progress("supervisor", "正在判断需要执行的分析步骤")
-            result = self.supervisor.plan_tasks(
+            plan_args = (
                 state["user_message"],
                 state.get("intent_context", ""),
-                pending_allocation=(
-                    (state.get("business_state", {}) or {}).get("status") == "waiting_for_input"
-                ),
-                pending_fields=list(
-                    (state.get("business_state", {}) or {}).get("missing_fields", []) or []
-                ),
+                (state.get("business_state", {}) or {}).get("status") == "waiting_for_input",
+                list((state.get("business_state", {}) or {}).get("missing_fields", []) or []),
             )
+            pending_clarification = state.get("intent_clarification_state", {}) or {}
+            if pending_clarification:
+                result = self.supervisor.plan_tasks(*plan_args, pending_clarification)
+            else:
+                result = self.supervisor.plan_tasks(*plan_args)
             pending = state.get("business_state", {}) or {}
             state["task_plan"] = result["task_plan"]
             state["detected_intents"] = result["intents"]
+            state["uncertain_intents"] = list(result.get("uncertain_intents", []) or [])
             state["intent_source"] = result["intent_source"]
             state["finance_related"] = bool(result["finance_related"])
             if state["intent_source"] == "classification_error":
                 state["agent_response"] = "意图识别暂时不可用，请稍后重试。"
+                state["intent_clarification_response"] = ""
+            else:
+                clarification_state, clarification_response = self._advance_intent_clarification(
+                    pending_clarification,
+                    state["uncertain_intents"],
+                    state["detected_intents"],
+                )
+                state["intent_clarification_state"] = clarification_state
+                state["intent_clarification_response"] = clarification_response
+                if not state["detected_intents"] and clarification_response:
+                    state["agent_response"] = clarification_response
             allocation_plan = self._intent_plan(state, "asset_allocation")
             continues_allocation = (
                 allocation_plan.get("execution_mode") == "allocation"
@@ -439,6 +528,8 @@ class AdvisorSystem:
 
         def route_after_supervisor(state: AdvisorState) -> str:
             if state.get("intent_source") == "classification_error":
+                return "compliance"
+            if state.get("uncertain_intents") and not state.get("detected_intents"):
                 return "compliance"
             business = self._intent_names(state) & {
                 "market_query", "stock_recommendation", "asset_allocation",
@@ -1138,6 +1229,17 @@ class AdvisorSystem:
                 and state.get("agent_response")
             ):
                 state["agent_response"] = self._synthesize_response(state)
+            clarification_response = str(
+                state.get("intent_clarification_response", "") or ""
+            ).strip()
+            if (
+                clarification_response
+                and clarification_response not in state.get("agent_response", "")
+            ):
+                separator = "\n\n" if state.get("agent_response") else ""
+                state["agent_response"] = (
+                    state.get("agent_response", "") + separator + clarification_response
+                )
             result = self.compliance_agent.review(
                 agent_response=state["agent_response"],
             )
@@ -1280,13 +1382,20 @@ class AdvisorSystem:
         config = {"configurable": {"thread_id": thread_id}}
 
         previous_business_state: Dict[str, Any] = {}
+        previous_clarification_state: Dict[str, Any] = {}
         try:
             previous_values = self.graph.get_state(config).values or {}
             candidate_state = previous_values.get("business_state", {}) or {}
             if candidate_state.get("status") == "waiting_for_input":
                 previous_business_state = dict(candidate_state)
+            candidate_clarification = (
+                previous_values.get("intent_clarification_state", {}) or {}
+            )
+            if candidate_clarification.get("status") == "waiting_for_clarification":
+                previous_clarification_state = dict(candidate_clarification)
         except Exception:
             previous_business_state = {}
+            previous_clarification_state = {}
 
         if progress_callback:
             with self._progress_lock:
@@ -1337,6 +1446,9 @@ class AdvisorSystem:
             "slot_tool_called": False,
             "slot_tool_source": "skipped",
             "slot_tool_error": "",
+            "uncertain_intents": [],
+            "intent_clarification_state": previous_clarification_state,
+            "intent_clarification_response": "",
         }
 
         with self._trace_lock:
@@ -1372,7 +1484,8 @@ class AdvisorSystem:
             conversation_id, "assistant", output["response"],
             {"task_plan": output["task_plan"]},
         )
-        self.memory.update_profile_from_result(customer_id, message, output)
+        if not (result.get("uncertain_intents", []) or []):
+            self.memory.update_profile_from_result(customer_id, message, output)
         self.memory.update_recent_summary(
             conversation_id,
             [

@@ -44,6 +44,10 @@ _GLM_INTENT_PROMPT = """你是金融工作流的多意图分类器，只分类�
 
 每个意图必须包含 intent、query、confidence、reason、evidence、execution_mode、requires_slot_extraction。
 evidence 必须逐字摘自 current_message，不能来自上下文。query 只包含该意图对应的当前轮子请求。
+当 confidence 小于 0.9 时，必须返回非空 clarification_question，提出一个简短、具体、可直接回答的问题；不得直接回答或执行业务。
+pending_clarifications 仅用于理解用户对上一轮反问的回复。若用户在纠正候选意图，可按当前消息改为正确意图；若已明确，必须回传对应 clarification_id。
+解析待澄清项时，query 应结合 original_query 与当前回复形成完整、可执行的子请求；不能重复其他已经完成的意图。
+不得因为近期上下文重复输出已经完成的高置信度意图。
 只输出 JSON 对象：{"intents": [...], "finance_related": true}。"""
 
 _CLASSIFIER_MODES = {
@@ -52,6 +56,8 @@ _CLASSIFIER_MODES = {
     "asset_allocation": {"allocation"},
     "casual_chat": {"conversation"},
 }
+
+_INTENT_CONFIDENCE_THRESHOLD = 0.9
 
 
 class IntentClassificationError(RuntimeError):
@@ -82,6 +88,8 @@ class GLMIntentClassifier:
         if not isinstance(payload, dict) or not isinstance(payload.get("intents"), list):
             raise IntentClassificationError("GLM 意图响应必须包含 intents 列表")
         raw_intents = payload["intents"]
+        if not raw_intents:
+            raise IntentClassificationError("GLM 意图响应必须包含至少一个意图")
         valid: list[dict[str, Any]] = []
         for item in raw_intents:
             if not isinstance(item, dict):
@@ -89,10 +97,27 @@ class GLMIntentClassifier:
             intent = str(item.get("intent", "")).strip()
             mode = str(item.get("execution_mode", "")).strip()
             evidence = str(item.get("evidence", "")).strip()
-            if intent not in _CLASSIFIER_MODES or mode not in _CLASSIFIER_MODES[intent]:
-                continue
+            if intent not in _CLASSIFIER_MODES:
+                raise IntentClassificationError(f"GLM 返回非法 intent: {intent}")
+            if mode not in _CLASSIFIER_MODES[intent]:
+                raise IntentClassificationError(
+                    f"GLM 返回非法 execution_mode: {mode}"
+                )
             if not evidence or evidence not in message:
                 continue
+            try:
+                confidence = float(item.get("confidence"))
+            except (TypeError, ValueError):
+                raise IntentClassificationError("GLM 意图置信度必须是有限数值")
+            if not math.isfinite(confidence) or not 0 <= confidence <= 1:
+                raise IntentClassificationError("GLM 意图置信度必须位于 0 到 1")
+            if (
+                confidence < _INTENT_CONFIDENCE_THRESHOLD
+                and not str(item.get("clarification_question", "")).strip()
+            ):
+                raise IntentClassificationError(
+                    "低置信度意图必须包含 clarification_question"
+                )
             valid.append(dict(item))
         if raw_intents and not valid:
             raise IntentClassificationError("GLM 意图响应没有可验证的当前轮证据")
@@ -107,6 +132,7 @@ class GLMIntentClassifier:
         context_summary: str = "",
         pending_allocation: bool = False,
         pending_fields: list[str] | None = None,
+        pending_clarifications: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not self.api_key:
             raise IntentClassificationError("缺少 ZHIPU_API_KEY")
@@ -120,6 +146,7 @@ class GLMIntentClassifier:
             "recent_context_summary": context_summary.strip(),
             "pending_allocation": bool(pending_allocation),
             "pending_fields": list(pending_fields or []),
+            "pending_clarifications": dict(pending_clarifications or {}),
         }
         body = {
             "model": self.model,
@@ -196,6 +223,23 @@ def normalize_intent_item(
         "requires_slot_extraction": bool(
             _EXECUTION_MODES[intent].get(mode, False)
         ),
+        "clarification_question": str(
+            item.get("clarification_question", "")
+        ).strip(),
+        "clarification_id": str(item.get("clarification_id", "")).strip(),
+        "clarification_ids": list(dict.fromkeys(
+            [
+                str(value).strip()
+                for value in (
+                    item.get("clarification_ids", [])
+                    if isinstance(item.get("clarification_ids", []), list)
+                    else []
+                )
+                if str(value).strip()
+            ]
+            + ([str(item.get("clarification_id", "")).strip()]
+               if str(item.get("clarification_id", "")).strip() else [])
+        )),
     }
 
 
@@ -242,10 +286,12 @@ class SupervisorAgent(BaseFinanceAgent):
         context_summary: str,
         pending_allocation: bool,
         pending_fields: list[str],
+        pending_clarifications: dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
-        return self.intent_classifier.classify(
-            message, context_summary, pending_allocation, pending_fields,
-        )
+        args = (message, context_summary, pending_allocation, pending_fields)
+        if pending_clarifications:
+            return self.intent_classifier.classify(*args, pending_clarifications)
+        return self.intent_classifier.classify(*args)
 
     def classify_intents(
         self,
@@ -253,6 +299,7 @@ class SupervisorAgent(BaseFinanceAgent):
         context_summary: str = "",
         pending_allocation: bool = False,
         pending_fields: list[str] | None = None,
+        pending_clarifications: dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """使用 GLM 结合近期摘要识别并合并本轮全部意图。"""
         source = "glm"
@@ -263,11 +310,14 @@ class SupervisorAgent(BaseFinanceAgent):
                 context_summary,
                 pending_allocation,
                 list(pending_fields or []),
+                pending_clarifications,
             )
         except Exception as exc:
             _LOGGER.warning("intent_glm_unavailable error=%s", exc)
             parsed = {}
             classification_error = True
+
+        uncertain: list[dict[str, Any]] = []
 
         def merge_valid(payload: Any) -> dict[str, dict[str, Any]]:
             merged_items: dict[str, dict[str, Any]] = {}
@@ -284,6 +334,9 @@ class SupervisorAgent(BaseFinanceAgent):
                     continue
                 if item["confidence"] <= 0:
                     continue
+                if item["confidence"] < _INTENT_CONFIDENCE_THRESHOLD:
+                    uncertain.append(item)
+                    continue
                 intent = item["intent"]
                 if intent in merged_items:
                     if item["query"] not in merged_items[intent]["query"]:
@@ -291,6 +344,10 @@ class SupervisorAgent(BaseFinanceAgent):
                     merged_items[intent]["confidence"] = max(
                         merged_items[intent]["confidence"], item["confidence"],
                     )
+                    merged_items[intent]["clarification_ids"] = list(dict.fromkeys(
+                        merged_items[intent].get("clarification_ids", [])
+                        + item.get("clarification_ids", [])
+                    ))
                 else:
                     merged_items[intent] = item
             return merged_items
@@ -300,17 +357,9 @@ class SupervisorAgent(BaseFinanceAgent):
             source = "classification_error"
             merged = {}
             finance_related = False
-        elif not merged:
-            source = "safe_fallback"
-            fallback = normalize_intent_item({
-                "intent": "casual_chat",
-                "query": message,
-                "confidence": 0.0,
-                "reason": "意图分类服务暂不可用",
-                "execution_mode": "conversation",
-            }, message)
-            assert fallback is not None
-            merged = {"casual_chat": fallback}
+            uncertain = []
+        elif not merged and not uncertain:
+            source = "classification_error"
             finance_related = False
         else:
             finance_related = bool(
@@ -318,6 +367,8 @@ class SupervisorAgent(BaseFinanceAgent):
                 if isinstance(parsed, dict) and "finance_related" in parsed
                 else any(intent != "casual_chat" for intent in merged)
             )
+        if uncertain and source != "classification_error":
+            source = "clarification"
         order = {name: index for index, name in enumerate(_INTENTS)}
         intents = sorted(merged.values(), key=lambda item: order[item["intent"]])
         print(
@@ -328,6 +379,7 @@ class SupervisorAgent(BaseFinanceAgent):
         )
         return {
             "intents": intents,
+            "uncertain_intents": uncertain,
             "finance_related": finance_related,
             "intent_source": source,
         }
@@ -338,10 +390,12 @@ class SupervisorAgent(BaseFinanceAgent):
         context_summary: str = "",
         pending_allocation: bool = False,
         pending_fields: list[str] | None = None,
+        pending_clarifications: dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """把多意图确定性映射为共享数据工作流。"""
         classified = self.classify_intents(
             message, context_summary, pending_allocation, pending_fields,
+            pending_clarifications,
         )
         modes = {
             str(item.get("execution_mode", ""))

@@ -90,6 +90,7 @@ def test_glm_request_uses_structured_current_turn_and_recent_summary():
         "recent_context_summary": context,
         "pending_allocation": False,
         "pending_fields": [],
+        "pending_clarifications": {},
     }
 
 
@@ -180,3 +181,67 @@ def test_retry_count_is_capped_at_one():
         classifier.classify("推荐股票", "", False, [])
 
     assert len(requester.calls) == 2
+
+
+def test_low_confidence_intent_requires_clarification_question():
+    ambiguous = recommendation_intent("推荐它")
+    ambiguous["confidence"] = 0.89
+    requester = RecordingRequester([
+        FakeResponse(payload(ambiguous)),
+        FakeResponse(payload(ambiguous)),
+    ])
+
+    with pytest.raises(IntentClassificationError, match="clarification_question"):
+        make_classifier(requester).classify("推荐它", "", False, [])
+
+    assert len(requester.calls) == 2
+
+
+def test_pending_clarifications_are_sent_as_structured_input():
+    intent = recommendation_intent("我是想让你推荐")
+    intent["clarification_id"] = "stock_recommendation:0"
+    requester = RecordingRequester([FakeResponse(payload(intent))])
+    pending = {
+        "status": "waiting_for_clarification",
+        "round": 1,
+        "items": [{
+            "clarification_id": "stock_recommendation:0",
+            "original_query": "看看它",
+            "candidate_intent": "market_query",
+            "execution_mode": "security_analysis",
+            "question": "您是想看行情还是要推荐？",
+        }],
+    }
+
+    make_classifier(requester).classify(
+        "我是想让你推荐", "近期上下文", False, [], pending,
+    )
+
+    body = requester.calls[0][1]["json"]
+    assert json.loads(body["messages"][1]["content"])["pending_clarifications"] == pending
+
+
+def test_illegal_intent_type_retries_then_fails_protocol():
+    illegal = {
+        "intent": "unknown_intent", "query": "分析一下", "confidence": 0.95,
+        "reason": "非法类型", "evidence": "分析一下",
+        "execution_mode": "conversation", "requires_slot_extraction": False,
+    }
+    requester = RecordingRequester([
+        FakeResponse(payload(illegal)), FakeResponse(payload(illegal)),
+    ])
+
+    with pytest.raises(IntentClassificationError, match="非法 intent"):
+        make_classifier(requester).classify("分析一下", "", False, [])
+
+    assert len(requester.calls) == 2
+
+
+def test_empty_intent_list_retries_then_fails_protocol():
+    requester = RecordingRequester([
+        FakeResponse(payload(finance_related=False)),
+        FakeResponse(payload(finance_related=False)),
+    ])
+
+    with pytest.raises(IntentClassificationError, match="至少一个意图"):
+        make_classifier(requester).classify("你好", "", False, [])

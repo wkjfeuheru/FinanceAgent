@@ -1,4 +1,5 @@
 import pytest
+import uuid
 
 import finance_agent.core.orchestrator as orchestrator_module
 from finance_agent.core.orchestrator import AdvisorSystem
@@ -48,7 +49,65 @@ def make_state(message, thread_id):
         "intent_source": "", "finance_related": True, "intent_stocks": {},
         "slot_tool_calls": [], "slot_tool_called": False,
         "slot_tool_source": "skipped", "slot_tool_error": "",
+        "uncertain_intents": [], "intent_clarification_state": {},
+        "intent_clarification_response": "",
     }
+
+
+def test_all_uncertain_intents_only_ask_for_clarification():
+    system = AdvisorSystem()
+    system.supervisor.plan_tasks = lambda *_args, **_kwargs: {
+        "intents": [],
+        "uncertain_intents": [{
+            "intent": "casual_chat", "query": "随便聊聊", "confidence": 0.8,
+            "reason": "目的不清", "evidence": "随便聊聊",
+            "execution_mode": "conversation", "requires_slot_extraction": False,
+            "clarification_question": "您想聊投资问题，还是其他话题？",
+        }],
+        "finance_related": False, "intent_source": "clarification",
+        "task_plan": ["compliance"],
+    }
+    system.compliance_agent.review = lambda **_kwargs: {"pass": True, "reason": ""}
+
+    result = system.graph.invoke(
+        make_state("随便聊聊", "all-uncertain"),
+        config={"configurable": {"thread_id": "all-uncertain"}},
+    )
+
+    assert result["task_plan"] == ["compliance"]
+    assert result["agent_response"] == "您想聊投资问题，还是其他话题？"
+    assert result["intent_clarification_state"]["round"] == 1
+    assert result["business_state"] == {}
+
+
+def test_mixed_result_appends_clarification_after_successful_workflow():
+    system = AdvisorSystem()
+    system.supervisor.plan_tasks = lambda *_args, **_kwargs: {
+        "intents": [{
+            "intent": "market_query", "query": "查看大盘", "confidence": 0.95,
+            "reason": "明确", "evidence": "查看大盘",
+            "execution_mode": "market_overview", "requires_slot_extraction": False,
+        }],
+        "uncertain_intents": [{
+            "intent": "asset_allocation", "query": "处理资金", "confidence": 0.7,
+            "reason": "不清楚", "evidence": "处理资金",
+            "execution_mode": "allocation", "requires_slot_extraction": True,
+            "clarification_question": "您是否希望进行资金比例配置？",
+        }],
+        "finance_related": True, "intent_source": "clarification",
+        "task_plan": ["compliance"],
+    }
+    system.stock_search.search_market_overview = lambda _query: "大盘分析完成"
+    system.compliance_agent.review = lambda **_kwargs: {"pass": True, "reason": ""}
+
+    result = system.graph.invoke(
+        make_state("查看大盘，顺便处理资金", "mixed-clarification"),
+        config={"configurable": {"thread_id": "mixed-clarification"}},
+    )
+
+    assert "大盘分析完成" in result["agent_response"]
+    assert "您是否希望进行资金比例配置？" in result["agent_response"]
+    assert "asset_allocation" not in result["task_plan"]
 
 
 def test_supervisor_receives_intent_context_and_pending_fields():
@@ -93,6 +152,196 @@ def test_supervisor_receives_intent_context_and_pending_fields():
         "pending_allocation": True,
         "pending_fields": ["budget_amount", "holding_period"],
     }
+
+
+def test_clarification_stops_after_three_questions():
+    uncertain = [{
+        "intent": "market_query", "query": "看看它", "confidence": 0.5,
+        "execution_mode": "security_analysis",
+        "clarification_question": "您想查看哪只股票？",
+    }]
+
+    state, response = AdvisorSystem._advance_intent_clarification({}, uncertain)
+    assert state["round"] == 1
+    assert response == "您想查看哪只股票？"
+    state, _ = AdvisorSystem._advance_intent_clarification(state, uncertain)
+    assert state["round"] == 2
+    state, _ = AdvisorSystem._advance_intent_clarification(state, uncertain)
+    assert state["round"] == 3
+
+    state, response = AdvisorSystem._advance_intent_clarification(state, uncertain)
+
+    assert state == {}
+    assert response == "仍无法准确判断您的意图，请使用完整句子重新描述您的需求。"
+
+
+def test_unrelated_high_confidence_intent_does_not_clear_pending_clarification():
+    previous = {
+        "status": "waiting_for_clarification", "round": 1,
+        "items": [{
+            "clarification_id": "market_query:0", "original_query": "看看它",
+            "candidate_intent": "market_query", "execution_mode": "security_analysis",
+            "question": "您想查看哪只股票？",
+        }],
+    }
+    unrelated = [{
+        "intent": "casual_chat", "query": "今天天气不错", "confidence": 0.98,
+        "execution_mode": "conversation", "clarification_id": "",
+    }]
+
+    state, response = AdvisorSystem._advance_intent_clarification(
+        previous, [], unrelated,
+    )
+
+    assert state == previous
+    assert response == ""
+
+
+def test_merged_confident_intent_can_resolve_multiple_clarification_items():
+    previous = {
+        "status": "waiting_for_clarification", "round": 1,
+        "items": [
+            {"clarification_id": "market_query:0", "original_query": "查它"},
+            {"clarification_id": "market_query:1", "original_query": "再看那个"},
+        ],
+    }
+    confident = [{
+        "intent": "market_query", "confidence": 0.96,
+        "clarification_id": "market_query:0",
+        "clarification_ids": ["market_query:0", "market_query:1"],
+    }]
+
+    state, response = AdvisorSystem._advance_intent_clarification(
+        previous, [], confident,
+    )
+
+    assert state == {}
+    assert response == ""
+
+
+def test_followup_receives_pending_state_and_can_correct_candidate_intent():
+    system = AdvisorSystem()
+    captured = {}
+
+    def clarified_plan(*args, **_kwargs):
+        captured["pending"] = args[4]
+        return {
+            "intents": [{
+                "intent": "casual_chat", "query": "我只是想聊天", "confidence": 0.95,
+                "reason": "用户明确纠正", "evidence": "只是想聊天",
+                "execution_mode": "conversation", "requires_slot_extraction": False,
+                "clarification_id": "market_query:0",
+            }],
+            "uncertain_intents": [], "finance_related": False,
+            "intent_source": "glm", "task_plan": ["casual_chat", "compliance"],
+        }
+
+    system.supervisor.plan_tasks = clarified_plan
+    system.supervisor.chat = lambda *_args, **_kwargs: "好的，我们轻松聊聊。"
+    system.compliance_agent.review = lambda **_kwargs: {"pass": True, "reason": ""}
+    state = make_state("我只是想聊天", "clarification-correction")
+    state["intent_clarification_state"] = {
+        "status": "waiting_for_clarification", "round": 1,
+        "items": [{
+            "clarification_id": "market_query:0", "original_query": "看看它",
+            "candidate_intent": "market_query", "execution_mode": "security_analysis",
+            "question": "您想查看哪只股票？",
+        }],
+    }
+
+    result = system.graph.invoke(
+        state, config={"configurable": {"thread_id": "clarification-correction"}},
+    )
+
+    assert captured["pending"]["items"][0]["original_query"] == "看看它"
+    assert result["intent_clarification_state"] == {}
+    assert "好的，我们轻松聊聊。" in result["agent_response"]
+    assert result["business_state"] == {}
+
+
+def test_uncertain_turn_does_not_persist_profile():
+    system = AdvisorSystem()
+    conversation_id = f"uncertain-profile-{uuid.uuid4().hex}"
+    system.supervisor.plan_tasks = lambda *_args, **_kwargs: {
+        "intents": [],
+        "uncertain_intents": [{
+            "intent": "asset_allocation", "query": "10万元稳健处理", "confidence": 0.6,
+            "reason": "是否配置不明确", "evidence": "10万元稳健处理",
+            "execution_mode": "allocation", "requires_slot_extraction": True,
+            "clarification_question": "您是否希望我给出具体仓位比例？",
+        }],
+        "finance_related": True, "intent_source": "clarification",
+        "task_plan": ["compliance"],
+    }
+    system.compliance_agent.review = lambda **_kwargs: {"pass": True, "reason": ""}
+    system.memory.load_context = lambda *_args, **_kwargs: {
+        "profile": {}, "context_text": "", "sliding_window": [],
+    }
+    system.memory.append_window_message = lambda *_args, **_kwargs: True
+    system.memory.update_recent_summary = lambda *_args, **_kwargs: True
+    profile_updates = []
+    system.memory.update_profile_from_result = lambda *args, **_kwargs: profile_updates.append(args)
+
+    result = system.handle_message(
+        "10万元稳健处理", customer_id="TEST",
+        conversation_id=conversation_id,
+    )
+
+    assert result["response"] == "您是否希望我给出具体仓位比例？"
+    assert profile_updates == []
+
+
+def test_handle_message_restores_clarification_from_checkpoint():
+    system = AdvisorSystem()
+    conversation_id = f"clarification-checkpoint-{uuid.uuid4().hex}"
+    calls = []
+
+    def plan_tasks(*args, **_kwargs):
+        calls.append(args)
+        if len(calls) == 1:
+            return {
+                "intents": [],
+                "uncertain_intents": [{
+                    "intent": "market_query", "query": "看看它", "confidence": 0.7,
+                    "reason": "对象不明", "evidence": "看看它",
+                    "execution_mode": "security_analysis", "requires_slot_extraction": True,
+                    "clarification_question": "您想查看哪只股票？",
+                }],
+                "finance_related": True, "intent_source": "clarification",
+                "task_plan": ["compliance"],
+            }
+        return {
+            "intents": [{
+                "intent": "casual_chat", "query": "不是查股票", "confidence": 0.96,
+                "reason": "用户纠正", "evidence": "不是查股票",
+                "execution_mode": "conversation", "requires_slot_extraction": False,
+                "clarification_id": "market_query:0",
+            }],
+            "uncertain_intents": [], "finance_related": False,
+            "intent_source": "glm", "task_plan": ["casual_chat", "compliance"],
+        }
+
+    system.supervisor.plan_tasks = plan_tasks
+    system.supervisor.chat = lambda *_args, **_kwargs: "明白了。"
+    system.compliance_agent.review = lambda **_kwargs: {"pass": True, "reason": ""}
+    system.memory.load_context = lambda *_args, **_kwargs: {
+        "profile": {}, "context_text": "", "sliding_window": [],
+    }
+    system.memory.append_window_message = lambda *_args, **_kwargs: True
+    system.memory.update_recent_summary = lambda *_args, **_kwargs: True
+    system.memory.update_profile_from_result = lambda *_args, **_kwargs: True
+
+    first = system.handle_message(
+        "看看它", customer_id="TEST", conversation_id=conversation_id,
+    )
+    second = system.handle_message(
+        "不是查股票", customer_id="TEST", conversation_id=conversation_id,
+    )
+
+    assert first["response"] == "您想查看哪只股票？"
+    assert calls[1][4]["status"] == "waiting_for_clarification"
+    assert calls[1][4]["items"][0]["original_query"] == "看看它"
+    assert "明白了。" in second["response"]
 
 
 def test_pending_state_does_not_override_supervisor_plan_from_cancel_keyword():

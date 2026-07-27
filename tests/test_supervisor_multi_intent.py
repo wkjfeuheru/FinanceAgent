@@ -11,6 +11,7 @@ class FakeGLMClassifier:
 
     def classify(
         self, message, context_summary="", pending_allocation=False, pending_fields=None,
+        pending_clarifications=None,
     ):
         self.calls.append((message, context_summary, pending_allocation, pending_fields or []))
         if isinstance(self.result, Exception):
@@ -66,7 +67,7 @@ def test_nli_returns_all_intents_and_deduplicates():
             {"intent": "market_query", "query": "查看市场", "confidence": 0.91, "reason": "GLM", "evidence": "查看市场", "execution_mode": "market_overview"},
             {"intent": "stock_recommendation", "query": "寻找标的", "confidence": 0.95, "reason": "GLM", "evidence": "寻找标的", "execution_mode": "candidate_search"},
             {"intent": "asset_allocation", "query": "安排资金", "confidence": 0.93, "reason": "GLM", "evidence": "安排资金", "execution_mode": "allocation"},
-            {"intent": "stock_recommendation", "query": "比较候选", "confidence": 0.72, "reason": "GLM", "evidence": "比较候选", "execution_mode": "security_comparison"},
+            {"intent": "stock_recommendation", "query": "比较候选", "confidence": 0.72, "reason": "GLM", "evidence": "比较候选", "execution_mode": "security_comparison", "clarification_question": "您希望按哪些指标比较候选股票？"},
         ],
         "finance_related": True,
     })
@@ -78,7 +79,8 @@ def test_nli_returns_all_intents_and_deduplicates():
     ]
     assert result["intents"][0]["execution_mode"] == "market_overview"
     assert result["intents"][1]["execution_mode"] == "candidate_search"
-    assert "比较候选" in result["intents"][1]["query"]
+    assert result["intents"][1]["query"] == "寻找标的"
+    assert result["uncertain_intents"][0]["query"] == "比较候选"
     assert result["task_plan"] == [
         "data_fetch", "fundamental_analysis", "asset_allocation", "compliance",
     ]
@@ -110,11 +112,12 @@ def test_nli_failure_returns_classification_error_without_fake_chat_intent():
     assert result["task_plan"] == ["compliance"]
 
 
-def test_empty_nli_result_uses_safe_fallback():
+def test_empty_nli_result_stops_workflow_as_classification_error():
     supervisor = make_supervisor({"intents": [], "finance_related": False})
     result = supervisor.plan_tasks("任意文本")
-    assert result["intent_source"] == "safe_fallback"
-    assert [item["intent"] for item in result["intents"]] == ["casual_chat"]
+    assert result["intent_source"] == "classification_error"
+    assert result["intents"] == []
+    assert result["task_plan"] == ["compliance"]
 
 
 def test_invalid_execution_mode_does_not_infer_route_from_query():
@@ -140,8 +143,8 @@ def test_non_finite_confidence_is_rejected():
         "finance_related": True,
     })
     result = supervisor.plan_tasks("安排资金")
-    assert result["intent_source"] == "safe_fallback"
-    assert [item["intent"] for item in result["intents"]] == ["casual_chat"]
+    assert result["intent_source"] == "classification_error"
+    assert result["intents"] == []
 
 
 def test_pending_fields_are_passed_to_glm_classifier():
@@ -165,3 +168,63 @@ def test_pending_fields_are_passed_to_glm_classifier():
         "2万元，稳健，持有一年", "此前正在配置", True,
         ["budget_amount", "risk_preference", "holding_period"],
     )]
+
+
+def test_low_confidence_intent_is_separated_from_executable_plan():
+    supervisor = make_supervisor({
+        "intents": [{
+            "intent": "stock_recommendation", "query": "推荐它", "confidence": 0.89,
+            "reason": "指代不清", "evidence": "推荐它",
+            "execution_mode": "candidate_search", "requires_slot_extraction": False,
+            "clarification_question": "您希望推荐哪个行业或主题的股票？",
+        }],
+        "finance_related": True,
+    })
+
+    result = supervisor.plan_tasks("推荐它")
+
+    assert result["intents"] == []
+    assert result["uncertain_intents"][0]["confidence"] == 0.89
+    assert result["intent_source"] == "clarification"
+    assert result["task_plan"] == ["compliance"]
+
+
+def test_confidence_equal_to_threshold_executes_normally():
+    supervisor = make_supervisor({
+        "intents": [{
+            "intent": "casual_chat", "query": "聊聊", "confidence": 0.9,
+            "reason": "明确闲聊", "evidence": "聊聊",
+            "execution_mode": "conversation", "requires_slot_extraction": False,
+        }],
+        "finance_related": False,
+    })
+
+    result = supervisor.plan_tasks("聊聊")
+
+    assert [item["intent"] for item in result["intents"]] == ["casual_chat"]
+    assert result["uncertain_intents"] == []
+
+
+def test_mixed_confidence_executes_only_high_confidence_intent():
+    supervisor = make_supervisor({
+        "intents": [
+            {
+                "intent": "market_query", "query": "查看大盘", "confidence": 0.95,
+                "reason": "明确", "evidence": "查看大盘",
+                "execution_mode": "market_overview", "requires_slot_extraction": False,
+            },
+            {
+                "intent": "asset_allocation", "query": "顺便处理资金", "confidence": 0.7,
+                "reason": "不清楚是否配置", "evidence": "处理资金",
+                "execution_mode": "allocation", "requires_slot_extraction": True,
+                "clarification_question": "您是否希望进行资金比例配置？",
+            },
+        ],
+        "finance_related": True,
+    })
+
+    result = supervisor.plan_tasks("查看大盘，顺便处理资金")
+
+    assert [item["intent"] for item in result["intents"]] == ["market_query"]
+    assert [item["intent"] for item in result["uncertain_intents"]] == ["asset_allocation"]
+    assert "asset_allocation" not in result["task_plan"]
