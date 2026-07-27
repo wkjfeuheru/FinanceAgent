@@ -27,6 +27,7 @@ docs/chroma_db/
 frontend/node_modules/
 frontend/dist/
 .superdesign/tmp/
+.worktrees/
 
 # OS
 .DS_Store
