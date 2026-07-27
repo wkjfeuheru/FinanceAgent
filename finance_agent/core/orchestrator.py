@@ -45,8 +45,8 @@ from finance_agent.agents.supervisor import (
     SupervisorAgent,
     requires_slot_extraction,
 )
-from finance_agent.agents.profile_extraction import (
-    SlotExtractionAgent,
+from finance_agent.tools.finance_slots import (
+    FinanceSlotsExtractor,
     create_extract_finance_slots_tool,
 )
 from finance_agent.agents.data_fetch import DataFetchAgent
@@ -118,9 +118,7 @@ class AdvisorSystem:
         self.supervisor = SupervisorAgent(
             shared_memory=self.shared_memory, checkpointer=self.checkpointer,
         )
-        self.slot_agent = SlotExtractionAgent(
-            shared_memory=self.shared_memory, checkpointer=self.checkpointer,
-        )
+        self.finance_slots_extractor = FinanceSlotsExtractor()
         self.data_fetch_agent = DataFetchAgent(
             shared_memory=self.shared_memory, checkpointer=self.checkpointer,
         )
@@ -461,7 +459,7 @@ class AdvisorSystem:
                 if isinstance(item, dict) and item.get("intent") in candidates
             ]
             slot_tool = create_extract_finance_slots_tool(
-                self.slot_agent,
+                self.finance_slots_extractor,
                 state.get("user_profile", {}) or {},
                 self._format_chat_history(state.get("chat_history", [])),
             )
@@ -538,7 +536,7 @@ class AdvisorSystem:
                 intent = str(args.get("intent", ""))
                 try:
                     slot_tool = create_extract_finance_slots_tool(
-                        self.slot_agent,
+                        self.finance_slots_extractor,
                         user_profile,
                         self._format_chat_history(state.get("chat_history", [])),
                     )

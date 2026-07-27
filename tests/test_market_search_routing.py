@@ -97,10 +97,7 @@ def test_unsupported_market_plan_returns_error_without_legacy_slot_agent():
         "task_plan": ["compliance"],
     }
 
-    def reject_legacy_path(_message):
-        raise AssertionError("unsupported 计划不得调用旧槽位 Agent")
-
-    system.slot_agent.handle = reject_legacy_path
+    assert not hasattr(system, "slot_agent")
 
     result = system.graph.invoke(
         make_state(plan["query"], "unsupported-market-plan"),

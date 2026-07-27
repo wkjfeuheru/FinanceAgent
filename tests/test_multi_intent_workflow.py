@@ -2,6 +2,14 @@ import pytest
 
 import finance_agent.core.orchestrator as orchestrator_module
 from finance_agent.core.orchestrator import AdvisorSystem
+from finance_agent.tools.finance_slots import FinanceSlotsExtractor
+
+
+def test_advisor_system_exposes_slot_tool_runtime_not_slot_agent():
+    system = AdvisorSystem()
+
+    assert isinstance(system.finance_slots_extractor, FinanceSlotsExtractor)
+    assert not hasattr(system, "slot_agent")
 
 
 def make_state(message, thread_id):
@@ -117,7 +125,7 @@ def test_market_overview_survives_allocation_waiting_state():
         "args": {"intent": "asset_allocation", "query": allocation_query},
         "id": "allocation-slots",
     }]
-    system.slot_agent.extract_slots = lambda *_args, **_kwargs: {
+    system.finance_slots_extractor.extract_slots = lambda *_args, **_kwargs: {
         "user_profile": {}, "resolved_stocks": [], "explicit_stock_codes": [],
     }
     system.stock_search.search_market_overview = lambda _query: "市场概览成功"
@@ -173,7 +181,7 @@ def test_allocation_uses_its_own_stocks_instead_of_query_keywords():
         {"code": "600000", "name": "浦发银行", "industry": "银行"},
         {"code": "600036", "name": "招商银行", "industry": "银行"},
     ]
-    system.slot_agent.extract_slots = lambda *_args, **_kwargs: {
+    system.finance_slots_extractor.extract_slots = lambda *_args, **_kwargs: {
         "user_profile": {
             "risk_preference": "R2 中低风险", "budget_amount": 100000,
             "holding_period": "1年", "investment_goal": "稳健增值",
@@ -248,7 +256,7 @@ def test_recommendation_allocation_and_chat_are_combined():
         "id": "tool-1",
     }]
     system.supervisor.chat = lambda *_args, **_kwargs: "投资出现焦虑很常见，可以先复盘风险承受能力。"
-    system.slot_agent.extract_slots = lambda *_args, **_kwargs: {
+    system.finance_slots_extractor.extract_slots = lambda *_args, **_kwargs: {
         "user_profile": {
             "risk_preference": "R2 中低风险", "budget_amount": 100000,
             "holding_period": "1年", "stock_codes": [],
@@ -346,7 +354,7 @@ def test_malformed_model_tool_calls_use_deterministic_fallback():
             "explicit_stock_codes": [],
         }
 
-    system.slot_agent.extract_slots = extract_slots
+    system.finance_slots_extractor.extract_slots = extract_slots
 
     result = system.graph.invoke(
         make_state(query, "malformed-tool-calls"),
