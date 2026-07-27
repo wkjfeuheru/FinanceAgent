@@ -1299,7 +1299,10 @@ class AdvisorSystem:
                 conversation_id, self.memory.window_size,
             )
         memory_data = self.memory.load_context(customer_id, conversation_id, fallback_history)
-        effective_history = memory_data.get("sliding_window") or fallback_history[-5:]
+        effective_history = (
+            memory_data.get("sliding_window")
+            or fallback_history[-self.memory.window_size:]
+        )
 
         initial_state: AdvisorState = {
             "user_message": message,

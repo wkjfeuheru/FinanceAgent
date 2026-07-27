@@ -54,15 +54,16 @@ def recommendation_intent(query="最近AI行业有什么值得投资的股票，
 
 
 def make_classifier(requester, **overrides):
-    return GLMIntentClassifier(
-        api_key="zhipu-test-key",
-        base_url="https://open.bigmodel.cn/api/paas/v4/chat/completions",
-        model="glm-4.7-flash",
-        timeout=30,
-        max_retries=1,
-        requester=requester,
-        **overrides,
-    )
+    options = {
+        "api_key": "zhipu-test-key",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+        "model": "glm-4.7-flash",
+        "timeout": 30,
+        "max_retries": 1,
+        "requester": requester,
+    }
+    options.update(overrides)
+    return GLMIntentClassifier(**options)
 
 
 def test_glm_request_uses_structured_current_turn_and_recent_summary():
@@ -156,3 +157,26 @@ def test_missing_api_key_fails_without_request():
         classifier.classify("推荐股票", "", False, [])
 
     assert requester.calls == []
+
+
+def test_non_official_base_url_is_rejected_without_sending_api_key():
+    requester = RecordingRequester([])
+    classifier = GLMIntentClassifier(
+        api_key="secret", base_url="https://attacker.example/chat",
+        model="glm-4.7-flash", requester=requester,
+    )
+
+    with pytest.raises(IntentClassificationError, match="智谱官方"):
+        classifier.classify("推荐股票", "", False, [])
+
+    assert requester.calls == []
+
+
+def test_retry_count_is_capped_at_one():
+    requester = RecordingRequester([FakeResponse("bad"), FakeResponse("still bad")])
+    classifier = make_classifier(requester, max_retries=99)
+
+    with pytest.raises(IntentClassificationError):
+        classifier.classify("推荐股票", "", False, [])
+
+    assert len(requester.calls) == 2

@@ -82,3 +82,25 @@ def test_intent_context_uses_latest_six_messages_without_profile():
     assert "风险偏好" not in context
     assert len(context) <= 1500
     assert all(len(line.split(": ", 1)[-1]) <= 180 for line in context.splitlines())
+
+
+def test_load_context_preserves_six_fallback_messages_for_intent_summary():
+    class EmptyStore:
+        def get_summary(self, _conversation_id):
+            return ""
+
+        def get_window_messages(self, _conversation_id, _window_size):
+            return []
+
+    memory = AgentMemoryContext(store=EmptyStore())
+    fallback = [
+        {"role": "user", "content": f"第{i}条"}
+        for i in range(8)
+    ]
+
+    loaded = memory.load_context("CUST001", "conv", fallback)
+
+    assert memory.window_size == 6
+    assert [item["content"] for item in loaded["sliding_window"]] == [
+        "第2条", "第3条", "第4条", "第5条", "第6条", "第7条",
+    ]

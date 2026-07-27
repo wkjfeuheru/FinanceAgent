@@ -270,7 +270,7 @@ class AgentMemoryContext:
         self,
         store: RedisMemoryStore | None = None,
         checkpointer: Any = None,
-        window_size: int = 5,
+        window_size: int = 6,
         summary_size: int = 10,
         max_context_chars: int = 6000,
     ):

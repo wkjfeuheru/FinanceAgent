@@ -11,6 +11,7 @@ import json
 import logging
 import math
 from typing import Any, Callable, Dict, List
+from urllib.parse import urlparse
 
 import requests
 
@@ -73,7 +74,7 @@ class GLMIntentClassifier:
         self.base_url = base_url.strip()
         self.model = model.strip()
         self.timeout = timeout
-        self.max_retries = max(0, max_retries)
+        self.max_retries = min(max(0, max_retries), 1)
         self.requester = requester
 
     @staticmethod
@@ -109,6 +110,11 @@ class GLMIntentClassifier:
     ) -> dict[str, Any]:
         if not self.api_key:
             raise IntentClassificationError("缺少 ZHIPU_API_KEY")
+        parsed_url = urlparse(self.base_url)
+        if parsed_url.scheme != "https" or parsed_url.hostname != "open.bigmodel.cn":
+            raise IntentClassificationError(
+                "ZHIPU_BASE_URL 必须使用智谱官方 HTTPS 地址"
+            )
         request_input = {
             "current_message": message.strip(),
             "recent_context_summary": context_summary.strip(),
