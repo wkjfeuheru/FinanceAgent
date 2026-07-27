@@ -43,9 +43,7 @@ from finance_agent.core.shared_state import SharedWorkingMemory
 from finance_agent.core.memory import AgentMemoryContext, RedisMemoryStore
 from finance_agent.agents.supervisor import (
     SupervisorAgent,
-    needs_market_overview_search,
-    needs_slot_extraction,
-    needs_stock_screening,
+    requires_slot_extraction,
 )
 from finance_agent.agents.profile_extraction import (
     SlotExtractionAgent,
@@ -360,6 +358,13 @@ class AdvisorSystem:
         return state["user_message"]
 
     @staticmethod
+    def _intent_plan(state: AdvisorState, intent: str) -> Dict[str, Any]:
+        for item in state.get("detected_intents", []) or []:
+            if isinstance(item, dict) and item.get("intent") == intent:
+                return item
+        return {}
+
+    @staticmethod
     def _compose_intent_draft(state: AdvisorState) -> str:
         """按用户友好的顺序组合独立工作流结果。"""
         results = state.get("intent_results", {}) or {}
@@ -432,9 +437,9 @@ class AdvisorSystem:
             """返回业务上可能需要槽位工具的意图及其独立子请求。"""
             candidates: dict[str, str] = {}
             for intent in self._intent_names(state):
-                query = self._intent_query(state, intent)
-                if needs_slot_extraction(intent, query):
-                    candidates[intent] = query
+                plan = self._intent_plan(state, intent)
+                if requires_slot_extraction(plan):
+                    candidates[intent] = self._intent_query(state, intent)
             return candidates
 
         def slot_tool_decision_handler(state: AdvisorState) -> AdvisorState:
@@ -652,9 +657,12 @@ class AdvisorSystem:
             intent_results = state.get("intent_results", {}) or {}
             intent_stocks = state.get("intent_stocks", {}) or {}
 
-            if "market_query" in intent_names and needs_market_overview_search(
-                self._intent_query(state, "market_query")
-            ):
+            market_mode = self._intent_plan(state, "market_query").get("execution_mode")
+            recommendation_mode = self._intent_plan(
+                state, "stock_recommendation",
+            ).get("execution_mode")
+
+            if "market_query" in intent_names and market_mode == "market_overview":
                 try:
                     self._emit_progress("stock_search", "正在搜索板块与行业市场资料")
                     market_response = self.stock_search.search_market_overview(
@@ -672,10 +680,8 @@ class AdvisorSystem:
             if (
                 "data_fetch" in (state.get("task_plan", []) or [])
                 and "stock_recommendation" in intent_names
-                and (
-                    needs_stock_screening(self._intent_query(state, "stock_recommendation"))
-                    or not intent_stocks.get("stock_recommendation")
-                )
+                and recommendation_mode == "candidate_search"
+                and not intent_stocks.get("stock_recommendation")
             ):
                 try:
                     self._emit_progress("stock_search", "正在搜索相关行业的A股候选")
@@ -713,10 +719,6 @@ class AdvisorSystem:
                     "stock_recommendation"
                     if "stock_recommendation" in intent_names else "market_query"
                 )
-                if "asset_allocation" in intent_names and needs_market_overview_search(
-                    self._intent_query(state, "market_query")
-                ):
-                    target = "asset_allocation"
                 intent_results[target] = {
                     "status": "error", "content": state["stock_resolution_error"],
                 }
@@ -988,8 +990,10 @@ class AdvisorSystem:
                     "status": "success" if recommendation_analysis else "error",
                     "content": summary,
                 }
-            if "market_query" in intent_names and not needs_market_overview_search(
-                self._intent_query(state, "market_query")
+            if (
+                "market_query" in intent_names
+                and self._intent_plan(state, "market_query").get("execution_mode")
+                == "security_analysis"
             ):
                 market_codes = codes_for("market_query")
                 market_analysis = {

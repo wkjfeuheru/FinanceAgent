@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import re
 import json
 import logging
 import time
@@ -120,68 +119,14 @@ def normalize_intent_item(
     }
 
 
-def needs_stock_screening(message: str) -> bool:
-    """仅在当前消息明确要求行业、主题或候选筛选时调用外部搜索。"""
-    normalized = (message or "").strip().lower()
-    screening_markers = (
-        "推荐", "选股", "筛选", "候选", "股票池", "概念股",
-        "行业股票", "板块股票", "行业龙头", "板块龙头", "找几只", "来几只",
+def requires_slot_extraction(intent_plan: Dict[str, Any]) -> bool:
+    """Authorize slot extraction only from a validated supervisor plan."""
+    intent = str(intent_plan.get("intent", ""))
+    mode = str(intent_plan.get("execution_mode", ""))
+    return bool(
+        intent_plan.get("requires_slot_extraction")
+        and _EXECUTION_MODES.get(intent, {}).get(mode) is True
     )
-    return any(marker in normalized for marker in screening_markers)
-
-
-def needs_market_overview_search(message: str) -> bool:
-    """识别不指向个股、需要网页资料回答的板块/行业市场问题。"""
-    normalized = (message or "").strip().lower()
-    market_scope = ("板块", "行业", "概念")
-    research_intent = (
-        "涨幅", "跌幅", "领涨", "领跌", "排名", "排行", "最高", "最低",
-        "表现", "走势", "资金流入", "资金流出", "热点",
-    )
-    return (
-        any(word in normalized for word in market_scope)
-        and any(word in normalized for word in research_intent)
-    )
-
-
-def _has_explicit_stock_reference(query: str) -> bool:
-    text = (query or "").strip()
-    if re.search(
-        r"(?<!\d)(?:60\d{4}|00\d{4}|30\d{4}|68\d{4}|8\d{5}|4\d{5})(?!\d)",
-        text,
-    ):
-        return True
-    if any(word in text for word in ("个股", "这只股票", "该股", "这只股")):
-        return True
-    common_names = (
-        "贵州茅台", "茅台", "五粮液", "宁德时代", "招商银行", "招行",
-        "浦发银行", "工商银行", "建设银行", "农业银行", "中国银行",
-        "中国平安", "比亚迪", "格力电器", "美的集团", "中芯国际",
-    )
-    return any(name in text for name in common_names)
-
-
-def _has_non_stock_market_scope(query: str) -> bool:
-    text = (query or "").strip()
-    markers = (
-        "板块", "行业", "概念", "指数", "大盘", "市场整体",
-        "黄金", "白银", "原油", "商品", "期货", "外汇", "汇率",
-        "美元", "人民币", "欧元", "日元",
-    )
-    return any(marker in text for marker in markers)
-
-
-def needs_slot_extraction(intent: str, query: str) -> bool:
-    """确定槽位工具的候选边界；模型在候选范围内生成原生 tool_calls。"""
-    if intent == "asset_allocation":
-        return True
-    if _has_non_stock_market_scope(query):
-        return False
-    if intent == "market_query":
-        return _has_explicit_stock_reference(query)
-    if intent == "stock_recommendation":
-        return not needs_stock_screening(query)
-    return False
 
 
 class SupervisorAgent(BaseFinanceAgent):
