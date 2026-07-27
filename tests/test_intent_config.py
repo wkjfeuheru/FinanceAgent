@@ -4,9 +4,7 @@ import subprocess
 import sys
 
 
-INTENT_ENV_NAMES = (
-    "INTENT_CLASSIFIER_MODE",
-    "INTENT_ZERO_SHOT_MODEL",
+RELEVANT_ENV_NAMES = (
     "INTENT_MODEL_CACHE_DIR",
     "INTENT_MAX_LENGTH",
     "INTENT_SCORE_THRESHOLD",
@@ -16,7 +14,7 @@ INTENT_ENV_NAMES = (
 
 def run_config(overrides):
     environment = os.environ.copy()
-    for name in INTENT_ENV_NAMES:
+    for name in RELEVANT_ENV_NAMES:
         environment.pop(name, None)
     environment["DEEPSEEK_API_KEY"] = environment.get(
         "DEEPSEEK_API_KEY", "sk-test-config-only"
@@ -24,40 +22,44 @@ def run_config(overrides):
     environment.update(overrides)
     script = """
 import json
-from finance_agent.config import (
-    INTENT_CLASSIFIER_MODE,
-    INTENT_DEVICE,
-    INTENT_MAX_LENGTH,
-    INTENT_SCORE_THRESHOLD,
-    INTENT_ZERO_SHOT_MODEL,
-)
+import finance_agent.config as config
 print(json.dumps({
-    "mode": INTENT_CLASSIFIER_MODE,
-    "model": INTENT_ZERO_SHOT_MODEL,
-    "max_length": INTENT_MAX_LENGTH,
-    "threshold": INTENT_SCORE_THRESHOLD,
-    "device": INTENT_DEVICE,
+    "cache_dir": config.INTENT_MODEL_CACHE_DIR,
+    "max_length": config.INTENT_MAX_LENGTH,
+    "threshold": config.INTENT_SCORE_THRESHOLD,
+    "device": config.INTENT_DEVICE,
+    "removed": {
+        name: hasattr(config, name)
+        for name in (
+            "INTENT_CLASSIFIER_MODE", "INTENT_MODEL", "INTENT_MODEL_TIMEOUT",
+            "INTENT_MODEL_MAX_RETRIES", "INTENT_ZERO_SHOT_MODEL",
+        )
+    },
 }))
 """
     output = subprocess.check_output(
-        [sys.executable, "-c", script],
-        env=environment,
-        text=True,
+        [sys.executable, "-c", script], env=environment, text=True,
     )
     return json.loads(output)
 
 
-def test_invalid_intent_mode_defaults_to_shadow():
-    result = run_config({"INTENT_CLASSIFIER_MODE": "bert"})
-    assert result["mode"] == "shadow"
-
-
-def test_zero_shot_defaults_are_production_safe():
-    result = run_config({})
+def test_only_runtime_nli_settings_remain_configurable():
+    result = run_config({
+        "INTENT_MODEL_CACHE_DIR": "models/intent",
+        "INTENT_MAX_LENGTH": "384",
+        "INTENT_SCORE_THRESHOLD": "0.7",
+        "INTENT_DEVICE": "1",
+    })
     assert result == {
-        "mode": "shadow",
-        "model": "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli",
-        "max_length": 256,
-        "threshold": 0.5,
-        "device": -1,
+        "cache_dir": "models/intent",
+        "max_length": 384,
+        "threshold": 0.7,
+        "device": 1,
+        "removed": {
+            "INTENT_CLASSIFIER_MODE": False,
+            "INTENT_MODEL": False,
+            "INTENT_MODEL_TIMEOUT": False,
+            "INTENT_MODEL_MAX_RETRIES": False,
+            "INTENT_ZERO_SHOT_MODEL": False,
+        },
     }

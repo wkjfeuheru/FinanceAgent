@@ -74,16 +74,6 @@ QIANFAN_SEARCH_TIMEOUT = int(os.getenv("QIANFAN_SEARCH_TIMEOUT", "60"))
 LLM_REQUEST_TIMEOUT = float(os.getenv("LLM_REQUEST_TIMEOUT", "45"))
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "1"))
 FINAL_SYNTHESIS_TIMEOUT = float(os.getenv("FINAL_SYNTHESIS_TIMEOUT", "20"))
-INTENT_MODEL = os.getenv("INTENT_MODEL", "deepseek:deepseek-v4-flash").strip()
-INTENT_MODEL_TIMEOUT = float(os.getenv("INTENT_MODEL_TIMEOUT", "10"))
-INTENT_MODEL_MAX_RETRIES = int(os.getenv("INTENT_MODEL_MAX_RETRIES", "1"))
-INTENT_CLASSIFIER_MODE = os.getenv("INTENT_CLASSIFIER_MODE", "shadow").strip().lower()
-if INTENT_CLASSIFIER_MODE not in {"shadow", "zero_shot", "llm"}:
-    INTENT_CLASSIFIER_MODE = "shadow"
-INTENT_ZERO_SHOT_MODEL = os.getenv(
-    "INTENT_ZERO_SHOT_MODEL",
-    "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli",
-).strip()
 INTENT_MODEL_CACHE_DIR = os.getenv("INTENT_MODEL_CACHE_DIR", "").strip()
 INTENT_MAX_LENGTH = int(os.getenv("INTENT_MAX_LENGTH", "256"))
 INTENT_SCORE_THRESHOLD = float(os.getenv("INTENT_SCORE_THRESHOLD", "0.5"))
@@ -128,20 +118,15 @@ def get_model_for_agent(
     )
 
 
-def get_intent_model():
-    """返回兼容旧分类链的模型；新代码应分别使用分类器和闲聊模型。"""
+def get_supervisor_model():
+    """返回监督者用于工具决策与闲聊生成的轻量模型。"""
     return init_chat_model(
-        INTENT_MODEL,
+        "deepseek:deepseek-v4-flash",
         api_key=DEEPSEEK_API_KEY,
         temperature=0,
-        timeout=INTENT_MODEL_TIMEOUT,
-        max_retries=INTENT_MODEL_MAX_RETRIES,
+        timeout=LLM_REQUEST_TIMEOUT,
+        max_retries=LLM_MAX_RETRIES,
     )
-
-
-def get_supervisor_chat_model():
-    """返回用于 Supervisor 理财闲聊生成的低成本模型。"""
-    return get_intent_model()
 
 
 # ── Checkpoint Saver ────────────────────────────────────────────

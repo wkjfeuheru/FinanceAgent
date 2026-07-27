@@ -12,7 +12,6 @@ import logging
 import math
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List
 
 from langchain_core.output_parsers import StrOutputParser
@@ -21,15 +20,11 @@ from langchain_core.tools import BaseTool
 
 from finance_agent.agents.base import BaseFinanceAgent
 from finance_agent.config import (
-    INTENT_CLASSIFIER_MODE,
     INTENT_DEVICE,
     INTENT_MAX_LENGTH,
     INTENT_MODEL_CACHE_DIR,
     INTENT_SCORE_THRESHOLD,
-    INTENT_ZERO_SHOT_MODEL,
-    get_intent_model,
-    get_supervisor_chat_model,
-    safe_parse_json,
+    get_supervisor_model,
 )
 
 
@@ -162,43 +157,8 @@ class ZeroShotIntentClassifier:
         }
 
 
-_SUPERVISOR_PROMPT = """你是金融投顾系统的多意图分类器。你只负责分类和拆分请求，不回答问题，不生成工作流节点。
-
-必须识别当前消息中所有独立目标。同一意图只返回一次，并把同类目标合并为一个 query。
-query 只能包含该意图负责的内容。上下文只用于解析指代，不得根据历史话题添加本轮未表达的意图。
-
-## 业务边界
-1. market_query（行情咨询）
-- 包含：具体证券的价格、涨跌、成交、估值、财务、业绩、公告、基本面；指数、行业、板块、概念的行情、排行、资金和历史表现。
-- 不包含：要求筛选值得投资的标的；要求资金、仓位或权重方案；一般知识、经验、心态或情绪交流。
-
-2. stock_recommendation（选股推荐）
-- 包含：推荐、筛选、寻找或比较候选标的、行业龙头、股票池；判断哪只更值得关注或投资。
-- 不包含：仅查询客观数据；已经确定标的后要求分配预算；一般投资方法交流。
-
-3. asset_allocation（资产配置）
-- 包含：预算、仓位、权重、期限、资金分配；构建、调整、再平衡或优化组合。
-- “推荐后怎么配”“筛选股票并分配10万元”同时包含 stock_recommendation 和 asset_allocation。
-- 一般性的资产配置知识解释属于 casual_chat。
-
-4. casual_chat（理财闲聊）
-- 包含：投资情绪、亏损或踏空后的感受；经验、习惯、纪律、心态、复盘；不要求具体市场数据的一般金融知识；问候和能力咨询。
-- 不包含：具体标的、市场、日期或指标的数据查询；筛选标的；个人资金配置方案。
-- 完全无关金融的话题也返回 casual_chat，但 finance_related=false。
-
-## 强制规则
-- 不得使用优先级丢弃意图；一条消息可以同时返回多个意图。
-- 不得仅因出现“股票、投资、基金”等词就添加业务意图。
-- 情绪或经验表达与业务请求并存时，必须同时返回 casual_chat 和对应业务意图。
-- 若存在等待补充的资产配置任务，预算、风险偏好、期限、标的等短回复必须包含 asset_allocation。
-- “什么是市盈率”是 casual_chat；“贵州茅台当前市盈率是多少”是 market_query。
-- “分析茅台基本面并告诉我是否值得买”同时是 market_query 和 stock_recommendation。
-
-## 输出格式
-只输出合法JSON：
-{{"intents":[{{"intent":"market_query|stock_recommendation|asset_allocation|casual_chat","query":"该工作流需要处理的独立子请求","confidence":0.0,"reason":"简短原因","execution_mode":"security_analysis|market_overview|candidate_search|security_comparison|allocation|conversation","requires_slot_extraction":false}}],"finance_related":true}}
-
-execution_mode 必须与 intent 匹配：market_query 使用 security_analysis 或 market_overview；stock_recommendation 使用 candidate_search 或 security_comparison；asset_allocation 使用 allocation；casual_chat 使用 conversation。requires_slot_extraction 仅在 security_analysis、security_comparison、allocation 时为 true。
+_SUPERVISOR_PROMPT = """你是金融投顾系统的监督者，负责根据已识别意图编排工作流。
+不得重新解释用户原文来增加意图，也不得直接执行金融数据工具。
 """
 
 _INTENTS = ("market_query", "stock_recommendation", "asset_allocation", "casual_chat")
@@ -214,8 +174,6 @@ _NLI_MODE_DEFAULTS = {
     "asset_allocation": "allocation",
     "casual_chat": "conversation",
 }
-_CONFIDENCE_THRESHOLD = 0.65
-_SHADOW_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="intent-shadow")
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -268,7 +226,6 @@ class SupervisorAgent(BaseFinanceAgent):
 
     def __init__(self, shared_memory=None, checkpointer=None):
         super().__init__(shared_memory=shared_memory, checkpointer=checkpointer)
-        self._intent_chain = None
         self._zero_shot_classifier = None
 
     def _get_tools(self) -> list:
@@ -276,22 +233,6 @@ class SupervisorAgent(BaseFinanceAgent):
 
     def _get_system_prompt(self) -> str:
         return _SUPERVISOR_PROMPT
-
-    @property
-    def intent_chain(self):
-        """轻量模型多意图分类链。"""
-        if self._intent_chain is None:
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", _SUPERVISOR_PROMPT),
-                (
-                    "human",
-                    "近期对话：\n{context}\n\n"
-                    "是否存在等待补充的资产配置任务：{pending_allocation}\n\n"
-                    "当前用户输入：{message}\n\n请输出多意图分类JSON：",
-                ),
-            ])
-            self._intent_chain = prompt | get_intent_model() | StrOutputParser()
-        return self._intent_chain
 
     @property
     def zero_shot_classifier(self) -> ZeroShotIntentClassifier:
@@ -310,78 +251,19 @@ class SupervisorAgent(BaseFinanceAgent):
     ) -> Dict[str, Any]:
         return self.zero_shot_classifier.predict(message, context, pending_allocation)
 
-    def _submit_shadow_prediction(
-        self,
-        message: str,
-        context: str,
-        pending_allocation: bool,
-        primary: Dict[str, Any],
-        primary_latency_ms: float,
-    ) -> None:
-        """Evaluate zero-shot NLI without changing the primary classification."""
-        def run() -> None:
-            try:
-                shadow = self._predict_zero_shot(message, context, pending_allocation)
-                primary_labels = sorted(
-                    str(item.get("intent", ""))
-                    for item in primary.get("intents", [])
-                    if isinstance(item, dict)
-                )
-                shadow_labels = sorted(
-                    str(item.get("intent", ""))
-                    for item in shadow.get("intents", [])
-                    if isinstance(item, dict)
-                )
-                _LOGGER.info("intent_shadow %s", json.dumps({
-                    "primary_labels": primary_labels,
-                    "shadow_labels": shadow_labels,
-                    "matched": primary_labels == shadow_labels,
-                    "primary_latency_ms": primary_latency_ms,
-                    "shadow_latency_ms": shadow.get("latency_ms"),
-                }, ensure_ascii=False))
-            except Exception as exc:
-                _LOGGER.warning("intent_shadow_unavailable error=%s", exc)
-
-        _SHADOW_EXECUTOR.submit(run)
-
     def classify_intents(
         self,
         message: str,
         context: str = "",
         pending_allocation: bool = False,
     ) -> Dict[str, Any]:
-        """调用轻量模型分类，校验并合并同类意图。"""
-        source = "zero_shot" if INTENT_CLASSIFIER_MODE == "zero_shot" else "model"
-        classification_started = time.perf_counter()
-        if INTENT_CLASSIFIER_MODE == "zero_shot":
-            try:
-                parsed = self._predict_zero_shot(message, context, pending_allocation)
-            except Exception as exc:
-                _LOGGER.warning("intent_zero_shot_unavailable error=%s", exc)
-                parsed = {}
-        else:
-            try:
-                raw = self.intent_chain.invoke({
-                    "context": context or "无上下文",
-                    "message": message,
-                    "pending_allocation": "是" if pending_allocation else "否",
-                })
-                parsed = safe_parse_json(raw, {})
-            except Exception as exc:
-                _LOGGER.warning("intent_model_unavailable error=%s", exc)
-                parsed = {}
-
-            if (
-                INTENT_CLASSIFIER_MODE == "shadow"
-                and hasattr(self, "_zero_shot_classifier")
-            ):
-                self._submit_shadow_prediction(
-                    message,
-                    context,
-                    pending_allocation,
-                    parsed,
-                    round((time.perf_counter() - classification_started) * 1000, 2),
-                )
+        """使用固定多语言 NLI 分类器识别并合并本轮全部意图。"""
+        source = "zero_shot"
+        try:
+            parsed = self._predict_zero_shot(message, context, pending_allocation)
+        except Exception as exc:
+            _LOGGER.warning("intent_zero_shot_unavailable error=%s", exc)
+            parsed = {}
 
         def merge_valid(payload: Any, classifier_source: str) -> dict[str, dict[str, Any]]:
             merged_items: dict[str, dict[str, Any]] = {}
@@ -398,10 +280,7 @@ class SupervisorAgent(BaseFinanceAgent):
                 item = normalize_intent_item(candidate, message)
                 if item is None:
                     continue
-                confidence_floor = (
-                    0.0 if classifier_source == "zero_shot" else _CONFIDENCE_THRESHOLD
-                )
-                if item["confidence"] < confidence_floor:
+                if item["confidence"] < INTENT_SCORE_THRESHOLD:
                     continue
                 intent = item["intent"]
                 if intent in merged_items:
@@ -415,14 +294,6 @@ class SupervisorAgent(BaseFinanceAgent):
             return merged_items
 
         merged = merge_valid(parsed, source)
-        if not merged and source != "zero_shot":
-            try:
-                parsed = self._predict_zero_shot(message, context, pending_allocation)
-                source = "zero_shot"
-                merged = merge_valid(parsed, source)
-            except Exception as exc:
-                _LOGGER.warning("intent_zero_shot_unavailable error=%s", exc)
-
         if not merged:
             source = "safe_fallback"
             fallback = normalize_intent_item({
@@ -500,7 +371,7 @@ class SupervisorAgent(BaseFinanceAgent):
             ),
             ("human", "近期对话：\n{context}\n\n闲聊子请求：{query}"),
         ])
-        return (prompt | get_supervisor_chat_model() | StrOutputParser()).invoke({
+        return (prompt | get_supervisor_model() | StrOutputParser()).invoke({
             "context": context or "无上下文",
             "query": query,
         }).strip()
@@ -528,7 +399,7 @@ class SupervisorAgent(BaseFinanceAgent):
                 "本轮意图：\n{intents}\n\n请决定是否调用工具。",
             ),
         ])
-        response = (prompt | get_intent_model().bind_tools([slot_tool])).invoke({
+        response = (prompt | get_supervisor_model().bind_tools([slot_tool])).invoke({
             "context": context or "无上下文",
             "pending": "是" if pending_allocation else "否",
             "intents": json.dumps(detected_intents, ensure_ascii=False),
