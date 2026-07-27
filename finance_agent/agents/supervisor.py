@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List
@@ -99,6 +100,8 @@ def normalize_intent_item(
     try:
         confidence = float(item.get("confidence", 0))
     except (TypeError, ValueError):
+        confidence = 0.0
+    if not math.isfinite(confidence):
         confidence = 0.0
     mode = str(item.get("execution_mode", "")).strip()
     if mode not in _EXECUTION_MODES[intent]:

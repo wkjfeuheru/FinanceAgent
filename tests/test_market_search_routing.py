@@ -85,3 +85,27 @@ def test_candidate_search_mode_calls_candidate_search_without_query_keywords():
 
     assert calls == ["完全相同的文本"]
     assert result["candidate_stocks"] == [candidate]
+
+
+def test_unsupported_market_plan_returns_error_without_legacy_slot_agent():
+    system = AdvisorSystem()
+    plan = intent_plan("market_query", "unsupported", "任意原始文本")
+    system.supervisor.plan_tasks = lambda *_args, **_kwargs: {
+        "intents": [plan],
+        "finance_related": True,
+        "intent_source": "zero_shot",
+        "task_plan": ["compliance"],
+    }
+
+    def reject_legacy_path(_message):
+        raise AssertionError("unsupported 计划不得调用旧槽位 Agent")
+
+    system.slot_agent.handle = reject_legacy_path
+
+    result = system.graph.invoke(
+        make_state(plan["query"], "unsupported-market-plan"),
+        config={"configurable": {"thread_id": "unsupported-market-plan"}},
+    )
+
+    assert result["intent_results"]["market_query"]["status"] == "error"
+    assert "执行策略" in result["intent_results"]["market_query"]["content"]

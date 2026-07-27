@@ -1,4 +1,5 @@
 import json
+import math
 
 import finance_agent.agents.supervisor as supervisor_module
 from finance_agent.agents.supervisor import SupervisorAgent
@@ -270,3 +271,25 @@ def test_primary_and_nli_failure_ignore_business_keywords(monkeypatch):
         "execution_mode": "conversation",
         "requires_slot_extraction": False,
     }]
+
+
+def test_non_finite_confidence_is_rejected():
+    supervisor = make_supervisor({
+        "intents": [{
+            "intent": "asset_allocation",
+            "query": "安排资金",
+            "confidence": math.nan,
+            "reason": "非法置信度",
+            "execution_mode": "allocation",
+            "requires_slot_extraction": True,
+        }],
+        "finance_related": True,
+    })
+    supervisor._zero_shot_classifier = FakeZeroShotClassifier({
+        "intents": [], "finance_related": False,
+    })
+
+    result = supervisor.plan_tasks("安排资金")
+
+    assert result["intent_source"] == "safe_fallback"
+    assert [item["intent"] for item in result["intents"]] == ["casual_chat"]

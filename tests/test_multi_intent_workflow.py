@@ -87,6 +87,143 @@ def test_pending_allocation_clears_for_supervisor_conversation_plan():
     assert "asset_allocation" not in result["task_plan"]
 
 
+def test_market_overview_survives_allocation_waiting_state():
+    system = AdvisorSystem()
+    market_query = "查看整体方向"
+    allocation_query = "再安排这笔资金"
+    system.supervisor.plan_tasks = lambda *_args, **_kwargs: {
+        "intents": [
+            {
+                "intent": "market_query", "query": market_query,
+                "confidence": 0.99, "reason": "市场概览",
+                "execution_mode": "market_overview",
+                "requires_slot_extraction": False,
+            },
+            {
+                "intent": "asset_allocation", "query": allocation_query,
+                "confidence": 0.99, "reason": "配置",
+                "execution_mode": "allocation",
+                "requires_slot_extraction": True,
+            },
+        ],
+        "finance_related": True,
+        "intent_source": "model",
+        "task_plan": [
+            "data_fetch", "fundamental_analysis", "asset_allocation", "compliance",
+        ],
+    }
+    system.supervisor.decide_slot_tool_calls = lambda *_args, **_kwargs: [{
+        "name": "extract_finance_slots",
+        "args": {"intent": "asset_allocation", "query": allocation_query},
+        "id": "allocation-slots",
+    }]
+    system.slot_agent.extract_slots = lambda *_args, **_kwargs: {
+        "user_profile": {}, "resolved_stocks": [], "explicit_stock_codes": [],
+    }
+    system.stock_search.search_market_overview = lambda _query: "市场概览成功"
+
+    result = system.graph.invoke(
+        make_state("组合请求", "overview-allocation-waiting"),
+        config={"configurable": {"thread_id": "overview-allocation-waiting"}},
+    )
+
+    assert result["intent_results"]["market_query"] == {
+        "status": "success", "content": "市场概览成功",
+    }
+    assert result["intent_results"]["asset_allocation"]["status"] == "waiting_for_input"
+    assert "data_fetch" not in result["task_plan"]
+    assert "fundamental_analysis" not in result["task_plan"]
+
+
+def test_allocation_uses_its_own_stocks_instead_of_query_keywords():
+    system = AdvisorSystem()
+    recommendation_query = "给出一组研究对象"
+    allocation_query = "另一笔十万元按稳健方式处理"
+    system.supervisor.plan_tasks = lambda *_args, **_kwargs: {
+        "intents": [
+            {
+                "intent": "stock_recommendation", "query": recommendation_query,
+                "confidence": 0.99, "reason": "候选搜索",
+                "execution_mode": "candidate_search",
+                "requires_slot_extraction": False,
+            },
+            {
+                "intent": "asset_allocation", "query": allocation_query,
+                "confidence": 0.99, "reason": "独立配置",
+                "execution_mode": "allocation",
+                "requires_slot_extraction": True,
+            },
+        ],
+        "finance_related": True,
+        "intent_source": "model",
+        "task_plan": [
+            "data_fetch", "fundamental_analysis", "asset_allocation", "compliance",
+        ],
+    }
+    system.supervisor.decide_slot_tool_calls = lambda *_args, **_kwargs: [{
+        "name": "extract_finance_slots",
+        "args": {"intent": "asset_allocation", "query": allocation_query},
+        "id": "allocation-own-stocks",
+    }]
+    allocation_stocks = [
+        {"code": "600519", "name": "贵州茅台", "industry": "白酒"},
+        {"code": "000858", "name": "五粮液", "industry": "白酒"},
+    ]
+    recommendation_stocks = [
+        {"code": "600000", "name": "浦发银行", "industry": "银行"},
+        {"code": "600036", "name": "招商银行", "industry": "银行"},
+    ]
+    system.slot_agent.extract_slots = lambda *_args, **_kwargs: {
+        "user_profile": {
+            "risk_preference": "R2 中低风险", "budget_amount": 100000,
+            "holding_period": "1年", "investment_goal": "稳健增值",
+        },
+        "resolved_stocks": allocation_stocks,
+        "explicit_stock_codes": ["600519", "000858"],
+    }
+    system.stock_search.search = lambda *_args, **_kwargs: recommendation_stocks
+    system.data_fetch_agent.handle_single_stock = lambda code: {
+        "code": code,
+        "quote": {"date": "2026-01-01", "price": 10, "change_pct": 1},
+        "indicators": {"date": "2025-12-31", "roe": 10},
+        "basic_info": {"name": code, "industry": "测试"},
+        "history": {"code": code, "dates": ["2025-01-01"], "close": [10]},
+    }
+    system.fundamental_agent.handle_single_stock = lambda code: {
+        "code": code, "name": code, "rating": "中性", "overall_score": 70,
+        "summary": "基本面数据可供研究", "indicators": {}, "quote": {},
+    }
+    allocation_codes = []
+
+    def capture_allocation(**_kwargs):
+        profile = system.shared_memory.query("user_profile", {}) or {}
+        allocation_codes.extend(profile.get("stock_codes", []))
+        system.shared_memory.publish_fact(
+            "allocation_result", {"weights": {code: 0.5 for code in allocation_codes}},
+            source="test",
+        )
+        return "配置完成"
+
+    system.allocation_agent.handle = capture_allocation
+
+    system.graph.invoke(
+        make_state("组合请求", "isolated-allocation-stocks"),
+        config={"configurable": {"thread_id": "isolated-allocation-stocks"}},
+    )
+
+    assert allocation_codes == ["600519", "000858"]
+
+
+def test_empty_task_plan_never_authorizes_asset_allocation():
+    state = make_state("任意文本", "empty-plan")
+    state["resolved_stocks"] = [
+        {"code": "600519", "name": "贵州茅台"},
+        {"code": "000858", "name": "五粮液"},
+    ]
+
+    assert AdvisorSystem._route_after_fundamental_plan(state) == "compliance"
+
+
 def test_recommendation_allocation_and_chat_are_combined():
     system = AdvisorSystem()
     system.supervisor.plan_tasks = lambda *_args, **_kwargs: {

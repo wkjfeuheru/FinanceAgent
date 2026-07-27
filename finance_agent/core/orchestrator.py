@@ -365,6 +365,24 @@ class AdvisorSystem:
         return {}
 
     @staticmethod
+    def _route_after_fundamental_plan(state: AdvisorState) -> str:
+        """Authorize allocation only when the supervisor plan explicitly requests it."""
+        task_plan = state.get("task_plan", [])
+        if not isinstance(task_plan, list) or "asset_allocation" not in task_plan:
+            return "compliance"
+        resolved = state.get("resolved_stocks", []) or []
+        codes = [
+            str(stock.get("code"))
+            for stock in resolved
+            if isinstance(stock, dict) and stock.get("code")
+        ]
+        if not codes:
+            profile = state.get("user_profile", {}) or {}
+            if isinstance(profile, dict):
+                codes = [str(code) for code in profile.get("stock_codes", []) if code]
+        return "asset_allocation" if len(dict.fromkeys(codes)) >= 2 else "compliance"
+
+    @staticmethod
     def _compose_intent_draft(state: AdvisorState) -> str:
         """按用户友好的顺序组合独立工作流结果。"""
         results = state.get("intent_results", {}) or {}
@@ -626,6 +644,19 @@ class AdvisorSystem:
                         step for step in state.get("task_plan", [])
                         if step != "asset_allocation"
                     ]
+                    remaining_modes = {
+                        str(item.get("execution_mode", ""))
+                        for item in state.get("detected_intents", []) or []
+                        if isinstance(item, dict)
+                        and item.get("intent") != "asset_allocation"
+                    }
+                    if not remaining_modes & {
+                        "security_analysis", "candidate_search", "security_comparison",
+                    }:
+                        state["task_plan"] = [
+                            step for step in state.get("task_plan", [])
+                            if step not in {"data_fetch", "fundamental_analysis"}
+                        ]
             state["business_state"] = business_state
             return state
 
@@ -649,6 +680,13 @@ class AdvisorSystem:
             recommendation_mode = self._intent_plan(
                 state, "stock_recommendation",
             ).get("execution_mode")
+
+            for intent in ("market_query", "stock_recommendation"):
+                if self._intent_plan(state, intent).get("execution_mode") == "unsupported":
+                    intent_results[intent] = {
+                        "status": "error",
+                        "content": "监督者未提供可执行策略，请补充具体分析目标后重试。",
+                    }
 
             if "market_query" in intent_names and market_mode == "market_overview":
                 try:
@@ -736,11 +774,6 @@ class AdvisorSystem:
                         f"stock_search_candidate_{s['code']}", s, source="baidu_qianfan_search"
                     )
 
-            if (
-                "data_fetch" not in (state.get("task_plan", []) or [])
-                and not state.get("agent_response")
-            ):
-                state["agent_response"] = self.slot_agent.handle(message)
             return state
 
         # ── 节点 4: 金融数据获取（@task fan-out 按股票并行）──
@@ -998,25 +1031,7 @@ class AdvisorSystem:
             return state
 
         def route_after_fundamental(state: AdvisorState) -> str:
-            """条件路由：根据 task_plan 与实际股票数量决定是否执行 asset_allocation。
-
-            - 股票数 < 2 → 跳过 asset_allocation，走 compliance
-            - task_plan 包含 "asset_allocation" 且股票数 >= 2 → 执行 asset_allocation
-            - task_plan 不包含 → 跳过到 compliance
-            - task_plan 缺失或异常 → 默认执行 asset_allocation（仅当股票数 >= 2）
-            """
-            codes = _resolve_stock_codes(state)
-            if len(codes) < 2:
-                return "compliance"
-
-            task_plan = state.get("task_plan", []) or []
-            if isinstance(task_plan, list) and "asset_allocation" in task_plan:
-                return "asset_allocation"
-            if isinstance(task_plan, list) and len(task_plan) > 0:
-                # task_plan 非空但不包含 asset_allocation → 跳过
-                return "compliance"
-            # task_plan 缺失或空 → 默认执行 asset_allocation（向后兼容）
-            return "asset_allocation"
+            return self._route_after_fundamental_plan(state)
 
         # ── 节点 5: 资产配置 ──
         def asset_allocation_handler(state: AdvisorState) -> AdvisorState:
@@ -1025,13 +1040,15 @@ class AdvisorSystem:
             # 健壮性保障：确保 shared_memory 的 user_profile.stock_codes 与 state 一致
             user_profile = state.get("user_profile", {}) or {}
             resolved_stocks = state.get("resolved_stocks", []) or []
-            allocation_query = self._intent_query(state, "asset_allocation")
-            recommendation_stocks = (
-                state.get("intent_stocks", {}) or {}
-            ).get("stock_recommendation", []) or []
-            if recommendation_stocks and any(
-                marker in allocation_query for marker in ("推荐", "筛选", "候选", "这些", "它们")
-            ):
+            intent_stocks = state.get("intent_stocks", {}) or {}
+            allocation_stocks = intent_stocks.get("asset_allocation", []) or []
+            recommendation_stocks = intent_stocks.get("stock_recommendation", []) or []
+            recommendation_mode = self._intent_plan(
+                state, "stock_recommendation",
+            ).get("execution_mode")
+            if allocation_stocks:
+                resolved_stocks = list(allocation_stocks)
+            elif recommendation_stocks and recommendation_mode == "candidate_search":
                 resolved_stocks = list(recommendation_stocks)
             if isinstance(user_profile, dict) and resolved_stocks:
                 codes = [s.get("code") for s in resolved_stocks if isinstance(s, dict) and s.get("code")]
