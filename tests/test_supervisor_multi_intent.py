@@ -41,10 +41,10 @@ def make_supervisor(payload):
 def test_model_returns_all_intents_and_deduplicates():
     supervisor = make_supervisor({
         "intents": [
-            {"intent": "market_query", "query": "查询半导体板块表现", "confidence": 0.91, "reason": "行情"},
-            {"intent": "stock_recommendation", "query": "推荐半导体股票", "confidence": 0.95, "reason": "推荐"},
-            {"intent": "asset_allocation", "query": "配置20万元", "confidence": 0.93, "reason": "配置"},
-            {"intent": "stock_recommendation", "query": "筛选龙头", "confidence": 0.72, "reason": "重复同类"},
+            {"intent": "market_query", "query": "查询半导体板块表现", "confidence": 0.91, "reason": "行情", "execution_mode": "market_overview", "requires_slot_extraction": False},
+            {"intent": "stock_recommendation", "query": "推荐半导体股票", "confidence": 0.95, "reason": "推荐", "execution_mode": "candidate_search", "requires_slot_extraction": False},
+            {"intent": "asset_allocation", "query": "配置20万元", "confidence": 0.93, "reason": "配置", "execution_mode": "allocation", "requires_slot_extraction": True},
+            {"intent": "stock_recommendation", "query": "筛选龙头", "confidence": 0.72, "reason": "重复同类", "execution_mode": "candidate_search", "requires_slot_extraction": False},
         ],
         "finance_related": True,
     })
@@ -63,8 +63,8 @@ def test_model_returns_all_intents_and_deduplicates():
 def test_emotion_and_market_query_both_execute():
     supervisor = make_supervisor({
         "intents": [
-            {"intent": "casual_chat", "query": "回应亏损焦虑", "confidence": 0.9, "reason": "情绪"},
-            {"intent": "market_query", "query": "查询茅台走势", "confidence": 0.94, "reason": "行情"},
+            {"intent": "casual_chat", "query": "回应亏损焦虑", "confidence": 0.9, "reason": "情绪", "execution_mode": "conversation", "requires_slot_extraction": False},
+            {"intent": "market_query", "query": "查询茅台走势", "confidence": 0.94, "reason": "行情", "execution_mode": "security_analysis", "requires_slot_extraction": True},
         ],
         "finance_related": True,
     })
@@ -89,7 +89,7 @@ def test_invalid_model_output_uses_multilabel_rule_fallback():
 def test_low_confidence_intents_are_not_executed():
     supervisor = make_supervisor({
         "intents": [
-            {"intent": "market_query", "query": "可能查行情", "confidence": 0.4, "reason": "不确定"},
+            {"intent": "market_query", "query": "可能查行情", "confidence": 0.4, "reason": "不确定", "execution_mode": "security_analysis", "requires_slot_extraction": True},
         ],
         "finance_related": True,
     })
@@ -159,6 +159,8 @@ def test_shadow_mode_keeps_llm_primary_and_logs_zero_shot(monkeypatch):
             "query": "查看茅台走势",
             "confidence": 0.9,
             "reason": "行情",
+            "execution_mode": "security_analysis",
+            "requires_slot_extraction": True,
         }],
         "finance_related": True,
     })
@@ -181,3 +183,45 @@ def test_shadow_mode_keeps_llm_primary_and_logs_zero_shot(monkeypatch):
     assert [item["intent"] for item in result["intents"]] == ["market_query"]
     assert result["intent_source"] == "model"
     assert classifier.calls == [("查看茅台走势", "", False)]
+
+
+def test_supervisor_normalizes_execution_plan_without_reading_query_keywords():
+    supervisor = make_supervisor({
+        "intents": [{
+            "intent": "stock_recommendation",
+            "query": "给我一些方向",
+            "confidence": 0.95,
+            "reason": "候选搜索",
+            "execution_mode": "candidate_search",
+            "requires_slot_extraction": False,
+        }],
+        "finance_related": True,
+    })
+
+    result = supervisor.plan_tasks("给我一些方向")
+
+    assert result["intents"][0]["execution_mode"] == "candidate_search"
+    assert result["intents"][0]["requires_slot_extraction"] is False
+    assert result["task_plan"] == [
+        "data_fetch", "fundamental_analysis", "compliance",
+    ]
+
+
+def test_invalid_execution_mode_does_not_infer_route_from_query():
+    supervisor = make_supervisor({
+        "intents": [{
+            "intent": "market_query",
+            "query": "贵州茅台最近走势",
+            "confidence": 0.95,
+            "reason": "行情",
+            "execution_mode": "unknown",
+            "requires_slot_extraction": True,
+        }],
+        "finance_related": True,
+    })
+
+    result = supervisor.plan_tasks("贵州茅台最近走势")
+
+    assert result["intents"][0]["execution_mode"] == "unsupported"
+    assert result["intents"][0]["requires_slot_extraction"] is False
+    assert result["task_plan"] == ["compliance"]

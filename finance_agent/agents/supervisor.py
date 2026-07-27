@@ -67,13 +67,51 @@ query 只能包含该意图负责的内容。上下文只用于解析指代，�
 
 ## 输出格式
 只输出合法JSON：
-{{"intents":[{{"intent":"market_query|stock_recommendation|asset_allocation|casual_chat","query":"该工作流需要处理的独立子请求","confidence":0.0,"reason":"简短原因"}}],"finance_related":true}}
+{{"intents":[{{"intent":"market_query|stock_recommendation|asset_allocation|casual_chat","query":"该工作流需要处理的独立子请求","confidence":0.0,"reason":"简短原因","execution_mode":"security_analysis|market_overview|candidate_search|security_comparison|allocation|conversation","requires_slot_extraction":false}}],"finance_related":true}}
+
+execution_mode 必须与 intent 匹配：market_query 使用 security_analysis 或 market_overview；stock_recommendation 使用 candidate_search 或 security_comparison；asset_allocation 使用 allocation；casual_chat 使用 conversation。requires_slot_extraction 仅在 security_analysis、security_comparison、allocation 时为 true。
 """
 
 _INTENTS = ("market_query", "stock_recommendation", "asset_allocation", "casual_chat")
+_EXECUTION_MODES = {
+    "market_query": {"security_analysis": True, "market_overview": False},
+    "stock_recommendation": {"candidate_search": False, "security_comparison": True},
+    "asset_allocation": {"allocation": True},
+    "casual_chat": {"conversation": False},
+}
 _CONFIDENCE_THRESHOLD = 0.65
 _SHADOW_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="intent-shadow")
 _LOGGER = logging.getLogger(__name__)
+
+
+def normalize_intent_item(
+    item: Dict[str, Any], fallback_query: str,
+) -> Dict[str, Any] | None:
+    """Validate one supervisor intent and attach its executable routing plan."""
+    intent = str(item.get("intent", "")).strip()
+    if intent not in _INTENTS:
+        return None
+    try:
+        confidence = float(item.get("confidence", 0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    mode = str(item.get("execution_mode", "")).strip()
+    if mode not in _EXECUTION_MODES[intent]:
+        mode = (
+            "unsupported"
+            if intent in {"market_query", "stock_recommendation"}
+            else next(iter(_EXECUTION_MODES[intent]))
+        )
+    return {
+        "intent": intent,
+        "query": str(item.get("query", "")).strip() or fallback_query.strip(),
+        "confidence": min(max(confidence, 0.0), 1.0),
+        "reason": str(item.get("reason", "")).strip(),
+        "execution_mode": mode,
+        "requires_slot_extraction": bool(
+            _EXECUTION_MODES[intent].get(mode, False)
+        ),
+    }
 
 
 _INVESTMENT_ADVICE_MARKERS = (
@@ -382,16 +420,19 @@ class SupervisorAgent(BaseFinanceAgent):
             for item in raw_intents:
                 if not isinstance(item, dict):
                     continue
-                intent = str(item.get("intent", "")).strip()
+                normalized_item = normalize_intent_item(item, message)
+                if normalized_item is None:
+                    continue
+                intent = normalized_item["intent"]
                 try:
-                    confidence = float(item.get("confidence", 0))
+                    confidence = float(normalized_item.get("confidence", 0))
                 except (TypeError, ValueError):
                     confidence = 0.0
                 confidence_floor = 0.0 if source == "zero_shot" else _CONFIDENCE_THRESHOLD
                 if intent not in _INTENTS or confidence < confidence_floor:
                     continue
-                query = str(item.get("query", "")).strip() or message.strip()
-                reason = str(item.get("reason", "")).strip()
+                query = normalized_item["query"]
+                reason = normalized_item["reason"]
                 if intent in merged:
                     if query not in merged[intent]["query"]:
                         merged[intent]["query"] += "；" + query
@@ -399,12 +440,7 @@ class SupervisorAgent(BaseFinanceAgent):
                         merged[intent]["confidence"], confidence,
                     )
                 else:
-                    merged[intent] = {
-                        "intent": intent,
-                        "query": query,
-                        "confidence": min(max(confidence, 0.0), 1.0),
-                        "reason": reason,
-                    }
+                    merged[intent] = normalized_item
 
         if not merged:
             source = "rule_fallback"
@@ -456,19 +492,20 @@ class SupervisorAgent(BaseFinanceAgent):
     ) -> Dict[str, Any]:
         """把多意图确定性映射为共享数据工作流。"""
         classified = self.classify_intents(message, context, pending_allocation)
-        names = {item["intent"] for item in classified["intents"]}
+        modes = {
+            str(item.get("execution_mode", ""))
+            for item in classified["intents"]
+        }
         requested: set[str] = set()
-        if "market_query" in names and not needs_market_overview_search(message):
-            requested.add("data_fetch")
-            if any(word in message for word in ("基本面", "财务", "业绩", "公司分析")):
-                requested.add("fundamental_analysis")
-        if "stock_recommendation" in names:
+        if "security_analysis" in modes:
             requested.update({"data_fetch", "fundamental_analysis"})
-        if "asset_allocation" in names:
+        if modes & {"candidate_search", "security_comparison"}:
+            requested.update({"data_fetch", "fundamental_analysis"})
+        if "allocation" in modes:
             requested.update({
                 "data_fetch", "fundamental_analysis", "asset_allocation",
             })
-        if "casual_chat" in names:
+        if "conversation" in modes:
             requested.add("casual_chat")
         requested.add("compliance")
         allowed = [
