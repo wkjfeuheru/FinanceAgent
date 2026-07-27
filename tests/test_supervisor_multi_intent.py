@@ -96,19 +96,15 @@ def test_emotion_and_market_query_both_execute():
     assert result["task_plan"] == ["casual_chat", "compliance"]
 
 
-def test_nli_failure_uses_safe_fallback_without_keyword_recovery():
+def test_nli_failure_returns_classification_error_without_fake_chat_intent():
     supervisor = object.__new__(SupervisorAgent)
     supervisor._zero_shot_classifier = FakeZeroShotClassifier(RuntimeError("unavailable"))
 
     result = supervisor.plan_tasks("推荐股票并配置10万元")
 
-    assert result["intent_source"] == "safe_fallback"
-    assert result["finance_related"] is False
-    assert result["intents"] == [{
-        "intent": "casual_chat", "query": "推荐股票并配置10万元",
-        "confidence": 0.0, "reason": "意图分类服务暂不可用",
-        "execution_mode": "conversation", "requires_slot_extraction": False,
-    }]
+    assert result["intent_source"] == "classification_error"
+    assert result["intents"] == []
+    assert result["task_plan"] == ["compliance"]
 
 
 def test_empty_nli_result_uses_safe_fallback():

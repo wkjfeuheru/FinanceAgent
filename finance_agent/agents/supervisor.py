@@ -35,7 +35,10 @@ INTENT_LABELS = (
     "casual_chat",
 )
 CANDIDATE_LABELS = {
-    "market_query": "查询股票、指数、板块或市场行情",
+    "market_query": (
+        "查询具体股票的价格、走势、估值、财务、业绩或基本面指标，"
+        "以及指数、行业、板块或市场行情"
+    ),
     "stock_recommendation": "推荐股票或判断某只股票是否值得买入",
     "asset_allocation": "根据金额、期限和风险偏好制定资产配置方案",
     "casual_chat": "一般理财知识、投资心态或非任务型金融交流",
@@ -95,6 +98,8 @@ class ZeroShotIntentClassifier:
 
     @staticmethod
     def _input_text(message: str, context: str, pending_allocation: bool) -> str:
+        if not context and not pending_allocation:
+            return message
         pending = "是" if pending_allocation else "否"
         return f"[上下文] {context or '无'} [待补充配置] {pending} [当前输入] {message}"
 
@@ -259,11 +264,13 @@ class SupervisorAgent(BaseFinanceAgent):
     ) -> Dict[str, Any]:
         """使用固定多语言 NLI 分类器识别并合并本轮全部意图。"""
         source = "zero_shot"
+        classification_error = False
         try:
             parsed = self._predict_zero_shot(message, context, pending_allocation)
         except Exception as exc:
             _LOGGER.warning("intent_zero_shot_unavailable error=%s", exc)
             parsed = {}
+            classification_error = True
 
         def merge_valid(payload: Any, classifier_source: str) -> dict[str, dict[str, Any]]:
             merged_items: dict[str, dict[str, Any]] = {}
@@ -294,7 +301,11 @@ class SupervisorAgent(BaseFinanceAgent):
             return merged_items
 
         merged = merge_valid(parsed, source)
-        if not merged:
+        if classification_error:
+            source = "classification_error"
+            merged = {}
+            finance_related = False
+        elif not merged:
             source = "safe_fallback"
             fallback = normalize_intent_item({
                 "intent": "casual_chat",

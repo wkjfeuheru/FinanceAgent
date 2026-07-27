@@ -12,6 +12,27 @@ def test_advisor_system_exposes_slot_tool_runtime_not_slot_agent():
     assert not hasattr(system, "slot_agent")
 
 
+def test_classifier_failure_returns_explicit_error_instead_of_chat_response():
+    system = AdvisorSystem()
+
+    class FailedClassifier:
+        def predict(self, *_args, **_kwargs):
+            raise TimeoutError("timed out")
+
+    system.supervisor._zero_shot_classifier = FailedClassifier()
+    system.compliance_agent.review = lambda **_kwargs: {"pass": True, "reason": ""}
+    state = make_state("列出中际旭创的一些基本面指标", "classification-error")
+
+    result = system.graph.invoke(
+        state,
+        config={"configurable": {"thread_id": "classification-error"}},
+    )
+
+    assert result["intent_source"] == "classification_error"
+    assert result["detected_intents"] == []
+    assert result["agent_response"] == "意图识别暂时不可用，请稍后重试。"
+
+
 def make_state(message, thread_id):
     return {
         "user_message": message,

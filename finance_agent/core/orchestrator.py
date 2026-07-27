@@ -416,6 +416,8 @@ class AdvisorSystem:
             state["detected_intents"] = result["intents"]
             state["intent_source"] = result["intent_source"]
             state["finance_related"] = bool(result["finance_related"])
+            if state["intent_source"] == "classification_error":
+                state["agent_response"] = "意图识别暂时不可用，请稍后重试。"
             allocation_plan = self._intent_plan(state, "asset_allocation")
             continues_allocation = (
                 allocation_plan.get("execution_mode") == "allocation"
@@ -432,6 +434,8 @@ class AdvisorSystem:
             return state
 
         def route_after_supervisor(state: AdvisorState) -> str:
+            if state.get("intent_source") == "classification_error":
+                return "compliance"
             business = self._intent_names(state) & {
                 "market_query", "stock_recommendation", "asset_allocation",
             }
@@ -1178,7 +1182,7 @@ class AdvisorSystem:
         graph.add_conditional_edges(
             "supervisor",
             route_after_supervisor,
-            ["slot_tool_decision", "casual_chat"],
+            ["slot_tool_decision", "casual_chat", "compliance"],
         )
         graph.add_edge("casual_chat", "compliance")
         graph.add_conditional_edges(

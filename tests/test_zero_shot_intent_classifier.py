@@ -29,6 +29,8 @@ def label_scores(**internal_scores):
 
 
 def input_text(message, context="", pending_allocation=False):
+    if not context and not pending_allocation:
+        return message
     return (
         f"[上下文] {context or '无'} [待补充配置] "
         f"{'是' if pending_allocation else '否'} [当前输入] {message}"
@@ -76,6 +78,26 @@ def test_pipeline_receives_chinese_multilabel_contract():
         "max_length": 256,
     }
     assert result["intents"][0]["intent"] == "stock_recommendation"
+
+
+def test_plain_message_is_not_wrapped_when_context_is_absent():
+    classifier, fake = make_classifier({
+        "列出中际旭创的一些基本面指标": label_scores(market_query=0.9),
+    })
+
+    result = classifier.predict("列出中际旭创的一些基本面指标")
+
+    assert fake.calls[0][0] == "列出中际旭创的一些基本面指标"
+    assert result["intents"][0]["intent"] == "market_query"
+
+
+def test_market_label_explicitly_covers_company_fundamentals():
+    market_label = CANDIDATE_LABELS["market_query"]
+
+    assert "财务" in market_label
+    assert "估值" in market_label
+    assert "业绩" in market_label
+    assert "基本面指标" in market_label
 
 
 def test_explicit_multi_intent_sentence_is_split():
