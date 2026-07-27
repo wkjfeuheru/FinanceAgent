@@ -1,4 +1,4 @@
-"""关键信息槽位提取 Agent。
+"""原生 Tool Calling 使用的金融槽位提取运行时。
 
 职责：从用户输入中抽取结构化投资参数
 - 风险偏好（R1-R5）
@@ -8,7 +8,7 @@
 - 投资目标
 
 先用正则快速抽取，再用LLM补全语义字段。
-结果写入 SharedWorkingMemory 和 UserProfileCard。
+调用方负责注入已有画像与对话上下文，并合并返回的结构化结果。
 """
 
 from __future__ import annotations
