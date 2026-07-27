@@ -1,4 +1,4 @@
-from finance_agent.intent_classifier import (
+from finance_agent.agents.supervisor import (
     CANDIDATE_LABELS,
     ZeroShotIntentClassifier,
     split_intent_queries,

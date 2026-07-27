@@ -38,6 +38,23 @@ class ImmediateExecutor:
         function()
 
 
+def test_supervisor_builds_fixed_mdeberta_classifier(monkeypatch):
+    captured = {}
+
+    class RecordingClassifier:
+        def __init__(self, model_name, **kwargs):
+            captured["model_name"] = model_name
+            captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(supervisor_module, "ZeroShotIntentClassifier", RecordingClassifier)
+    agent = object.__new__(SupervisorAgent)
+    agent._zero_shot_classifier = None
+
+    _ = agent.zero_shot_classifier
+
+    assert captured["model_name"] == "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"
+
+
 def make_supervisor(payload):
     supervisor = object.__new__(SupervisorAgent)
     supervisor._intent_chain = FakeChain(json.dumps(payload, ensure_ascii=False))
