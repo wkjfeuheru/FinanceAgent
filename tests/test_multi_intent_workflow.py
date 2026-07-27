@@ -1,6 +1,23 @@
 from finance_agent.core.orchestrator import AdvisorSystem
 
 
+def make_state(message, thread_id):
+    return {
+        "user_message": message,
+        "chat_history": [], "customer_id": "TEST", "task_plan": [],
+        "business_state": {}, "user_profile": {}, "resolved_stocks": [],
+        "candidate_stocks": [], "stock_search_error": "", "stock_resolution_error": "",
+        "stock_data": {}, "fundamental_analysis": {}, "allocation_result": {},
+        "agent_response": "", "compliance_result": {}, "memory_context": "",
+        "shared_memory_snapshot": {}, "thread_id": thread_id, "run_id": "run-1",
+        "explicit_user_stock_codes": [], "stock_data_entries": [],
+        "fundamental_entries": [], "detected_intents": [], "intent_results": {},
+        "intent_source": "", "finance_related": True, "intent_stocks": {},
+        "slot_tool_calls": [], "slot_tool_called": False,
+        "slot_tool_source": "skipped", "slot_tool_error": "",
+    }
+
+
 def test_recommendation_allocation_and_chat_are_combined():
     system = AdvisorSystem()
     system.supervisor.plan_tasks = lambda *_args, **_kwargs: {
@@ -87,3 +104,48 @@ def test_recommendation_allocation_and_chat_are_combined():
     assert "交流回应" in result["agent_response"]
     assert "候选标的研究" in result["agent_response"]
     assert "资产配置" in result["agent_response"]
+
+
+def test_malformed_model_tool_calls_use_deterministic_fallback():
+    system = AdvisorSystem()
+    query = "用10万元做稳健配置"
+    system.supervisor.plan_tasks = lambda *_args, **_kwargs: {
+        "intents": [{
+            "intent": "asset_allocation", "query": query,
+            "confidence": 0.95, "reason": "配置",
+        }],
+        "finance_related": True,
+        "intent_source": "model",
+        "task_plan": ["asset_allocation", "compliance"],
+    }
+    system.supervisor.decide_slot_tool_calls = lambda *_args, **_kwargs: [
+        None,
+        "bad-call",
+        {"name": "extract_finance_slots", "args": "bad-args"},
+    ]
+    calls = []
+
+    def extract_slots(message, **_kwargs):
+        calls.append(message)
+        return {
+            "user_profile": {
+                "risk_preference": "R2 中低风险",
+                "budget_amount": 100000,
+                "holding_period": "1年",
+                "investment_goal": "稳健增值",
+                "stock_codes": [],
+            },
+            "resolved_stocks": [],
+            "explicit_stock_codes": [],
+        }
+
+    system.slot_agent.extract_slots = extract_slots
+
+    result = system.graph.invoke(
+        make_state(query, "malformed-tool-calls"),
+        config={"configurable": {"thread_id": "malformed-tool-calls"}},
+    )
+
+    assert result["slot_tool_source"] == "deterministic_fallback"
+    assert result["slot_tool_called"] is True
+    assert calls == [query]

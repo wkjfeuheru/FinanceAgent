@@ -469,10 +469,17 @@ class AdvisorSystem:
                 error = str(exc)
 
             valid: dict[str, dict[str, Any]] = {}
+            if not isinstance(raw_calls, list):
+                raw_calls = []
+                source = "deterministic_fallback"
             for call in raw_calls:
+                if not isinstance(call, dict):
+                    continue
                 if call.get("name") != "extract_finance_slots":
                     continue
-                args = call.get("args", {}) or {}
+                args = call.get("args")
+                if not isinstance(args, dict):
+                    continue
                 intent = str(args.get("intent", ""))
                 query = str(args.get("query", "")).strip()
                 if intent not in candidates or query != candidates[intent] or intent in valid:
