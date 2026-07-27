@@ -40,7 +40,7 @@ _ASSET_ALLOCATION_PROMPT = """你是资产配置专家。
 - 说明预期收益、波动率、夏普比率
 - 结合基本面分析结果给出配置理由
 - 必须包含免责声明："投资有风险，过往业绩不代表未来收益，请谨慎决策"
-- 语言要求：使用正式、专业的书面中文。不得使用口语化或网络用语表述。
+- 语言要求：使用正式、专业的书面中文。不得使用口语化的表述。
   配置理由应基于指标数值与风险收益特征进行严谨阐述，如"标的A的夏普比率
   显著高于标的B，且历史波动率较低，因此配置权重偏向标的A"。
 """
@@ -57,10 +57,34 @@ class AssetAllocationAgent(BaseFinanceAgent):
     def _get_system_prompt(self) -> str:
         return _ASSET_ALLOCATION_PROMPT
 
+    def build_business_state(self, profile: Dict[str, Any]) -> Dict[str, Any]:
+        """校验生成个人配置方案所需的画像字段。"""
+        required_fields = {
+            "stock_codes": {"prompt": "至少提供2只A股股票名称或六位代码"},
+            "risk_preference": {"prompt": "说明风险偏好（保守、稳健、平衡或进取）"},
+            "budget_amount": {"prompt": "说明计划投入的金额"},
+            "holding_period": {"prompt": "说明预计持有期限"},
+        }
+        stocks = list(profile.get("stock_codes", []) or [])
+        missing: list[str] = []
+        if len(stocks) < 2:
+            missing.append("stock_codes")
+        if not profile.get("risk_preference"):
+            missing.append("risk_preference")
+        if float(profile.get("budget_amount", 0) or 0) <= 0:
+            missing.append("budget_amount")
+        if not profile.get("holding_period"):
+            missing.append("holding_period")
+        return {
+            "agent": self.agent_name,
+            "status": "waiting_for_input" if missing else "ready",
+            "required_fields": required_fields,
+            "missing_fields": missing,
+        }
+
     def handle(
         self,
         message: str,
-        compressed_context: str = "",
         customer_id: str = "",
         chat_history: List[Dict[str, str]] | None = None,
         thread_id: str | None = None,

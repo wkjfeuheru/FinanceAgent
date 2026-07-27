@@ -1,8 +1,8 @@
 """金融投顾多 Agent 系统。
 
 核心特性:
-- 6 Agent 流水线：监督者 → 画像抽取 → 股票识别 → 数据获取 → 基本面分析 → 资产配置 → 合规风控
-- data_fetch 与 fundamental_analysis 使用 LangGraph Send API 按股票 fan-out 并行执行
+- 6 Agent 流水线：监督者 → 画像抽取 → 数据获取 → 基本面分析 → 资产配置 → 合规风控
+- data_fetch 与 fundamental_analysis 使用 LangGraph @task 按股票 fan-out 并行执行
 - 股票识别采用 LLM 驱动（识别中文全称/简称/代码 → 返回 code/name/industry）
 - SharedWorkingMemory 跨 Agent 信息共享（线程安全，支持并行节点）
 - 三层记忆机制（长期画像、近期摘要、滑动窗口）
@@ -11,37 +11,52 @@
 
 工作流:
   START → supervisor → slot_extraction（画像与股票识别）
-       → [data_fetch_single(code) × N 并行] → data_fetch_join
-       → [fundamental_single(code) × N 并行] → fundamental_join
+       → data_fetch_batch（@task × N 并行）
+       → fundamental_batch（@task × N 并行）
        → asset_allocation → compliance → final_snapshot → END
 """
 
 from __future__ import annotations
 
 import asyncio
-import operator
+import queue
 import re
 import threading
+import uuid
+from datetime import datetime
 from typing import Any, Callable, Dict, List
 
-from typing_extensions import Annotated, TypedDict
+from typing_extensions import TypedDict
 
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
+from langgraph.func import task
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
-from langgraph.types import Send
 
-from finance_agent.config import model
+from finance_agent.config import (
+    FINAL_SYNTHESIS_TIMEOUT,
+    get_checkpoint_saver,
+    get_model_for_agent,
+)
 from finance_agent.core.shared_state import SharedWorkingMemory
 from finance_agent.core.memory import AgentMemoryContext, RedisMemoryStore
-from finance_agent.agents.supervisor import SupervisorAgent, needs_investment_profile
-from finance_agent.agents.profile_extraction import SlotExtractionAgent
+from finance_agent.agents.supervisor import (
+    SupervisorAgent,
+    needs_market_overview_search,
+    needs_slot_extraction,
+    needs_stock_screening,
+)
+from finance_agent.agents.profile_extraction import (
+    SlotExtractionAgent,
+    create_extract_finance_slots_tool,
+)
 from finance_agent.agents.data_fetch import DataFetchAgent
 from finance_agent.agents.fundamental_analysis import FundamentalAnalysisAgent
 from finance_agent.agents.asset_allocation import AssetAllocationAgent
 from finance_agent.agents.compliance import ComplianceAgent
 from finance_agent.tools.qianfan_search import QianfanSearchError, QianfanStockSearch
+from finance_agent.middleware import BLOCKED_RESPONSE, find_sensitive_word
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -56,16 +71,15 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 
 class AdvisorState(TypedDict):
     user_message: str
-    compressed_context: str
-    effective_message: str
     chat_history: List[Dict[str, str]]
     customer_id: str
     task_plan: List[str]              # 任务分解结果
-    missing_info: List[str]           # 建议继续向用户确认的信息
+    business_state: Dict[str, Any]    # 业务 Agent 自维护的必填状态
     user_profile: Dict[str, Any]      # 抽取的用户画像
     resolved_stocks: List[Dict[str, Any]]  # LLM 识别的股票列表（含 code/name/industry）
     candidate_stocks: List[Dict[str, Any]]  # 本轮行业筛选候选池
     stock_search_error: str
+    stock_resolution_error: str
     stock_data: Dict[str, Any]        # 获取的金融数据（join 节点填充）
     fundamental_analysis: Dict[str, Any]   # 基本面分析结果（join 节点填充）
     allocation_result: Dict[str, Any]       # 资产配置结果
@@ -74,80 +88,20 @@ class AdvisorState(TypedDict):
     memory_context: str
     shared_memory_snapshot: Dict[str, Any]
     thread_id: str
-    contextual_follow_up: bool
+    run_id: str
     explicit_user_stock_codes: List[str]
-    # ── 并行节点结果累积（使用 operator.add reducer 合并多 Send 分支）──
-    stock_data_entries: Annotated[List[Dict[str, Any]], operator.add]
-    fundamental_entries: Annotated[List[Dict[str, Any]], operator.add]
-
-
-# ── 上下文压缩 ─────────────────────────────────────────────────
-
-COMPRESS_PROMPT = """你是金融投顾系统的上下文压缩器。
-请将历史对话压缩为下一轮判断所需的最小上下文，不要回答用户问题。
-
-保留信息：
-- 用户投资需求、约束、金额、期限、风险偏好、股票代码
-- 助手提出的待确认事项
-- 话题切换信号
-- 不编造信息
-
-请输出简洁中文摘要，保持在300字以内。"""
-
-
-INCREMENTAL_COMPRESS_PROMPT = """你是金融投顾系统的上下文压缩器。
-请基于已有摘要和新一轮对话，增量更新上下文摘要，不要回答用户问题。
-
-输出要求：
-1. 将新对话中的需求、约束、金额、期限、风险偏好、股票代码等信息合并到已有摘要
-2. 保留助手主动提出的待确认事项，已被用户回答的可移除
-3. 保留最近的话题切换信号
-4. 已过时信息可精简
-5. 不编造信息，保持在300字以内"""
-
-
-class ContextCompressor:
-    """增量上下文压缩器。"""
-
-    def __init__(self):
-        self._full_prompt = ChatPromptTemplate.from_messages([
-            ("system", COMPRESS_PROMPT),
-            ("human", "历史对话：\n{history}\n\n当前用户输入：{message}\n\n请压缩上下文："),
-        ])
-        self._incr_prompt = ChatPromptTemplate.from_messages([
-            ("system", INCREMENTAL_COMPRESS_PROMPT),
-            ("human",
-             "已有摘要：\n{cached}\n\n"
-             "最新一轮对话：\n用户：{user_msg}\n助手：{assistant_msg}\n\n"
-             "请输出更新后的摘要："),
-        ])
-        self._cache: str = ""
-
-    def compress(self, chat_history: List[Dict[str, str]], message: str) -> str:
-        if not chat_history:
-            self._cache = ""
-            return "无历史对话。"
-
-        if len(chat_history) < 4:
-            return "\n".join(
-                f"{'用户' if item.get('role') == 'user' else '助手'}: "
-                f"{str(item.get('content', ''))[:3000]}"
-                for item in chat_history
-                if item.get("role") in {"user", "assistant"}
-            )
-
-        history_text = "\n".join(
-            f"{'用户' if item.get('role') == 'user' else '助手'}: "
-            f"{str(item.get('content', ''))[:3000]}"
-            for item in chat_history
-            if item.get("role") in {"user", "assistant"}
-        )
-        chain = self._full_prompt | model | StrOutputParser()
-        self._cache = chain.invoke({"history": history_text, "message": message})
-        return self._cache
-
-    def reset_cache(self) -> None:
-        self._cache = ""
+    # 保留批处理明细字段以兼容 checkpoint 与调用方。
+    stock_data_entries: List[Dict[str, Any]]
+    fundamental_entries: List[Dict[str, Any]]
+    detected_intents: List[Dict[str, Any]]
+    intent_results: Dict[str, Dict[str, Any]]
+    intent_source: str
+    finance_related: bool
+    intent_stocks: Dict[str, List[Dict[str, Any]]]
+    slot_tool_calls: List[Dict[str, Any]]
+    slot_tool_called: bool
+    slot_tool_source: str
+    slot_tool_error: str
 
 
 # ── 主编排系统 ────────────────────────────────────────────────
@@ -157,20 +111,39 @@ class AdvisorSystem:
 
     def __init__(self):
         self.shared_memory = SharedWorkingMemory()
-        self.memory = AgentMemoryContext(RedisMemoryStore())
-        self.compressor = ContextCompressor()
-        self.supervisor = SupervisorAgent(shared_memory=self.shared_memory)
-        self.slot_agent = SlotExtractionAgent(shared_memory=self.shared_memory)
-        self.data_fetch_agent = DataFetchAgent(shared_memory=self.shared_memory)
-        self.fundamental_agent = FundamentalAnalysisAgent(shared_memory=self.shared_memory)
-        self.allocation_agent = AssetAllocationAgent(shared_memory=self.shared_memory)
-        self.compliance_agent = ComplianceAgent(shared_memory=self.shared_memory)
+        # 共享的 SqliteSaver，所有 Agent 子图和主编排图共用
+        self.checkpointer = get_checkpoint_saver()
+        self.memory = AgentMemoryContext(
+            store=RedisMemoryStore(),
+            checkpointer=self.checkpointer,
+        )
+        self.supervisor = SupervisorAgent(
+            shared_memory=self.shared_memory, checkpointer=self.checkpointer,
+        )
+        self.slot_agent = SlotExtractionAgent(
+            shared_memory=self.shared_memory, checkpointer=self.checkpointer,
+        )
+        self.data_fetch_agent = DataFetchAgent(
+            shared_memory=self.shared_memory, checkpointer=self.checkpointer,
+        )
+        self.fundamental_agent = FundamentalAnalysisAgent(
+            shared_memory=self.shared_memory, checkpointer=self.checkpointer,
+        )
+        self.allocation_agent = AssetAllocationAgent(
+            shared_memory=self.shared_memory, checkpointer=self.checkpointer,
+        )
+        self.compliance_agent = ComplianceAgent(
+            shared_memory=self.shared_memory, checkpointer=self.checkpointer,
+        )
         self.stock_search = QianfanStockSearch()
         self._session_counter: Dict[str, int] = {}
         self._progress_context = threading.local()
         self._progress_callbacks: Dict[str, Callable[[str, str], None]] = {}
         self._progress_lock = threading.Lock()
         self._trace_lock = threading.Lock()
+        # SharedWorkingMemory is mutable and used by every Agent. Serialize a full
+        # workflow until it is replaced by a conversation-scoped state backend.
+        self._workflow_lock = threading.RLock()
         self._trace_sequences: Dict[str, int] = {}
         self.graph = self._build_graph()
 
@@ -199,89 +172,93 @@ class AdvisorSystem:
             )
 
     @staticmethod
-    def _is_contextual_follow_up(message: str, history: List[Dict[str, str]]) -> bool:
-        if not history:
-            return False
-        references = (
-            "这只", "这两只", "这几只", "这些", "上述", "上面", "前面", "刚才",
-            "它", "它们", "该股", "这些股票", "这组", "这个组合",
-            "哪种方案", "哪个方案", "这种方案", "这些方案", "上述方案",
-            "选哪个", "选择哪个", "如何选择", "怎么选", "怎样选", "哪个更",
-            "哪一个更", "更适合", "哪种更", "两者", "三者", "方案一", "方案二",
-            # 组合构建/配置类追问 — 用户已看过分析，想让系统配置组合
-            "构建组合", "组组合", "建组合", "怎么组合", "如何组合",
-            "怎样组合", "组合一下", "配一下", "配置一下", "调整组合",
-            "分配", "仓位", "权重", "怎么配", "如何配", "怎么买",
-        )
-        if any(word in message for word in references):
-            return True
-        # Elliptical comparison/selection questions commonly omit both stock names
-        # and explicit pronouns but still refer to the immediately preceding answer.
-        selection_pattern = re.compile(
-            r"(?:选|选择|比较|对比).{0,10}(?:哪|哪个|哪种|更适合|更好)|"
-            r"(?:哪|哪个|哪种).{0,10}(?:选|选择|适合|更好)"
-        )
-        if selection_pattern.search(message):
-            return True
-        # Portfolio construction follow-ups: user asks to build/adjust/allocate
-        # after seeing a stock analysis, without repeating stock names.
-        portfolio_pattern = re.compile(
-            r"(?:帮|给|为)(?:我|我们).{0,6}(?:构建|组成|搭配|组合|配置|分配|调整)",
-        )
-        return bool(portfolio_pattern.search(message))
-
-    @staticmethod
-    def _history_stock_codes(history: List[Dict[str, str]]) -> List[str]:
-        """Extract the most recently discussed A-share codes from prior turns."""
-        pattern = re.compile(
-            r"(?<!\d)(60\d{4}|00\d{4}|30\d{4}|68\d{4}|8\d{5}|4\d{5})(?!\d)"
-        )
-        for item in reversed(history):
-            codes = list(dict.fromkeys(pattern.findall(str(item.get("content", "")))))
-            if codes:
-                return codes[:5]
-        return []
-
-    @staticmethod
     def _format_chat_history(history: List[Dict[str, str]]) -> str:
+        """仅保留最近对话，控制最终重写的输入长度。"""
         return "\n".join(
             f"{'用户' if item.get('role') == 'user' else '助手'}: "
-            f"{str(item.get('content', ''))[:4000]}"
-            for item in history[-6:]
+            f"{str(item.get('content', ''))[:1200]}"
+            for item in history[-4:]
             if item.get("role") in {"user", "assistant"}
         )
 
     def _synthesize_response(self, state: AdvisorState) -> str:
-        """Turn the verified draft into a direct answer to the user's actual question."""
+        """使用大模型重写分析报告；超时或异常时返回原始报告。"""
+        draft = state.get("agent_response", "").strip()
+        if not draft:
+            return draft
+
         prompt = ChatPromptTemplate.from_messages([
             (
                 "system",
-                "你是专业、审慎的金融分析助手，为机构投资者提供严谨的研究分析。"
-                "请把系统生成的已验证数据底稿重新组织成对用户当前问题的直接回答，"
-                "而不是照抄固定报告模板。先回应用户究竟想知道什么，再结合候选公司"
-                "的业务关联、盈利、成长、估值、财务健康和风险说明为什么入选、"
-                "彼此差异以及在什么条件下值得继续关注。结论要有取舍，不能只逐项罗列"
-                "指标；数据缺失时明确说明其如何限制判断。不得虚构底稿外的数据、不得"
-                "承诺收益、不得把研究候选说成确定买入建议。若底稿含来源链接，应保留"
-                "与结论直接相关的链接。标题和措辞必须贴合用户提到的行业或主题。\n\n"
-                "语言风格要求：使用正式、专业、客观的书面中文。不得使用\"挺不错\"、"
-                "\"还不赖\"、\"可以的\"、\"还行\"、\"蛮好\"、\"OK\"等口语化或网络用语表述。"
-                "不得使用\"咱们\"、\"啦\"、\"哦\"、\"哈\"等随意用语。指标评价使用\"优秀/良好/"
-                "一般/需关注\"等专业评级术语。仅输出最终中文回复。",
+                "你是专业、审慎的金融分析助手。直接回答用户当前问题，"
+                "不要使用‘基于已验证数据’‘根据提供的数据’等说明信息来源的开场，"
+                "也不要展示数据来源、搜索来源、网址或引用。"
+                "不得虚构输入材料之外的数据，不得承诺收益，"
+                "不得给出保证性买卖结论；数据缺失时明确说明限制。"
+                "保留必要的风险提示，使用正式、简洁的中文。仅输出最终回复。",
             ),
             (
                 "human",
-                "历史对话：\n{history}\n\n当前问题：{message}\n\n"
-                "本轮已验证的数据底稿：\n{draft}\n\n"
-                "请围绕当前问题给出综合回答，不要复刻底稿的固定章节顺序：",
+                "近期对话：\n{history}\n\n当前问题：{message}\n\n"
+                "分析材料：\n{draft}\n\n请直接生成最终回复：",
             ),
         ])
-        chain = prompt | model | StrOutputParser()
-        return chain.invoke({
-            "history": self._format_chat_history(state.get("chat_history", [])),
-            "message": state["user_message"],
-            "draft": state.get("agent_response", "")[:12000],
-        }).strip()
+        synthesis_model = get_model_for_agent(
+            "fundamental",
+            timeout=FINAL_SYNTHESIS_TIMEOUT,
+            max_retries=0,
+        )
+        chain = prompt | synthesis_model | StrOutputParser()
+        result_queue: queue.Queue[tuple[bool, str]] = queue.Queue(maxsize=1)
+
+        def invoke() -> None:
+            try:
+                response = chain.invoke({
+                    "history": self._format_chat_history(state.get("chat_history", [])),
+                    "message": state["user_message"][:2000],
+                    "draft": draft[:8000],
+                }).strip()
+                result_queue.put((True, response))
+            except Exception as exc:
+                result_queue.put((False, str(exc)))
+
+        worker = threading.Thread(target=invoke, daemon=True, name="final-synthesis")
+        worker.start()
+        worker.join(timeout=FINAL_SYNTHESIS_TIMEOUT)
+        if worker.is_alive():
+            print(
+                f"[Final Synthesis] timed out after {FINAL_SYNTHESIS_TIMEOUT:.0f}s; "
+                "using verified draft",
+                flush=True,
+            )
+            return self._clean_user_facing_response(draft)
+
+        try:
+            succeeded, value = result_queue.get_nowait()
+        except queue.Empty:
+            return self._clean_user_facing_response(draft)
+        if not succeeded or not value:
+            print(f"[Final Synthesis] failed: {value}; using verified draft", flush=True)
+            return self._clean_user_facing_response(draft)
+        return self._clean_user_facing_response(value)
+
+    @staticmethod
+    def _clean_user_facing_response(response: str) -> str:
+        """移除内部数据标签和来源展示，保持回答直接面向用户。"""
+        import re
+
+        cleaned = (response or "").strip()
+        cleaned = re.sub(
+            r"^(?:基于已验证数据|根据已验证数据|基于提供的数据|根据提供的数据)[，,：:\s]*",
+            "",
+            cleaned,
+        )
+        cleaned = re.sub(
+            r"(?m)^\s*[-*]?\s*\*{0,2}(?:搜索来源|数据来源|信息来源|参考来源)\*{0,2}\s*[：:].*(?:\n|$)",
+            "",
+            cleaned,
+        )
+        return cleaned.strip()
 
     def _build_fundamental_summary(
         self, analysis: Dict[str, Any], codes: List[str], screening: bool = False
@@ -329,9 +306,6 @@ class AdvisorSystem:
             parts.append(f"- **评级**：{rating}（{score:.0f}分）")
             if candidate:
                 parts.append(f"- **搜索入选依据**：{candidate.get('reason') or '暂无'}")
-                urls = candidate.get("source_urls", []) or []
-                if urls:
-                    parts.append("- **搜索来源**：" + "；".join(urls[:3]))
             parts.append(
                 f"- **数据日期**：财务报告期 {data.get('date') or '暂无'}；"
                 f"行情日期 {quote.get('date') or '暂无'}"
@@ -370,108 +344,364 @@ class AdvisorSystem:
         )
         return "\n".join(parts)
 
+    @staticmethod
+    def _intent_names(state: AdvisorState) -> set[str]:
+        return {
+            str(item.get("intent", ""))
+            for item in (state.get("detected_intents", []) or [])
+            if isinstance(item, dict)
+        }
+
+    @staticmethod
+    def _intent_query(state: AdvisorState, intent: str) -> str:
+        for item in state.get("detected_intents", []) or []:
+            if isinstance(item, dict) and item.get("intent") == intent:
+                return str(item.get("query", "")).strip() or state["user_message"]
+        return state["user_message"]
+
+    @staticmethod
+    def _compose_intent_draft(state: AdvisorState) -> str:
+        """按用户友好的顺序组合独立工作流结果。"""
+        results = state.get("intent_results", {}) or {}
+        sections: list[str] = []
+        titles = {
+            "casual_chat": "交流回应",
+            "market_query": "行情与分析",
+            "stock_recommendation": "候选标的研究",
+            "asset_allocation": "资产配置",
+        }
+        for intent in ("casual_chat", "market_query", "stock_recommendation", "asset_allocation"):
+            item = results.get(intent, {}) or {}
+            content = str(item.get("content", "")).strip()
+            if content:
+                sections.append(f"## {titles[intent]}\n\n{content}")
+        return "\n\n".join(sections).strip() or state.get("agent_response", "").strip()
+
     def _build_graph(self) -> CompiledStateGraph:
 
         # ── 节点 1: 监督者（选择需要执行的子 Agent）──
         def supervisor_handler(state: AdvisorState) -> AdvisorState:
             self._trace_agent(state, "SupervisorAgent")
             self._emit_progress("supervisor", "正在判断需要执行的分析步骤")
-            state["contextual_follow_up"] = self._is_contextual_follow_up(
-                state["user_message"], state.get("chat_history", [])
-            )
             result = self.supervisor.plan_tasks(
                 state["user_message"],
-                state.get("compressed_context", "") or state.get("memory_context", ""),
+                state.get("memory_context", ""),
+                pending_allocation=(
+                    (state.get("business_state", {}) or {}).get("status") == "waiting_for_input"
+                ),
             )
-            state["task_plan"] = result["task_plan"]
-            state["missing_info"] = result.get("missing_info", [])
+            pending = state.get("business_state", {}) or {}
+            message = state["user_message"].strip()
+            cancel_markers = ("取消", "不用了", "停止", "放弃", "先不配置")
+            cancel_pending = any(marker in message for marker in cancel_markers)
+            if cancel_pending:
+                state["task_plan"] = ["compliance"]
+                state["business_state"] = {}
+                state["agent_response"] = "已取消待处理的资产配置任务。"
+                state["detected_intents"] = [{
+                    "intent": "casual_chat", "query": message,
+                    "confidence": 1.0, "reason": "取消待处理任务",
+                }]
+                state["intent_results"] = {
+                    "casual_chat": {"status": "success", "content": state["agent_response"]}
+                }
+            else:
+                state["task_plan"] = result["task_plan"]
+                state["detected_intents"] = result["intents"]
+                state["intent_source"] = result["intent_source"]
+                state["finance_related"] = bool(result["finance_related"])
+                names = self._intent_names(state)
+                if pending.get("status") == "waiting_for_input" and "asset_allocation" in names:
+                    state["resolved_stocks"] = list(pending.get("resolved_stocks", []) or [])
+                elif pending.get("status") == "waiting_for_input":
+                    state["business_state"] = {}
             print(
                 f"[Agent Plan] {state['customer_id']} | {state['thread_id']} | "
-                + " -> ".join(result["task_plan"]),
+                + " -> ".join(state["task_plan"]),
                 flush=True,
             )
             return state
 
-        # ── 节点 2: 关键信息槽位提取（画像 + 股票识别）──
-        def slot_extraction_handler(state: AdvisorState) -> AdvisorState:
-            self._trace_agent(state, "SlotExtractionAgent")
-            self._emit_progress("slot_extraction", "正在提取画像与股票等关键信息")
-            """用 LLM 识别用户消息中的股票名称，返回代码+名称+行业。
+        def route_after_supervisor(state: AdvisorState) -> str:
+            business = self._intent_names(state) & {
+                "market_query", "stock_recommendation", "asset_allocation",
+            }
+            return "slot_tool_decision" if business else "casual_chat"
 
-            统一提取画像与股票槽位；明确代码可直接走确定性解析。
-            """
-            message = state["user_message"]
-            slots = self.slot_agent.extract_slots(message, state.get("user_profile", {}) or {})
-            user_profile = slots["user_profile"]
-            state["user_profile"] = user_profile
-            explicit = slots["resolved_stocks"]
-            detected = explicit
-            # 只把当前输入中确实出现的名称/代码视为明确标的，防止模型把行业扩展成股票。
-            resolved = list(explicit)
-            explicit_codes = re.findall(
-                r"(?<!\d)(60\d{4}|00\d{4}|30\d{4}|68\d{4}|8\d{5}|4\d{5})(?!\d)",
-                message,
+        def _slot_candidate_intents(state: AdvisorState) -> Dict[str, str]:
+            """返回业务上可能需要槽位工具的意图及其独立子请求。"""
+            candidates: dict[str, str] = {}
+            for intent in self._intent_names(state):
+                query = self._intent_query(state, intent)
+                if needs_slot_extraction(intent, query):
+                    candidates[intent] = query
+            return candidates
+
+        def slot_tool_decision_handler(state: AdvisorState) -> AdvisorState:
+            """让轻量模型通过原生 tool_calls 决定需要提取槽位的意图。"""
+            candidates = _slot_candidate_intents(state)
+            if not candidates:
+                state["slot_tool_calls"] = []
+                state["slot_tool_source"] = "skipped"
+                return state
+
+            candidate_items = [
+                item for item in state.get("detected_intents", [])
+                if isinstance(item, dict) and item.get("intent") in candidates
+            ]
+            slot_tool = create_extract_finance_slots_tool(
+                self.slot_agent,
+                state.get("user_profile", {}) or {},
+                self._format_chat_history(state.get("chat_history", [])),
             )
-            for stock in ([] if explicit else detected):
-                code = stock.get("code", "")
-                name = stock.get("name", "")
-                explicit_name = bool(name and (name in message or (len(name) >= 4 and name[-2:] in message)))
-                if code in message or explicit_name:
-                    resolved.append(stock)
-            detected_codes = {stock.get("code") for stock in resolved}
-            for code in explicit_codes:
-                if code not in detected_codes:
-                    resolved.append({"code": code, "name": "", "industry": ""})
+            source = "model"
+            error = ""
+            try:
+                raw_calls = self.supervisor.decide_slot_tool_calls(
+                    candidate_items,
+                    slot_tool,
+                    self._format_chat_history(state.get("chat_history", [])),
+                    (state.get("business_state", {}) or {}).get("status") == "waiting_for_input",
+                )
+            except Exception as exc:
+                raw_calls = []
+                source = "deterministic_fallback"
+                error = str(exc)
 
-            # Only stocks explicitly named or coded in the current message may be
-            # persisted to the user's watchlist. Search candidates stay turn-local.
-            state["explicit_user_stock_codes"] = list(dict.fromkeys(
-                stock.get("code", "") for stock in resolved if stock.get("code")
+            valid: dict[str, dict[str, Any]] = {}
+            for call in raw_calls:
+                if call.get("name") != "extract_finance_slots":
+                    continue
+                args = call.get("args", {}) or {}
+                intent = str(args.get("intent", ""))
+                query = str(args.get("query", "")).strip()
+                if intent not in candidates or query != candidates[intent] or intent in valid:
+                    continue
+                valid[intent] = {
+                    "name": "extract_finance_slots",
+                    "args": {"intent": intent, "query": query},
+                    "id": str(call.get("id", "")),
+                }
+
+            # 这些候选已经过确定性业务边界筛选；模型漏调时保障业务可继续。
+            missing = [intent for intent in candidates if intent not in valid]
+            if missing:
+                source = "deterministic_fallback" if not valid else "model+fallback"
+                for intent in missing:
+                    valid[intent] = {
+                        "name": "extract_finance_slots",
+                        "args": {"intent": intent, "query": candidates[intent]},
+                        "id": "",
+                    }
+
+            state["slot_tool_calls"] = list(valid.values())
+            state["slot_tool_source"] = source
+            state["slot_tool_error"] = error
+            return state
+
+        def route_after_slot_tool_decision(state: AdvisorState) -> str:
+            return "slot_tool_executor" if state.get("slot_tool_calls") else "business_state_guard"
+
+        def slot_tool_executor_handler(state: AdvisorState) -> AdvisorState:
+            """执行经校验的槽位工具调用，并按意图合并结构化结果。"""
+            calls = state.get("slot_tool_calls", []) or []
+            if not calls:
+                return state
+            self._trace_agent(state, "SlotExtractionTool")
+            self._emit_progress("slot_extraction", "正在提取画像与股票等关键信息")
+            user_profile = dict(state.get("user_profile", {}) or {})
+            all_stocks = list(state.get("resolved_stocks", []) or [])
+            intent_stocks = dict(state.get("intent_stocks", {}) or {})
+            explicit_codes = list(state.get("explicit_user_stock_codes", []) or [])
+            errors: list[str] = []
+
+            for call in calls:
+                args = call.get("args", {}) or {}
+                intent = str(args.get("intent", ""))
+                try:
+                    slot_tool = create_extract_finance_slots_tool(
+                        self.slot_agent,
+                        user_profile,
+                        self._format_chat_history(state.get("chat_history", [])),
+                    )
+                    result = slot_tool.invoke(args)
+                except Exception as exc:
+                    errors.append(f"{intent}: {exc}")
+                    continue
+
+                extracted_profile = result.get("user_profile", {}) or {}
+                for key, value in extracted_profile.items():
+                    if key != "stock_codes" and value not in (None, "", 0, [], {}):
+                        user_profile[key] = value
+                stocks = list(result.get("resolved_stocks", []) or [])
+                intent_stocks[intent] = stocks
+                known = {str(stock.get("code")) for stock in all_stocks if stock.get("code")}
+                for stock in stocks:
+                    if stock.get("code") and str(stock["code"]) not in known:
+                        all_stocks.append(stock)
+                        known.add(str(stock["code"]))
+                explicit_codes.extend(
+                    str(code) for code in result.get("explicit_stock_codes", []) if code
+                )
+
+            pending = state.get("business_state", {}) or {}
+            if not all_stocks and pending.get("status") == "waiting_for_input":
+                all_stocks = list(pending.get("resolved_stocks", []) or [])
+            codes = list(dict.fromkeys(
+                str(stock.get("code")) for stock in all_stocks if stock.get("code")
             ))
+            user_profile["stock_codes"] = codes
+            state["user_profile"] = user_profile
+            state["resolved_stocks"] = all_stocks
+            state["intent_stocks"] = intent_stocks
+            state["explicit_user_stock_codes"] = list(dict.fromkeys(explicit_codes))
+            state["slot_tool_called"] = True
+            if errors:
+                state["slot_tool_error"] = "; ".join(errors)
+            if "slot_extraction" not in state.get("task_plan", []):
+                state["task_plan"] = ["slot_extraction", *state.get("task_plan", [])]
+            self.shared_memory.publish_fact(
+                "user_profile", user_profile, source="slot_extraction_tool",
+            )
+            return state
 
-            # “这两只/上述股票”等追问沿用最近一轮标的，不能重新做主题搜索。
-            if not resolved and state.get("contextual_follow_up"):
-                history_codes = self._history_stock_codes(state.get("chat_history", []))
-                profile_codes = user_profile.get("stock_codes", []) if isinstance(user_profile, dict) else []
-                for code in history_codes or profile_codes:
-                    basic = self.shared_memory.query(f"stock_basic_info_{code}", {}) or {}
-                    resolved.append({
-                        "code": code,
-                        "name": str(basic.get("name", "")),
-                        "industry": str(basic.get("industry", "")),
-                    })
+        def business_state_guard(state: AdvisorState) -> AdvisorState:
+            """在任何外部搜索或数据获取前校验目标 Agent 的业务状态。"""
+            if "asset_allocation" not in (state.get("task_plan", []) or []):
+                state["business_state"] = {}
+                return state
 
-            if (not resolved and not state.get("contextual_follow_up")
-                    and "data_fetch" in (state.get("task_plan", []) or [])):
+            business_state = self.allocation_agent.build_business_state(
+                state.get("user_profile", {}) or {}
+            )
+            # 选股工作流会在下一节点产生配置候选，因此此处只校验其余画像字段。
+            if "stock_recommendation" in self._intent_names(state):
+                business_state["missing_fields"] = [
+                    field for field in business_state.get("missing_fields", [])
+                    if field != "stock_codes"
+                ]
+                business_state["status"] = (
+                    "waiting_for_input" if business_state["missing_fields"] else "ready"
+                )
+            previous = state.get("business_state", {}) or {}
+            if business_state["status"] == "waiting_for_input":
+                business_state.update({
+                    "original_request": previous.get("original_request") or state["user_message"],
+                    "task_plan": previous.get("task_plan") or list(state.get("task_plan", [])),
+                    "resolved_stocks": list(state.get("resolved_stocks", []) or []),
+                })
+                state["agent_response"] = (
+                    self.allocation_agent.build_missing_fields_response(business_state)
+                )
+                intent_results = state.get("intent_results", {}) or {}
+                intent_results["asset_allocation"] = {
+                    "status": "waiting_for_input", "content": state["agent_response"],
+                }
+                state["intent_results"] = intent_results
+                if self._intent_names(state) & {"market_query", "stock_recommendation"}:
+                    state["task_plan"] = [
+                        step for step in state.get("task_plan", [])
+                        if step != "asset_allocation"
+                    ]
+            state["business_state"] = business_state
+            return state
+
+        def route_after_business_guard(state: AdvisorState) -> str:
+            if (state.get("business_state", {}) or {}).get("status") == "waiting_for_input":
+                if self._intent_names(state) & {"market_query", "stock_recommendation"}:
+                    return "stock_resolution"
+                return "compliance"
+            return "stock_resolution"
+
+        def stock_resolution_handler(state: AdvisorState) -> AdvisorState:
+            """校验通过后再执行候选搜索和股票身份整理。"""
+            message = state["user_message"]
+            resolved = list(state.get("resolved_stocks", []) or [])
+            user_profile = state.get("user_profile", {}) or {}
+            intent_names = self._intent_names(state)
+            intent_results = state.get("intent_results", {}) or {}
+            intent_stocks = state.get("intent_stocks", {}) or {}
+
+            if "market_query" in intent_names and needs_market_overview_search(
+                self._intent_query(state, "market_query")
+            ):
+                try:
+                    self._emit_progress("stock_search", "正在搜索板块与行业市场资料")
+                    market_response = self.stock_search.search_market_overview(
+                        self._intent_query(state, "market_query")
+                    )
+                    intent_results["market_query"] = {
+                        "status": "success", "content": market_response,
+                    }
+                except QianfanSearchError as exc:
+                    intent_results["market_query"] = {
+                        "status": "error", "content": "市场资料搜索失败：" + str(exc),
+                    }
+                state["intent_results"] = intent_results
+
+            if (
+                "data_fetch" in (state.get("task_plan", []) or [])
+                and "stock_recommendation" in intent_names
+                and (
+                    needs_stock_screening(self._intent_query(state, "stock_recommendation"))
+                    or not intent_stocks.get("stock_recommendation")
+                )
+            ):
                 try:
                     self._emit_progress("stock_search", "正在搜索相关行业的A股候选")
-                    searched = self.stock_search.search(message)
-                    # 搜索工具已经校验代码格式和资料来源。不要在这里再串行登录
-                    # BaoStock 做身份校验：BaoStock SDK 没有请求超时，连接异常会
-                    # 永久占有全局 session 锁。名称以随后 data_fetch 获取的
-                    # basic_info 为最终权威值。
-                    resolved = searched
-                    state["candidate_stocks"] = searched
+                    candidates = self.stock_search.search(
+                        self._intent_query(state, "stock_recommendation")
+                    )
+                    state["candidate_stocks"] = candidates
+                    intent_stocks["stock_recommendation"] = list(candidates)
+                    by_code = {
+                        str(stock.get("code")): stock for stock in resolved
+                        if isinstance(stock, dict) and stock.get("code")
+                    }
+                    for stock in candidates:
+                        if stock.get("code") not in by_code:
+                            resolved.append(stock)
                     self._emit_progress("stock_validation", "候选代码已确认，准备获取权威证券信息")
                 except QianfanSearchError as exc:
                     state["stock_search_error"] = str(exc)
-                    resolved = []
+                    intent_results["stock_recommendation"] = {
+                        "status": "error",
+                        "content": "候选股票搜索失败：" + str(exc),
+                    }
 
-            # 当前问题没有明确股票且搜索失败时清空旧标的，绝不回退到历史股票。
+            if (
+                not resolved
+                and not state.get("stock_search_error")
+                and "data_fetch" in (state.get("task_plan", []) or [])
+            ):
+                state["stock_resolution_error"] = (
+                    "无法从当前问题和对话历史中确定需要分析的股票，"
+                    "请提供股票名称或六位股票代码。"
+                )
+                state["agent_response"] = state["stock_resolution_error"]
+                target = (
+                    "stock_recommendation"
+                    if "stock_recommendation" in intent_names else "market_query"
+                )
+                if "asset_allocation" in intent_names and needs_market_overview_search(
+                    self._intent_query(state, "market_query")
+                ):
+                    target = "asset_allocation"
+                intent_results[target] = {
+                    "status": "error", "content": state["stock_resolution_error"],
+                }
+
             if not resolved and isinstance(user_profile, dict):
                 user_profile["stock_codes"] = []
-                state["user_profile"] = user_profile
-                self.shared_memory.publish_fact("user_profile", user_profile, source="slot_extraction")
-            if resolved:
-                codes = list(dict.fromkeys(s["code"] for s in resolved))
-                if isinstance(user_profile, dict):
-                    user_profile["stock_codes"] = codes
-                    state["user_profile"] = user_profile
-                    self.shared_memory.publish_fact(
-                        "user_profile", user_profile, source="slot_extraction"
-                    )
-
+            elif resolved and isinstance(user_profile, dict):
+                user_profile["stock_codes"] = list(dict.fromkeys(
+                    stock["code"] for stock in resolved if stock.get("code")
+                ))
+            state["user_profile"] = user_profile
             state["resolved_stocks"] = resolved
+            state["intent_results"] = intent_results
+            state["intent_stocks"] = intent_stocks
+            self.shared_memory.publish_fact("user_profile", user_profile, source="slot_extraction")
 
             # 把每只股票的基本识别信息写入共享内存（供下游展示）
             for s in resolved:
@@ -486,86 +716,115 @@ class AdvisorSystem:
                         f"stock_search_candidate_{s['code']}", s, source="baidu_qianfan_search"
                     )
 
-            if "data_fetch" not in (state.get("task_plan", []) or []):
+            if (
+                "data_fetch" not in (state.get("task_plan", []) or [])
+                and not state.get("agent_response")
+            ):
                 state["agent_response"] = self.slot_agent.handle(message)
             return state
 
-        # ── 节点 4: 金融数据获取（Send fan-out 按股票并行）──
+        # ── 节点 4: 金融数据获取（@task fan-out 按股票并行）──
 
         def _resolve_stock_codes(state: AdvisorState) -> List[str]:
             """解析股票代码：优先 resolved_stocks，其次 user_profile，最后正则。"""
+            def _unique_codes(values: List[Any]) -> List[str]:
+                return list(dict.fromkeys(str(value) for value in values if value))[:5]
+
             # 1. 优先从 LLM 识别结果读取
             resolved = state.get("resolved_stocks", []) or []
             if resolved:
-                return [s["code"] for s in resolved if s.get("code")][:5]
+                return _unique_codes([s.get("code") for s in resolved])
             # 2. 从 user_profile 读取
             user_profile = state.get("user_profile", {}) or {}
             if isinstance(user_profile, dict):
                 codes = list(user_profile.get("stock_codes", []))
                 if codes:
-                    return codes[:5]
+                    return _unique_codes(codes)
             # 3. 正则兜底
             codes = re.findall(
                 r"(?<!\d)(60\d{4}|00\d{4}|30\d{4}|68\d{4}|8\d{5}|4\d{5})(?!\d)",
                 state.get("user_message", ""),
             )
-            return codes[:5]
+            return _unique_codes(codes)
 
-        def route_data_fetch(state: AdvisorState):
-            """fan-out 路由：为每只股票生成一个 Send 到 data_fetch_single。
-
-            无股票代码时直接跳到 data_fetch_join（空 fan-out 边界处理）。
-            """
-            codes = _resolve_stock_codes(state)
-            if not codes:
-                return "data_fetch_join"
-            trace_context = {
-                "customer_id": state.get("customer_id", ""),
-                "thread_id": state.get("thread_id", ""),
-            }
-            return [Send("data_fetch_single", {"code": c, **trace_context}) for c in codes]
-
-        def route_after_slots(state: AdvisorState):
+        def route_after_slots(state: AdvisorState) -> str:
             if "data_fetch" not in (state.get("task_plan", []) or []):
                 return "compliance"
-            return route_data_fetch(state)
+            return "data_fetch_batch"
 
         def route_after_data_fetch(state: AdvisorState):
-            if state.get("stock_search_error"):
+            if state.get("stock_search_error") or state.get("stock_resolution_error"):
                 return "compliance"
             plan = state.get("task_plan", []) or []
             if "fundamental_analysis" in plan:
-                return route_fundamental(state)
+                return "fundamental_batch"
             if "asset_allocation" in plan:
                 return "asset_allocation"
             return "compliance"
 
-        def data_fetch_single_handler(state: dict) -> dict:
-            """单股票并行节点：调用 agent.handle_single_stock 写入共享内存。"""
-            code = state["code"]
-            self._trace_agent(state, "DataFetchAgent", code)
-            self._emit_progress(
-                "data_fetch", f"正在获取 {code} 的行情与财务数据",
-                str(state.get("thread_id", "")),
-            )
-            entry = self.data_fetch_agent.handle_single_stock(code)
-            # 通过 operator.add reducer 累积到 stock_data_entries
-            return {"stock_data_entries": [entry]}
+        @task
+        def fetch_stock_task(payload: Dict[str, Any]) -> Dict[str, Any]:
+            """获取一只股票；返回值由 LangGraph checkpoint 持久化。"""
+            code = str(payload["code"])
+            try:
+                entry = self.data_fetch_agent.handle_single_stock(code)
+                entry.setdefault("status", "success")
+            except Exception as exc:
+                entry = {"code": code, "status": "error", "error": str(exc)}
+            entry["code"] = code
+            entry["_run_id"] = str(payload.get("run_id", ""))
+            return entry
 
-        def data_fetch_join_handler(state: AdvisorState) -> AdvisorState:
-            """join 节点：所有并行 data_fetch_single 完成后，从共享内存收集数据。"""
+        def _publish_stock_entry(entry: Dict[str, Any]) -> None:
+            """从 task 返回值重建共享内存，确保 checkpoint 恢复不依赖副作用。"""
+            code = str(entry.get("code", ""))
+            if not code:
+                return
+            fact_names = {
+                "basic_info": "stock_basic_info",
+                "quote": "stock_quote",
+                "indicators": "financial_indicator",
+                "history": "stock_history",
+            }
+            for field, prefix in fact_names.items():
+                value = entry.get(field)
+                if isinstance(value, dict):
+                    self.shared_memory.publish_fact(
+                        f"{prefix}_{code}", value, source=self.data_fetch_agent.agent_name,
+                    )
+
+        def data_fetch_batch_handler(state: AdvisorState) -> AdvisorState:
+            """并发获取全部股票，并在 task 完成后统一聚合和发布结果。"""
+            codes = _resolve_stock_codes(state)
+            payloads = [
+                {"code": code, "run_id": state.get("run_id", "")}
+                for code in codes
+            ]
+            futures = []
+            for payload in payloads:
+                code = payload["code"]
+                self._trace_agent(state, "DataFetchAgent", code)
+                self._emit_progress(
+                    "data_fetch", f"正在获取 {code} 的行情与财务数据",
+                    str(state.get("thread_id", "")),
+                )
+                futures.append(fetch_stock_task(payload))
+            entries = [future.result() for future in futures]
+            state["stock_data_entries"] = entries
+
             stock_data: Dict[str, Any] = {}
-            user_profile = state.get("user_profile", {}) or {}
-            codes = user_profile.get("stock_codes", []) if isinstance(user_profile, dict) else []
-            if not codes:
-                # 回退：从累积的 entries 提取
-                codes = [e.get("code") for e in state.get("stock_data_entries", []) if e.get("code")]
-            for code in codes:
+            for entry in entries:
+                if entry.get("_run_id") != state.get("run_id", ""):
+                    continue
+                _publish_stock_entry(entry)
+                code = str(entry.get("code", ""))
+                if not code:
+                    continue
                 stock_data[code] = {
-                    "quote": self.shared_memory.query(f"stock_quote_{code}", {}),
-                    "indicators": self.shared_memory.query(f"financial_indicator_{code}", {}),
-                    "basic_info": self.shared_memory.query(f"stock_basic_info_{code}", {}),
-                    "history": self.shared_memory.query(f"stock_history_{code}", {}),
+                    "quote": entry.get("quote", {}),
+                    "indicators": entry.get("indicators", {}),
+                    "basic_info": entry.get("basic_info", {}),
+                    "history": entry.get("history", {}),
                 }
             state["stock_data"] = stock_data
             if state.get("stock_search_error"):
@@ -575,6 +834,13 @@ class AdvisorSystem:
                 )
                 return state
             if "fundamental_analysis" not in (state.get("task_plan", []) or []):
+                if not stock_data:
+                    # 保留股票解析/搜索阶段已经生成的明确错误，不用空模板覆盖。
+                    if not state.get("agent_response"):
+                        state["agent_response"] = (
+                            "未找到可查询的股票，请提供股票名称或六位股票代码。"
+                        )
+                    return state
                 lines = ["## 股票数据"]
                 for code, item in stock_data.items():
                     basic = item.get("basic_info", {}) or {}
@@ -586,46 +852,80 @@ class AdvisorSystem:
                     )
                 lines.append("\n投资有风险，过往业绩不代表未来收益，请谨慎决策。")
                 state["agent_response"] = "\n".join(lines)
+                if "market_query" in self._intent_names(state):
+                    intent_results = state.get("intent_results", {}) or {}
+                    intent_results["market_query"] = {
+                        "status": "success", "content": state["agent_response"],
+                    }
+                    state["intent_results"] = intent_results
             return state
 
-        # ── 节点 4: 基本面分析（Send fan-out 按股票并行）──
+        # ── 节点 5: 基本面分析（@task fan-out 按股票并行）──
 
-        def route_fundamental(state: AdvisorState):
-            """fan-out 路由：为每只股票生成一个 Send 到 fundamental_single。"""
-            codes = _resolve_stock_codes(state)
-            if not codes:
-                return "fundamental_join"
-            trace_context = {
-                "customer_id": state.get("customer_id", ""),
-                "thread_id": state.get("thread_id", ""),
-            }
-            return [Send("fundamental_single", {"code": c, **trace_context}) for c in codes]
+        @task
+        def analyze_stock_task(payload: Dict[str, Any]) -> Dict[str, Any]:
+            """分析一只股票；输入中的数据先用于恢复共享内存。"""
+            code = str(payload["code"])
+            stock_item = payload.get("stock_data", {})
+            if isinstance(stock_item, dict):
+                _publish_stock_entry({"code": code, **stock_item})
+            try:
+                entry = self.fundamental_agent.handle_single_stock(code)
+                entry.setdefault("status", "success")
+            except Exception as exc:
+                entry = {
+                    "code": code,
+                    "status": "error",
+                    "error": str(exc),
+                    "rating": "未知",
+                    "summary": "基本面分析执行异常",
+                    "overall_score": 50,
+                }
+            entry["code"] = code
+            entry["_run_id"] = str(payload.get("run_id", ""))
+            return entry
 
-        def fundamental_single_handler(state: dict) -> dict:
-            """单股票并行节点：调用 agent.handle_single_stock 进行 LLM 分析。"""
-            code = state["code"]
-            self._trace_agent(state, "FundamentalAnalysisAgent", code)
-            self._emit_progress(
-                "fundamental_analysis", f"正在分析 {code} 的基本面",
-                str(state.get("thread_id", "")),
-            )
-            entry = self.fundamental_agent.handle_single_stock(code)
-            return {"fundamental_entries": [entry]}
-
-        def fundamental_join_handler(state: AdvisorState) -> AdvisorState:
-            """join 节点：从共享内存收集所有基本面分析结果。
+        def fundamental_batch_handler(state: AdvisorState) -> AdvisorState:
+            """并发分析全部股票，并统一聚合基本面结果。
 
             当 task_plan 不包含 asset_allocation 时，同时生成基本面摘要回复。
             """
+            codes = _resolve_stock_codes(state)
+            stock_data = state.get("stock_data", {}) or {}
+            payloads = [
+                {
+                    "code": code,
+                    "run_id": state.get("run_id", ""),
+                    "stock_data": stock_data.get(code, {}),
+                }
+                for code in codes
+            ]
+            futures = []
+            for payload in payloads:
+                code = payload["code"]
+                self._trace_agent(state, "FundamentalAnalysisAgent", code)
+                self._emit_progress(
+                    "fundamental_analysis", f"正在分析 {code} 的基本面",
+                    str(state.get("thread_id", "")),
+                )
+                futures.append(analyze_stock_task(payload))
+            entries = [future.result() for future in futures]
+            state["fundamental_entries"] = entries
+
             analysis: Dict[str, Any] = {}
-            user_profile = state.get("user_profile", {}) or {}
-            codes = user_profile.get("stock_codes", []) if isinstance(user_profile, dict) else []
-            if not codes:
-                codes = [e.get("code") for e in state.get("fundamental_entries", []) if e.get("code")]
-            for code in codes:
-                result = self.shared_memory.query(f"fundamental_analysis_{code}", {})
-                if result:
-                    analysis[code] = result
+            for entry in entries:
+                if entry.get("_run_id") != state.get("run_id", ""):
+                    continue
+                code = str(entry.get("code", ""))
+                if not code:
+                    continue
+                result = {key: value for key, value in entry.items() if key != "_run_id"}
+                analysis[code] = result
+                self.shared_memory.publish_fact(
+                    f"fundamental_analysis_{code}",
+                    result,
+                    source=self.fundamental_agent.agent_name,
+                )
             state["fundamental_analysis"] = analysis
 
             # 条件路由：task_plan 不含 asset_allocation 或股票数 < 2 时，生成基本面摘要回复
@@ -634,6 +934,44 @@ class AdvisorSystem:
                 state["agent_response"] = self._build_fundamental_summary(
                     analysis, codes, screening=bool(state.get("candidate_stocks"))
                 )
+
+            intent_results = state.get("intent_results", {}) or {}
+            intent_names = self._intent_names(state)
+            intent_stocks = state.get("intent_stocks", {}) or {}
+            def codes_for(intent: str) -> List[str]:
+                scoped = [
+                    str(stock.get("code"))
+                    for stock in intent_stocks.get(intent, [])
+                    if isinstance(stock, dict) and stock.get("code")
+                ]
+                return list(dict.fromkeys(scoped)) or codes
+
+            if "stock_recommendation" in intent_names:
+                recommendation_codes = codes_for("stock_recommendation")
+                recommendation_analysis = {
+                    code: analysis[code] for code in recommendation_codes if code in analysis
+                }
+                summary = self._build_fundamental_summary(
+                    recommendation_analysis, recommendation_codes, screening=True,
+                )
+                intent_results["stock_recommendation"] = {
+                    "status": "success" if recommendation_analysis else "error",
+                    "content": summary,
+                }
+            if "market_query" in intent_names and not needs_market_overview_search(
+                self._intent_query(state, "market_query")
+            ):
+                market_codes = codes_for("market_query")
+                market_analysis = {
+                    code: analysis[code] for code in market_codes if code in analysis
+                }
+                summary = self._build_fundamental_summary(
+                    market_analysis, market_codes, screening=False,
+                )
+                intent_results["market_query"] = {
+                    "status": "success" if market_analysis else "error", "content": summary,
+                }
+            state["intent_results"] = intent_results
 
             return state
 
@@ -665,6 +1003,14 @@ class AdvisorSystem:
             # 健壮性保障：确保 shared_memory 的 user_profile.stock_codes 与 state 一致
             user_profile = state.get("user_profile", {}) or {}
             resolved_stocks = state.get("resolved_stocks", []) or []
+            allocation_query = self._intent_query(state, "asset_allocation")
+            recommendation_stocks = (
+                state.get("intent_stocks", {}) or {}
+            ).get("stock_recommendation", []) or []
+            if recommendation_stocks and any(
+                marker in allocation_query for marker in ("推荐", "筛选", "候选", "这些", "它们")
+            ):
+                resolved_stocks = list(recommendation_stocks)
             if isinstance(user_profile, dict) and resolved_stocks:
                 codes = [s.get("code") for s in resolved_stocks if isinstance(s, dict) and s.get("code")]
                 if codes and list(user_profile.get("stock_codes", [])) != codes:
@@ -675,54 +1021,80 @@ class AdvisorSystem:
                     )
 
             response = self.allocation_agent.handle(
-                state["user_message"],
-                state.get("compressed_context", ""),
-                state["customer_id"],
-                state.get("chat_history", []),
-                state.get("thread_id"),
-                state.get("memory_context", ""),
+                message=state["user_message"],
+                customer_id=state["customer_id"],
+                chat_history=state.get("chat_history", []),
+                thread_id=state.get("thread_id"),
+                memory_context=state.get("memory_context", ""),
             )
             state["agent_response"] = response
             state["allocation_result"] = self.shared_memory.query("allocation_result", {}) or {}
+            intent_results = state.get("intent_results", {}) or {}
+            intent_results["asset_allocation"] = {
+                "status": "success" if state["allocation_result"] else "error",
+                "content": response,
+            }
+            state["intent_results"] = intent_results
+            return state
+
+        def casual_chat_handler(state: AdvisorState) -> AdvisorState:
+            """处理拆分后的理财闲聊，不触发任何金融数据工具。"""
+            if "casual_chat" not in self._intent_names(state):
+                return state
+            intent_results = state.get("intent_results", {}) or {}
+            if intent_results.get("casual_chat", {}).get("content"):
+                return state
+            self._trace_agent(state, "CasualChatAgent")
+            self._emit_progress("casual_chat", "正在回应理财交流内容")
+            try:
+                response = self.supervisor.chat(
+                    self._intent_query(state, "casual_chat"),
+                    self._format_chat_history(state.get("chat_history", [])),
+                    state.get("finance_related", True),
+                )
+                status = "success"
+            except Exception as exc:
+                response = "暂时无法回应这部分交流内容：" + str(exc)
+                status = "error"
+            intent_results["casual_chat"] = {"status": status, "content": response}
+            state["intent_results"] = intent_results
+            state["agent_response"] = response
             return state
 
         # ── 节点 6: 合规风控审查 ──
         def compliance_handler(state: AdvisorState) -> AdvisorState:
             self._trace_agent(state, "ComplianceAgent")
-            self._emit_progress("compliance", "正在检查回复并整理补充建议")
+            self._emit_progress("compliance", "正在检查回复中的合规表述")
+            if "casual_chat" in self._intent_names(state):
+                state = casual_chat_handler(state)
+
+            # 某些分支（如缺少配置字段）直接在 agent_response 中产生提示，
+            # 在最终综合前把它归入对应意图，避免覆盖其他成功结果。
+            intent_results = state.get("intent_results", {}) or {}
+            if (
+                "asset_allocation" in self._intent_names(state)
+                and "asset_allocation" not in intent_results
+                and state.get("agent_response")
+            ):
+                intent_results["asset_allocation"] = {
+                    "status": "waiting_for_input",
+                    "content": state["agent_response"],
+                }
+            state["intent_results"] = intent_results
+            state["agent_response"] = self._compose_intent_draft(state)
+
             has_verified_analysis = bool(
                 state.get("fundamental_analysis")
                 or state.get("allocation_result")
                 or state.get("stock_data")
             )
             if (
-                has_verified_analysis
+                (has_verified_analysis or len(intent_results) > 1)
                 and state.get("agent_response")
-                and not state.get("stock_search_error")
             ):
-                try:
-                    state["agent_response"] = self._synthesize_response(state)
-                except Exception:
-                    # Keep the verified deterministic draft if final synthesis fails.
-                    pass
-            profile = state.get("user_profile", {}) or {}
-            field_aliases = {"budget": "budget_amount"}
-            missing_info = []
-            requested_missing = (
-                state.get("missing_info", [])
-                if (
-                    needs_investment_profile(state.get("user_message", ""))
-                    and not state.get("stock_search_error")
-                )
-                else []
-            )
-            for field in requested_missing:
-                profile_field = field_aliases.get(field, field)
-                if not isinstance(profile, dict) or not profile.get(profile_field):
-                    missing_info.append(field)
+                state["agent_response"] = self._synthesize_response(state)
             result = self.compliance_agent.review(
                 agent_response=state["agent_response"],
-                missing_info=missing_info,
             )
             state["compliance_result"] = result
 
@@ -734,12 +1106,6 @@ class AdvisorSystem:
                     + result.get("reason", "回复中存在敏感表述，请修改后参考。")
                 )
 
-            questions = result.get("follow_up_questions", [])
-            if questions:
-                state["agent_response"] += "\n\n### 为了进一步完善分析，请补充\n" + "\n".join(
-                    f"- {question}" for question in questions
-                )
-
             return state
 
         def final_snapshot(state: AdvisorState) -> AdvisorState:
@@ -748,8 +1114,8 @@ class AdvisorSystem:
 
         # ── 构建图 ─────────────────────────────────────────
         # START → supervisor → slot_extraction（画像与股票识别）
-        #       → [data_fetch_single × N 并行] → data_fetch_join
-        #       → [fundamental_single × N 并行] → fundamental_join
+        #       → data_fetch_batch（@task × N 并行）
+        #       → fundamental_batch（@task × N 并行）
         #       → route_after_fundamental ─┬─ asset_allocation → compliance
         #                                └──────────────────→ compliance
         #       → final_snapshot → END
@@ -757,44 +1123,55 @@ class AdvisorSystem:
         graph = StateGraph(AdvisorState)
 
         graph.add_node("supervisor", supervisor_handler)
-        graph.add_node("slot_extraction", slot_extraction_handler)
+        graph.add_node("slot_tool_decision", slot_tool_decision_handler)
+        graph.add_node("slot_tool_executor", slot_tool_executor_handler)
+        graph.add_node("business_state_guard", business_state_guard)
+        graph.add_node("stock_resolution", stock_resolution_handler)
 
-        # data_fetch fan-out 拆分
-        graph.add_node("data_fetch_single", data_fetch_single_handler)
-        graph.add_node("data_fetch_join", data_fetch_join_handler)
-
-        # fundamental fan-out 拆分
-        graph.add_node("fundamental_single", fundamental_single_handler)
-        graph.add_node("fundamental_join", fundamental_join_handler)
+        graph.add_node("data_fetch_batch", data_fetch_batch_handler)
+        graph.add_node("fundamental_batch", fundamental_batch_handler)
 
         graph.add_node("asset_allocation", asset_allocation_handler)
+        graph.add_node("casual_chat", casual_chat_handler)
         graph.add_node("compliance", compliance_handler)
         graph.add_node("final_snapshot", final_snapshot)
 
         # 边：顺序段
         graph.add_edge(START, "supervisor")
-        graph.add_edge("supervisor", "slot_extraction")
         graph.add_conditional_edges(
-            "slot_extraction",
+            "supervisor",
+            route_after_supervisor,
+            ["slot_tool_decision", "casual_chat"],
+        )
+        graph.add_edge("casual_chat", "compliance")
+        graph.add_conditional_edges(
+            "slot_tool_decision",
+            route_after_slot_tool_decision,
+            ["slot_tool_executor", "business_state_guard"],
+        )
+        graph.add_edge("slot_tool_executor", "business_state_guard")
+        graph.add_conditional_edges(
+            "business_state_guard",
+            route_after_business_guard,
+            ["stock_resolution", "compliance"],
+        )
+        graph.add_conditional_edges(
+            "stock_resolution",
             route_after_slots,
-            ["data_fetch_single", "data_fetch_join", "compliance"],
+            ["data_fetch_batch", "compliance"],
         )
-        # 所有 data_fetch_single 收敛到 data_fetch_join
-        graph.add_edge("data_fetch_single", "data_fetch_join")
 
-        # data_fetch_join 根据 task_plan 决定是否继续基本面、配置或合规
+        # 数据批处理完成后，根据 task_plan 决定是否继续基本面、配置或合规。
         graph.add_conditional_edges(
-            "data_fetch_join",
+            "data_fetch_batch",
             route_after_data_fetch,
-            ["fundamental_single", "fundamental_join", "asset_allocation", "compliance"],
+            ["fundamental_batch", "asset_allocation", "compliance"],
         )
-        # 所有 fundamental_single 收敛到 fundamental_join
-        graph.add_edge("fundamental_single", "fundamental_join")
 
         # 顺序下游段
         # 条件路由：根据 task_plan 决定是否执行 asset_allocation
         graph.add_conditional_edges(
-            "fundamental_join",
+            "fundamental_batch",
             route_after_fundamental,
             ["asset_allocation", "compliance"],
         )
@@ -802,7 +1179,7 @@ class AdvisorSystem:
         graph.add_edge("compliance", "final_snapshot")
         graph.add_edge("final_snapshot", END)
 
-        return graph.compile()
+        return graph.compile(checkpointer=self.checkpointer)
 
     # ── 公共 API ─────────────────────────────────────────────
 
@@ -814,44 +1191,82 @@ class AdvisorSystem:
         progress_callback: Callable[[str, str], None] | None = None,
         conversation_id: str = "",
     ) -> Dict[str, Any]:
+        """隔离并执行一轮完整工作流。"""
+        with self._workflow_lock:
+            self.shared_memory.reset()
+            return self._handle_message_locked(
+                message, chat_history, customer_id, progress_callback, conversation_id,
+            )
+
+    def _handle_message_locked(
+        self,
+        message: str,
+        chat_history: List[Dict[str, str]] | None = None,
+        customer_id: str = "CUST001",
+        progress_callback: Callable[[str, str], None] | None = None,
+        conversation_id: str = "",
+    ) -> Dict[str, Any]:
         """处理用户消息，返回投顾回复。"""
+        # Guard the orchestration boundary before memory, LLM, search, or market-data
+        # processing. The individual ReAct agents also use the same before_agent
+        # middleware as defence in depth.
+        if find_sensitive_word(message) is not None:
+            self._emit_progress("content_filter", "输入内容未通过安全检查")
+            return {
+                "response": BLOCKED_RESPONSE,
+                "task_plan": [],
+                "user_profile": {},
+                "stock_data": {},
+                "fundamental_analysis": {},
+                "allocation_result": {},
+                "compliance_result": {},
+                "shared_memory_snapshot": {},
+                "explicit_user_stock_codes": [],
+                "conversation_id": conversation_id or uuid.uuid4().hex,
+                "blocked": True,
+            }
         self._progress_context.callback = progress_callback
         self._emit_progress("preparing", "正在准备分析上下文")
-        database = self.memory.database
-        conversation = database.get_conversation(conversation_id, customer_id) if conversation_id else None
-        if not conversation:
-            conversation = database.create_conversation(customer_id)
-            conversation_id = conversation["conversation_id"]
-            # Synchronize messages already visible in the client when adopting a new session.
-            for item in chat_history or []:
-                role = "user" if item.get("role") == "user" else "assistant"
-                content = str(item.get("content", "")).strip()
-                if content:
-                    database.append_conversation_message(conversation_id, role, content)
+
+        # conversation_id 即 checkpoint thread_id；未提供时新建
+        if not conversation_id:
+            conversation_id = uuid.uuid4().hex
         thread_id = conversation_id
+        config = {"configurable": {"thread_id": thread_id}}
+
+        previous_business_state: Dict[str, Any] = {}
+        try:
+            previous_values = self.graph.get_state(config).values or {}
+            candidate_state = previous_values.get("business_state", {}) or {}
+            if candidate_state.get("status") == "waiting_for_input":
+                previous_business_state = dict(candidate_state)
+        except Exception:
+            previous_business_state = {}
+
         if progress_callback:
             with self._progress_lock:
                 self._progress_callbacks[thread_id] = progress_callback
         fallback_history = chat_history or []
+        if not fallback_history and conversation_id:
+            # Redis may be unavailable. Recover the recent window from the latest
+            # graph checkpoint so contextual follow-ups still receive history.
+            fallback_history = self.get_checkpoint_conversation_messages(
+                conversation_id, self.memory.window_size,
+            )
         memory_data = self.memory.load_context(customer_id, conversation_id, fallback_history)
-        self.memory.append_window_message(conversation_id, "user", message)
         effective_history = memory_data.get("sliding_window") or fallback_history[-5:]
-
-        # 上下文压缩
-        compressed = self.compressor.compress(effective_history, message)
 
         initial_state: AdvisorState = {
             "user_message": message,
-            "compressed_context": compressed,
-            "effective_message": message,
             "chat_history": effective_history,
             "customer_id": customer_id,
             "task_plan": [],
-            "missing_info": [],
+            "business_state": previous_business_state,
             "user_profile": memory_data.get("profile", {}) or {},
             "resolved_stocks": [],
             "candidate_stocks": [],
             "stock_search_error": "",
+            "stock_resolution_error": "",
             "stock_data": {},
             "fundamental_analysis": {},
             "allocation_result": {},
@@ -860,16 +1275,25 @@ class AdvisorSystem:
             "memory_context": memory_data.get("context_text", ""),
             "shared_memory_snapshot": {},
             "thread_id": thread_id,
-            "contextual_follow_up": False,
+            "run_id": uuid.uuid4().hex,
             "explicit_user_stock_codes": [],
             "stock_data_entries": [],
             "fundamental_entries": [],
+            "detected_intents": [],
+            "intent_results": {},
+            "intent_source": "",
+            "finance_related": True,
+            "intent_stocks": {},
+            "slot_tool_calls": [],
+            "slot_tool_called": False,
+            "slot_tool_source": "skipped",
+            "slot_tool_error": "",
         }
 
         with self._trace_lock:
             self._trace_sequences[thread_id] = 0
         try:
-            result = self.graph.invoke(initial_state)
+            result = self.graph.invoke(initial_state, config=config)
         finally:
             self._progress_context.callback = None
             with self._progress_lock:
@@ -890,12 +1314,11 @@ class AdvisorSystem:
             "conversation_id": conversation_id,
         }
 
+        # 更新 checkpoint metadata（对话标题 + customer_id）
+        self._update_conversation_meta(conversation_id, message, customer_id)
+
         # 更新记忆（按对话隔离）
-        database.rename_conversation_from_message(conversation_id, message)
-        database.append_conversation_message(conversation_id, "user", message)
-        database.append_conversation_message(
-            conversation_id, "assistant", output["response"], {"task_plan": output["task_plan"]},
-        )
+        self.memory.append_window_message(conversation_id, "user", message)
         self.memory.append_window_message(
             conversation_id, "assistant", output["response"],
             {"task_plan": output["task_plan"]},
@@ -903,14 +1326,169 @@ class AdvisorSystem:
         self.memory.update_profile_from_result(customer_id, message, output)
         self.memory.update_recent_summary(
             conversation_id,
-            fallback_history + [
+            [
                 {"role": "user", "content": message},
                 {"role": "assistant", "content": output["response"], "metadata": output},
             ],
-            compressed if compressed != "无历史对话。" else "",
         )
 
         return output
+
+    def _update_conversation_meta(
+        self, conversation_id: str, message: str, customer_id: str,
+    ) -> None:
+        """更新 checkpoint 中的对话元数据（标题 + customer_id）。"""
+        default_title = " ".join(message.strip().split())[:28] or "新对话"
+        try:
+            conn = self.checkpointer.conn
+            existing = conn.execute(
+                """SELECT json_extract(metadata, '$.title')
+                   FROM checkpoints
+                   WHERE thread_id = ?
+                     AND json_extract(metadata, '$.title') IS NOT NULL
+                   ORDER BY checkpoint_id ASC LIMIT 1""",
+                (conversation_id,),
+            ).fetchone()
+            title = str(existing[0]) if existing and existing[0] else default_title
+            conn.execute(
+                """UPDATE checkpoints
+                   SET metadata = json_set(
+                     json_set(metadata, '$.title', ?),
+                     '$.source', 'conversation',
+                     '$.customer_id', ?
+                   )
+                   WHERE rowid = (
+                     SELECT rowid FROM checkpoints
+                     WHERE thread_id = ?
+                     ORDER BY checkpoint_id DESC LIMIT 1
+                   )""",
+                (title, customer_id.upper(), conversation_id),
+            )
+            conn.commit()
+        except Exception:
+            pass
+
+    def _get_checkpoint_title(self, conversation_id: str) -> str:
+        """从 checkpoint metadata 读取对话标题。"""
+        try:
+            row = self.checkpointer.conn.execute(
+                """SELECT json_extract(metadata, '$.title') AS title
+                   FROM checkpoints
+                   WHERE thread_id = ?
+                   ORDER BY checkpoint_id DESC LIMIT 1""",
+                (conversation_id,),
+            ).fetchone()
+            return row[0] if row and row[0] else "新对话"
+        except Exception:
+            return "新对话"
+
+    def list_checkpoint_conversations(self, customer_id: str) -> list[dict[str, Any]]:
+        """从 checkpoint 查询指定用户的所有对话列表。"""
+        try:
+            rows = self.checkpointer.conn.execute(
+                """SELECT thread_id,
+                          MAX(json_extract(metadata, '$.title')) AS title,
+                          MAX(checkpoint_id) AS updated_at
+                   FROM checkpoints
+                   WHERE json_extract(metadata, '$.source') = 'conversation'
+                     AND json_extract(metadata, '$.customer_id') = ?
+                   GROUP BY thread_id
+                   ORDER BY updated_at DESC""",
+                (customer_id.upper(),),
+            ).fetchall()
+            return [
+                {
+                    "conversation_id": row[0],
+                    "title": row[1] or "新对话",
+                    "updated_at": row[2] or "",
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+
+    def get_checkpoint_conversation_messages(
+        self, conversation_id: str, limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """从 checkpoint 重建对话消息列表。"""
+        try:
+            config = {"configurable": {"thread_id": conversation_id}}
+            ckpt = self.checkpointer.get(config)
+            if not ckpt or not ckpt.get("channel_values"):
+                return []
+            state = ckpt["channel_values"]
+            messages: list[dict[str, Any]] = [
+                {
+                    "role": item.get("role", "user"),
+                    "content": str(item.get("content", "")),
+                    **({"metadata": item.get("metadata", {})} if item.get("metadata") else {}),
+                }
+                for item in (state.get("chat_history", []) or [])
+                if item.get("role") in {"user", "assistant"} and item.get("content")
+            ]
+            user_msg = state.get("user_message", "")
+            agent_resp = state.get("agent_response", "")
+            if user_msg and not (
+                messages
+                and messages[-1].get("role") == "user"
+                and messages[-1].get("content") == user_msg
+            ):
+                messages.append({"role": "user", "content": user_msg})
+            if agent_resp:
+                messages.append({
+                    "role": "assistant",
+                    "content": agent_resp,
+                    "metadata": {"task_plan": state.get("task_plan", [])},
+                })
+            return messages[-limit:]
+        except Exception:
+            return []
+
+    def delete_checkpoint_conversation(self, conversation_id: str, customer_id: str) -> bool:
+        """删除 checkpoint 中指定对话的全部数据。"""
+        try:
+            conn = self.checkpointer.conn
+            # 校验 ownership
+            row = conn.execute(
+                """SELECT 1 FROM checkpoints
+                   WHERE thread_id = ?
+                     AND json_extract(metadata, '$.customer_id') = ?
+                   LIMIT 1""",
+                (conversation_id, customer_id.upper()),
+            ).fetchone()
+            if not row:
+                return False
+            conn.execute("DELETE FROM writes WHERE thread_id = ?", (conversation_id,))
+            conn.execute("DELETE FROM checkpoints WHERE thread_id = ?", (conversation_id,))
+            conn.commit()
+            # 同时清除 Redis
+            self.memory.store.clear_conversation(conversation_id)
+            return True
+        except Exception:
+            return False
+
+    def clear_profile(self, customer_id: str | None = None) -> int:
+        """清除 checkpoint 中的用户画像。返回清除数量。"""
+        try:
+            conn = self.checkpointer.conn
+            from finance_agent.core.memory import _profile_thread_id
+            if customer_id:
+                thread_id = _profile_thread_id(customer_id)
+                conn.execute("DELETE FROM writes WHERE thread_id = ?", (thread_id,))
+                count = conn.execute(
+                    "DELETE FROM checkpoints WHERE thread_id = ?", (thread_id,)
+                ).rowcount
+            else:
+                conn.execute(
+                    "DELETE FROM writes WHERE thread_id LIKE 'profile:%'"
+                )
+                count = conn.execute(
+                    "DELETE FROM checkpoints WHERE thread_id LIKE 'profile:%'"
+                ).rowcount
+            conn.commit()
+            return count
+        except Exception:
+            return 0
 
     async def handle_message_stream(
         self,
@@ -921,7 +1499,10 @@ class AdvisorSystem:
     ):
         """流式处理消息，逐事件返回。"""
         # 发送阶段事件
-        yield {"type": "stage", "stage": "supervisor", "message": "正在选择需要执行的子 Agent..."}
+        if find_sensitive_word(message) is not None:
+            yield {"type": "stage", "stage": "content_filter", "message": "正在检查输入内容..."}
+        else:
+            yield {"type": "stage", "stage": "supervisor", "message": "正在选择需要执行的子 Agent..."}
         # 完整分析包含同步模型/数据源调用，放入工作线程，避免阻塞 FastAPI 事件循环。
         loop = asyncio.get_running_loop()
         progress_queue: asyncio.Queue[dict[str, str]] = asyncio.Queue()
@@ -952,16 +1533,17 @@ class AdvisorSystem:
         yield {"type": "response", "content": result["response"], "data": result}
 
     def reset_session(self, customer_id: str = "") -> None:
-        self.shared_memory.reset()
-        self.compressor.reset_cache()
-        if customer_id:
-            self._session_counter[customer_id] = self._session_counter.get(customer_id, 0) + 1
+        with self._workflow_lock:
+            self.shared_memory.reset()
+            if customer_id:
+                self._session_counter[customer_id] = self._session_counter.get(customer_id, 0) + 1
 
     def get_shared_memory_snapshot(self) -> Dict[str, Any]:
-        return self.shared_memory.snapshot()
+        with self._workflow_lock:
+            return self.shared_memory.snapshot()
 
     def get_user_profile(self, customer_id: str) -> Dict[str, Any]:
-        """获取用户画像。"""
+        """获取用户画像（从 checkpoint 读取）。"""
         from dataclasses import asdict
         profile = self.memory.get_profile(customer_id)
         return asdict(profile)

@@ -90,8 +90,8 @@ class DataFetchAgent(BaseFinanceAgent):
 
     agent_name: str = "data_fetch"
 
-    def __init__(self, shared_memory=None):
-        super().__init__(shared_memory=shared_memory)
+    def __init__(self, shared_memory=None, checkpointer=None):
+        super().__init__(shared_memory=shared_memory, checkpointer=checkpointer)
         self._qianfan: QianfanStockSearch | None = None
 
     @property
@@ -322,7 +322,6 @@ class DataFetchAgent(BaseFinanceAgent):
     def handle(
         self,
         message: str,
-        compressed_context: str = "",
         customer_id: str = "",
         chat_history: List[Dict[str, str]] | None = None,
         thread_id: str | None = None,

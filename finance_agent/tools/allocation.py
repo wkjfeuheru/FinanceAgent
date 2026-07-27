@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import numpy as np
 import pandas as pd
@@ -15,6 +16,59 @@ from scipy.optimize import minimize
 
 def _json(data) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2, default=str)
+
+
+def _parse_holding_period_months(holding_period: str) -> float | None:
+    """将天、周、月、年形式的投资期限统一换算为月数。"""
+    text = str(holding_period or "").strip()
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(天|周|个月|月|年)", text)
+    if not match:
+        return None
+
+    value = float(match.group(1))
+    if value <= 0:
+        return None
+
+    unit = match.group(2)
+    if unit == "天":
+        return value / 30
+    if unit == "周":
+        return value * 7 / 30
+    if unit in {"个月", "月"}:
+        return value
+    return value * 12
+
+
+def _select_optimization_target(
+    risk_level: str,
+    holding_period: str = "",
+) -> tuple[str, str, str]:
+    """根据风险等级与投资期限选择优化目标。"""
+    risk_num = 3
+    for level in ["R1", "R2", "R3", "R4", "R5"]:
+        if level.lower() in (risk_level or "").lower():
+            risk_num = int(level[1])
+            break
+
+    months = _parse_holding_period_months(holding_period)
+    if months is None:
+        target = "min_variance" if risk_num <= 2 else "max_sharpe"
+        target_label = "最小方差" if target == "min_variance" else "最大夏普比率"
+        return target, "未分类", f"投资期限未提供或无法识别，按风险等级R{risk_num}采用{target_label}目标"
+
+    if months <= 3:
+        category = "短期"
+        target = "min_variance"
+    elif months <= 12:
+        category = "中期"
+        target = "min_variance" if risk_num <= 3 else "max_sharpe"
+    else:
+        category = "长期"
+        target = "min_variance" if risk_num <= 2 else "max_sharpe"
+
+    target_label = "最小方差" if target == "min_variance" else "最大夏普比率"
+    reason = f"{category}且风险等级为R{risk_num}，采用{target_label}目标"
+    return target, category, reason
 
 
 def _extract_close_prices(history_json: str, stock_code: str) -> pd.Series:
@@ -120,18 +174,18 @@ def optimize_portfolio(
     history_data: str,
     risk_level: str,
     budget: float = 0.0,
+    holding_period: str = "",
 ) -> str:
     """基于MPT均值-方差优化计算最优资产配置权重。
 
-    根据用户风险偏好选择最优组合：
-    - 低风险(R1/R2)：最小方差组合
-    - 高风险(R3-R5)：最大夏普比率组合
+    根据用户风险偏好和投资期限选择最优组合。
 
     Args:
         stock_codes: 股票代码列表，逗号分隔
         history_data: JSON数组，各股票历史数据
         risk_level: 用户风险偏好 R1-R5
         budget: 投资预算（元），用于计算各标的配置金额
+        holding_period: 投资期限，如“3个月”“1年”
 
     Returns:
         JSON 字符串，包含各股票权重、预期收益、波动率、夏普比率
@@ -210,18 +264,14 @@ def optimize_portfolio(
     bounds = tuple((0, 0.6) for _ in range(n))
     x0 = np.array([1.0 / n] * n)
 
-    # 根据风险等级选择优化目标
-    risk_num = 3
-    for level in ["R1", "R2", "R3", "R4", "R5"]:
-        if level.lower() in (risk_level or "").lower():
-            risk_num = int(level[1])
-            break
+    # 根据风险等级和投资期限选择优化目标
+    optimization_target, horizon_category, optimization_reason = (
+        _select_optimization_target(risk_level, holding_period)
+    )
 
-    if risk_num <= 2:
-        # 低风险：最小方差
+    if optimization_target == "min_variance":
         result = minimize(portfolio_variance, x0, method="SLSQP", bounds=bounds, constraints=constraints)
     else:
-        # 高风险：最大夏普
         result = minimize(negative_sharpe, x0, method="SLSQP", bounds=bounds, constraints=constraints)
 
     if not result.success:
@@ -246,7 +296,10 @@ def optimize_portfolio(
         "expected_volatility": round(exp_volatility, 4),
         "sharpe_ratio": round(sharpe, 4),
         "risk_free_rate": risk_free_rate,
-        "optimization_target": "min_variance" if risk_num <= 2 else "max_sharpe",
+        "optimization_target": optimization_target,
+        "holding_period": str(holding_period or "").strip(),
+        "horizon_category": horizon_category,
+        "optimization_reason": optimization_reason,
     }
     if allocation_amounts:
         output["budget"] = float(budget)

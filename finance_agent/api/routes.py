@@ -1,8 +1,8 @@
 """API 路由定义。"""
-
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Header, Request
@@ -192,7 +192,7 @@ def _resolve_customer_id(http_request: Request, request: ChatRequest, x_customer
 
 @router.get("/api/profile/{customer_id}", response_model=ProfileResponse)
 async def get_profile(customer_id: str) -> ProfileResponse:
-    """获取用户画像。"""
+    """获取用户画像（从 checkpoint 读取）。"""
     try:
         system = get_system()
         profile = system.get_user_profile(customer_id)
@@ -220,20 +220,28 @@ async def get_history(customer_id: str, limit: int = 50) -> HistoryResponse:
         raise HTTPException(status_code=500, detail=f"获取历史失败：{exc}")
 
 
+# ── 对话管理（基于 checkpoint）───────────────────────────────────
+
 @router.post("/api/conversations/{customer_id}")
 async def create_conversation(customer_id: str) -> dict[str, Any]:
-    """创建一个独立的新对话。"""
-    return get_system().memory.database.create_conversation(customer_id)
+    """创建一个新对话（仅生成 conversation_id，数据在首次消息时写入 checkpoint）。"""
+    conversation_id = uuid.uuid4().hex
+    return {
+        "conversation_id": conversation_id,
+        "customer_id": customer_id.upper(),
+        "title": "新对话",
+        "created_at": "",
+        "updated_at": "",
+    }
 
 
 @router.get("/api/conversations/{customer_id}")
 async def list_conversations(customer_id: str) -> dict[str, Any]:
-    """获取用户的历史会话列表。"""
+    """获取用户的历史对话列表（从 checkpoint 查询）。"""
     system = get_system()
-    database = system.memory.database
-    items = database.list_conversations(customer_id)
-    # One-time migration of the pre-conversation Redis sliding window
-    # (by customer_id, not conversation_id).
+    items = system.list_checkpoint_conversations(customer_id)
+    # One-time migration of the pre-conversation Redis sliding window:
+    # if no checkpoint conversations exist, migrate legacy Redis data.
     if not items:
         legacy_messages = system.memory.store.get_messages(customer_id)
         if legacy_messages:
@@ -241,17 +249,13 @@ async def list_conversations(customer_id: str) -> dict[str, Any]:
                 (str(item.get("content", "")) for item in legacy_messages if item.get("role") == "user"),
                 "历史对话",
             )
-            conversation = database.create_conversation(customer_id, first_user[:28])
-            for item in legacy_messages:
-                content = str(item.get("content", "")).strip()
-                if content:
-                    database.append_conversation_message(
-                        conversation["conversation_id"],
-                        "user" if item.get("role") == "user" else "assistant",
-                        content,
-                        item.get("metadata") if isinstance(item.get("metadata"), dict) else {},
-                    )
-            items = database.list_conversations(customer_id)
+            conversation_id = uuid.uuid4().hex
+            # 旧数据不做完整迁移，引导用户开启新对话
+            items = [{
+                "conversation_id": conversation_id,
+                "title": first_user[:28] or "历史对话",
+                "updated_at": "",
+            }]
     return {"customer_id": customer_id.upper(), "conversations": items}
 
 
@@ -259,20 +263,23 @@ async def list_conversations(customer_id: str) -> dict[str, Any]:
 async def get_conversation_messages(
     customer_id: str, conversation_id: str, limit: int = 100,
 ) -> dict[str, Any]:
-    """读取指定会话，校验会话属于当前客户。"""
-    database = get_system().memory.database
-    if not database.get_conversation(conversation_id, customer_id):
+    """读取指定对话的消息（从 checkpoint 重建）。"""
+    system = get_system()
+    # 确认对话属于该 customer
+    items = system.list_checkpoint_conversations(customer_id)
+    found = any(c["conversation_id"] == conversation_id for c in items)
+    if not found:
         raise HTTPException(status_code=404, detail="对话不存在")
     return {
         "conversation_id": conversation_id,
-        "messages": database.get_conversation_messages(conversation_id, limit),
+        "messages": system.get_checkpoint_conversation_messages(conversation_id, limit),
     }
 
 
 @router.delete("/api/conversations/{customer_id}/{conversation_id}")
 async def delete_conversation(customer_id: str, conversation_id: str) -> dict[str, Any]:
-    """删除指定历史对话及其全部消息。"""
-    deleted = get_system().memory.database.delete_conversation(conversation_id, customer_id)
+    """删除指定历史对话及其全部 checkpoint 数据。"""
+    deleted = get_system().delete_checkpoint_conversation(conversation_id, customer_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="对话不存在")
     return {"status": "ok", "conversation_id": conversation_id}
@@ -298,7 +305,7 @@ async def clear_records(
 ) -> ClearRecordsResponse:
     """清除对话记录。
 
-    用途：清除 Redis 中残留的旧对话/画像/摘要记录。
+    用途：清除 Redis 中残留的旧对话/画像/摘要记录 + checkpoint 画像。
 
     参数：
     - customer_id: 指定客户则只清该客户；不传则清除所有 finance_cs:* 对话数据
@@ -319,7 +326,7 @@ async def clear_records(
             ]
             for key in keys_to_delete:
                 cleared += client.delete(key)
-            cleared += system.memory.database.delete_profiles(customer_id)
+            cleared += system.clear_profile(customer_id)
         else:
             # 扫描所有 finance_cs:* 键，按需保留用户数据
             for key in client.scan_iter(match="finance_cs:*", count=200):
@@ -335,7 +342,7 @@ async def clear_records(
             # 同时重置共享内存和压缩器缓存
             system.shared_memory.reset()
             system.compressor.reset_cache()
-            cleared += system.memory.database.delete_profiles()
+            cleared += system.clear_profile()
 
         msg = (
             f"已清除客户 {customer_id} 的记录（{cleared} 个键）"
@@ -349,7 +356,7 @@ async def clear_records(
 
 @router.delete("/api/account")
 async def delete_account(request: Request) -> dict[str, Any]:
-    """注销当前登录账号：删除用户记录与该客户所有对话数据。"""
+    """注销当前登录账号：删除用户记录与该客户所有对话/画像数据。"""
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="未登录")
@@ -363,15 +370,34 @@ async def delete_account(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="用户不存在")
 
     try:
-        client = get_system().memory.store._get_client()
+        system = get_system()
+        client = system.memory.store._get_client()
         cleared = 0
-        # 清除该用户对话数据
+        # 清除该用户 Redis 对话数据
         for suffix in ("messages", "recent_summary", "window"):
             cleared += client.delete(f"finance_cs:{customer_id.upper()}:{suffix}")
-        # 清除用户索引与用户记录
+        # 清除 checkpoint 画像
+        cleared += system.clear_profile(customer_id)
+        # 清除 checkpoint 中该用户的所有对话
+        conn = system.checkpointer.conn
+        thread_rows = conn.execute(
+            """SELECT thread_id FROM checkpoints
+               WHERE json_extract(metadata, '$.customer_id') = ?
+               UNION SELECT thread_id FROM writes
+               WHERE thread_id IN (
+                 SELECT thread_id FROM checkpoints
+                 WHERE json_extract(metadata, '$.customer_id') = ?
+               )""",
+            (customer_id.upper(), customer_id.upper()),
+        ).fetchall()
+        for row in thread_rows:
+            conn.execute("DELETE FROM writes WHERE thread_id = ?", (row[0],))
+            conn.execute("DELETE FROM checkpoints WHERE thread_id = ?", (row[0],))
+        conn.commit()
+        cleared += len(thread_rows)
+        # 删除用户认证记录
         if get_user_store().delete_user(customer_id):
             cleared += 1
-        # 撤销令牌
         return {"status": "ok", "message": f"账号已注销（{cleared} 个键已删除）"}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"注销失败：{exc}")

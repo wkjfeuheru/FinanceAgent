@@ -85,8 +85,8 @@ class FundamentalAnalysisAgent(BaseFinanceAgent):
 
     agent_name: str = "fundamental"
 
-    def __init__(self, shared_memory=None):
-        super().__init__(shared_memory=shared_memory)
+    def __init__(self, shared_memory=None, checkpointer=None):
+        super().__init__(shared_memory=shared_memory, checkpointer=checkpointer)
         self._analysis_chain = None
 
     def _get_tools(self) -> list:
@@ -190,7 +190,6 @@ class FundamentalAnalysisAgent(BaseFinanceAgent):
     def handle(
         self,
         message: str,
-        compressed_context: str = "",
         customer_id: str = "",
         chat_history: List[Dict[str, str]] | None = None,
         thread_id: str | None = None,

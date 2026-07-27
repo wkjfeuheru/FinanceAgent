@@ -158,12 +158,43 @@ QIANFAN_API_KEY=
 QIANFAN_SEARCH_MODEL=deepseek-v4-flash
 QIANFAN_SEARCH_TIMEOUT=60
 
+# 多意图识别与理财闲聊使用的模型
+INTENT_MODEL=deepseek:deepseek-v4-flash
+INTENT_CLASSIFIER_MODE=shadow
+INTENT_ZERO_SHOT_MODEL=MoritzLaurer/mDeBERTa-v3-base-mnli-xnli
+INTENT_MODEL_CACHE_DIR=.cache/huggingface
+INTENT_MAX_LENGTH=256
+INTENT_SCORE_THRESHOLD=0.5
+INTENT_DEVICE=-1
+INTENT_MODEL_TIMEOUT=10
+INTENT_MODEL_MAX_RETRIES=1
+
 # BaoStock 本地缓存
 STOCK_CACHE_DIR=.cache/finance_agent
 STOCK_CACHE_TTL=3600
 ```
 
 请勿提交包含真实密钥的 `.env` 文件。
+
+### 多语言零样本意图分类器
+
+意图分类默认使用 `MoritzLaurer/mDeBERTa-v3-base-mnli-xnli`。开发环境首次调用时
+可由 Transformers 下载一次并缓存；生产镜像必须在构建或发布阶段预下载模型，
+避免请求路径依赖外网。以下示例使用与运行时相同的缓存目录：
+
+```python
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+model = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"
+cache_dir = ".cache/huggingface"
+AutoTokenizer.from_pretrained(model, cache_dir=cache_dir)
+AutoModelForSequenceClassification.from_pretrained(model, cache_dir=cache_dir)
+```
+
+`shadow` 模式保留分类 LLM 的结果作为主结果，并在后台记录零样本分类结果和延迟，
+用于上线前对照。切换到 `zero_shot` 后，意图分类不再调用分类 LLM；模型加载或推理
+异常会直接降级到确定性规则。生成式理财闲聊、槽位工具决策仍使用独立的聊天模型，
+因此 API 请求与响应格式无需改变。设置为 `llm` 可显式只使用分类 LLM。
 
 ### 4. 启动 Redis
 
@@ -269,6 +300,3 @@ npm run build
 - SQLite 默认数据库位于 `finance_agent/finance_agent.db`，可通过 `SQLITE_PATH` 修改。
 - Redis 保存用户画像、滑动对话窗口和摘要等运行时记忆。
 - BaoStock 提供的是最近交易日数据，并非交易所盘中实时行情。
-
-
-

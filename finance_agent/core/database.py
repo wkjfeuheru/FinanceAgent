@@ -1,12 +1,18 @@
-"""SQLite persistence for accounts, sessions and long-lived user profiles."""
+"""此文件已弃用。
 
+长期记忆（对话、用户画像）已迁移至 LangGraph checkpoint（SqliteSaver）。
+用户认证（users + sessions）已迁移至 finance_agent/tools/auth.py 的内置 AuthDB。
+
+保留此文件仅为向后兼容——旧版 finance_agent.db 迁移场景可能仍需 SQLiteStore。
+如无迁移需求，可安全删除此文件。
+"""
 from __future__ import annotations
 
 import json
 import sqlite3
 import uuid
-from datetime import datetime
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -14,6 +20,11 @@ from finance_agent.config import SQLITE_PATH
 
 
 class SQLiteStore:
+    """Deprecated: 长期记忆已迁移至 LangGraph checkpoint。
+
+    仅保留以支持从旧版 finance_agent.db 迁移数据的场景。
+    """
+
     def __init__(self, path: str = SQLITE_PATH):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -123,7 +134,10 @@ class SQLiteStore:
     def delete_profiles(self, customer_id: str | None = None) -> int:
         with self.connect() as db:
             if customer_id:
-                cursor = db.execute("DELETE FROM user_profiles WHERE customer_id = ?", (customer_id.upper(),))
+                cursor = db.execute(
+                    "DELETE FROM user_profiles WHERE customer_id = ?",
+                    (customer_id.upper(),),
+                )
             else:
                 cursor = db.execute("DELETE FROM user_profiles")
             return cursor.rowcount
@@ -195,7 +209,6 @@ class SQLiteStore:
             )
 
     def delete_conversation(self, conversation_id: str, customer_id: str) -> bool:
-        """Delete one owned conversation; messages cascade through the foreign key."""
         with self.connect() as db:
             cursor = db.execute(
                 "DELETE FROM conversations WHERE conversation_id = ? AND customer_id = ?",

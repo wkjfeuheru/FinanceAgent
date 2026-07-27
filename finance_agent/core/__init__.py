@@ -10,7 +10,7 @@ def __getattr__(name: str):
         from finance_agent.core.orchestrator import AdvisorSystem
 
         return AdvisorSystem
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    raise AttributeError(f"module {name!r} has no attribute {name!r}")
 
 __all__ = [
     "AdvisorSystem",

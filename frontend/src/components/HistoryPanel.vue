@@ -145,7 +145,7 @@ async function openHistory() {
         >
           <span class="conversation-main">
             <strong>{{ item.title }}</strong>
-            <small>{{ item.message_count }} 条消息 · {{ formatDate(item.updated_at) }}</small>
+            <small>{{ item.message_count }} 条消息</small>
           </span>
           <span class="conversation-actions">
             <span class="view-link">查看</span>

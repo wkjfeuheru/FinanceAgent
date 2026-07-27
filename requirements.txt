@@ -1,5 +1,6 @@
 langchain
 langgraph
+langgraph-checkpoint-sqlite
 langchain-community
 langchain-deepseek
 python-dotenv
@@ -12,3 +13,5 @@ numpy
 scipy
 pydantic
 requests
+transformers>=4.44
+torch>=2.2

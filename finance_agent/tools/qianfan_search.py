@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import date
 from typing import Any
 
 import requests
@@ -204,6 +205,34 @@ class QianfanStockSearch:
         if not valid:
             raise QianfanSearchError("搜索资料中没有通过校验的 A 股候选")
         return valid
+
+    def search_market_overview(self, user_query: str) -> str:
+        """根据网页搜索资料直接回答板块、行业、概念等市场概览问题。"""
+        if not self.api_key:
+            raise QianfanSearchError("未配置 QIANFAN_API_KEY")
+        references = self._web_search(user_query, max_results=8)
+        prompt = f"""你是证券市场资料整理助手。当前日期是 {date.today().isoformat()}。
+
+用户问题：{user_query}
+
+网页搜索资料：
+{json.dumps(references, ensure_ascii=False)}
+
+请直接回答用户的问题。要求：
+1. 严格依据资料，不得把个股涨幅冒充板块涨幅，不得编造排名或数值。
+2. 正确解释“昨天”等相对日期；A股非交易日时，明确说明采用的最近交易日。
+3. 若资料不足以确认完整排名，明确说明数据不足，并列出资料能确认的内容。
+4. 使用简洁中文 Markdown；关键结论后标注来源链接，URL 只能取自搜索资料。
+5. 结尾添加“公开市场资料可能存在口径差异，请以交易所或行情终端为准。”
+"""
+        try:
+            message = get_model_for_agent("data_fetch").invoke(prompt)
+            answer = str(getattr(message, "content", message)).strip()
+        except Exception as exc:
+            raise QianfanSearchError(f"市场搜索结果整理失败: {exc}") from exc
+        if not answer:
+            raise QianfanSearchError("市场搜索未生成有效回答")
+        return answer
 
     def search_financial_fallback(
         self, stock_code: str, missing_fields: list[str] | None = None,

@@ -14,10 +14,11 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Literal
 
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.tools import BaseTool, tool
 
 from finance_agent.agents.base import BaseFinanceAgent
 from finance_agent.config import get_model_for_agent, safe_parse_json
@@ -39,9 +40,11 @@ _PROFILE_EXTRACTION_PROMPT = """你是金融投顾系统的关键信息槽位提
 - 用户可能直接输入6位数字代码，如"600519"、"000001"
 - 用户也可能输入中文股票名称，如"贵州茅台"、"浦发银行"
 - 你必须将中文股票名称映射为对应的A股6位数字代码
-- 常见示例：贵州茅台→600519，浦发银行→600000，招商银行→600036，中国平安→601318
 - 如果不确定某名称对应的代码，不要编造，留空数组
-- stock_codes 只能包含“当前用户输入”明确提到的股票，不要从已有画像复制旧股票
+- 结合“当前对话历史”理解“这只、这两只、它们、上述公司”等省略表达
+- stock_codes 只包含当前问题实际指向的股票；不得仅因股票存在于长期画像就复制
+- explicit_stock_codes 只包含当前用户输入中明确写出代码或股票名称的股票；
+  仅通过对话历史补全的股票不能放入 explicit_stock_codes
 
 ## 输出格式
 返回JSON：
@@ -49,6 +52,7 @@ _PROFILE_EXTRACTION_PROMPT = """你是金融投顾系统的关键信息槽位提
   "risk_preference": "R2 中低风险",
   "budget_amount": 100000,
   "stock_codes": ["600519", "600000"],
+  "explicit_stock_codes": ["600519", "600000"],
   "holding_period": "3个月",
   "investment_goal": "稳健增值"
 }}
@@ -57,13 +61,38 @@ _PROFILE_EXTRACTION_PROMPT = """你是金融投顾系统的关键信息槽位提
 """
 
 
+def extract_investment_goal(message: str) -> str:
+    """确定性提取用户明确表达的投资目标，供所有快速路径复用。"""
+    text = (message or "").strip()
+    if not text:
+        return ""
+
+    # 优先读取“投资目标是/为……”等显式表达，并在标点或后续任务词前结束。
+    explicit = re.search(
+        r"投资目标\s*(?:是|为|：|:)\s*"
+        r"([^，。；;！？!?]{2,20}?)"
+        r"(?=(?:，|。|；|;|！|!|？|\?|如果|并且|然后|推荐|分析|配置|$))",
+        text,
+    )
+    if explicit:
+        return explicit.group(1).strip()
+
+    # 没有标签时，仅匹配常见且语义明确的目标短语，避免把整句误存为画像。
+    known_goals = (
+        "长期稳健增值", "稳健增值", "长期增值", "财富增值", "资产增值",
+        "资本增值", "保值增值", "养老储备", "教育储备", "现金流",
+        "高收益", "长期收益", "短期收益",
+    )
+    return next((goal for goal in known_goals if goal in text), "")
+
+
 class SlotExtractionAgent(BaseFinanceAgent):
     """统一提取用户画像和股票等关键槽位。"""
 
     agent_name: str = "slot_extraction"
 
-    def __init__(self, shared_memory=None):
-        super().__init__(shared_memory=shared_memory)
+    def __init__(self, shared_memory=None, checkpointer=None):
+        super().__init__(shared_memory=shared_memory, checkpointer=checkpointer)
         self._extract_chain = None
 
     def _get_tools(self) -> list:
@@ -78,7 +107,13 @@ class SlotExtractionAgent(BaseFinanceAgent):
         if self._extract_chain is None:
             prompt = ChatPromptTemplate.from_messages([
                 ("system", _PROFILE_EXTRACTION_PROMPT),
-                ("human", "用户输入：{message}\n\n已有画像信息：{existing}\n\n请抽取/更新用户画像："),
+                (
+                    "human",
+                    "当前对话历史：\n{history}\n\n"
+                    "当前用户输入：{message}\n\n"
+                    "已有长期画像：{existing}\n\n"
+                    "请抽取本轮画像和股票引用：",
+                ),
             ])
             self._extract_chain = prompt | get_model_for_agent("slot_extraction") | StrOutputParser()
         return self._extract_chain
@@ -87,12 +122,13 @@ class SlotExtractionAgent(BaseFinanceAgent):
         self,
         message: str,
         existing_profile: Dict[str, Any] | None = None,
+        conversation_context: str = "",
     ) -> Dict[str, Any]:
         """从用户输入抽取结构化画像。
 
         Args:
             message: 用户输入
-            existing_profile: 已有画像（用于增量更新）
+            existing_profile: 已有画像用于增量更新
 
         Returns:
             结构化画像字典
@@ -106,11 +142,16 @@ class SlotExtractionAgent(BaseFinanceAgent):
             "investment_goal": "",
         }
 
-        # 合并已有画像
+        # 合并长期画像，但股票是本轮局部状态，不能从跨对话画像继承。
         if existing_profile:
             for key in profile:
-                if key in existing_profile and existing_profile[key]:
+                if key != "stock_codes" and key in existing_profile and existing_profile[key]:
                     profile[key] = existing_profile[key]
+
+        # 当前消息中的目标优先于长期画像，且必须在所有快速返回之前提取。
+        current_goal = extract_investment_goal(message)
+        if current_goal:
+            profile["investment_goal"] = current_goal
 
         msg_lower = message.lower()
 
@@ -164,9 +205,10 @@ class SlotExtractionAgent(BaseFinanceAgent):
             result = self.extract_chain.invoke({
                 "message": message,
                 "existing": str(existing_profile or {}),
+                "history": conversation_context or "无历史对话",
             })
             llm_profile = safe_parse_json(result, {})
-            # LLM结果优先级高于正则（仅当LLM识别到时）
+            # LLM结果优先级高于正则
             if llm_profile.get("investment_goal"):
                 profile["investment_goal"] = llm_profile["investment_goal"]
             if llm_profile.get("risk_preference") and not profile["risk_preference"]:
@@ -179,7 +221,7 @@ class SlotExtractionAgent(BaseFinanceAgent):
             if llm_profile.get("holding_period") and not profile["holding_period"]:
                 profile["holding_period"] = llm_profile["holding_period"]
 
-            # 只使用当前消息识别结果，避免旧画像股票污染本轮分析。
+            # 股票可由当前消息或当前对话中的明确引用解析，但不能来自长期画像。
             llm_codes = llm_profile.get("stock_codes", [])
             if llm_codes:
                 current_codes = list(stock_codes)
@@ -187,6 +229,12 @@ class SlotExtractionAgent(BaseFinanceAgent):
                     if isinstance(code, str) and re.fullmatch(r"\d{6}", code) and code not in current_codes:
                         current_codes.append(code)
                 profile["stock_codes"] = current_codes
+
+            explicit_llm_codes = llm_profile.get("explicit_stock_codes", [])
+            profile["_explicit_stock_codes"] = [
+                code for code in explicit_llm_codes
+                if isinstance(code, str) and re.fullmatch(r"\d{6}", code)
+            ][:5]
 
         except Exception:
             pass
@@ -208,11 +256,18 @@ class SlotExtractionAgent(BaseFinanceAgent):
         return stocks[:5]
 
     def extract_slots(
-        self, message: str, existing_profile: Dict[str, Any] | None = None,
+        self,
+        message: str,
+        existing_profile: Dict[str, Any] | None = None,
+        conversation_context: str = "",
     ) -> Dict[str, Any]:
         """一次返回画像槽位与结构化股票身份。"""
-        profile = self.extract_profile(message, existing_profile)
+        profile = self.extract_profile(message, existing_profile, conversation_context)
         stocks = self.extract_explicit_stocks(message)
+        explicit_codes = list(dict.fromkeys(
+            [stock["code"] for stock in stocks]
+            + list(profile.pop("_explicit_stock_codes", []))
+        ))[:5]
         stock_by_code = {stock["code"]: stock for stock in stocks}
         resolved = [
             stock_by_code.get(code, {"code": code, "name": "", "industry": ""})
@@ -222,12 +277,15 @@ class SlotExtractionAgent(BaseFinanceAgent):
             if stock["code"] not in {item["code"] for item in resolved}:
                 resolved.append(stock)
         profile["stock_codes"] = [item["code"] for item in resolved[:5]]
-        return {"user_profile": profile, "resolved_stocks": resolved[:5]}
+        return {
+            "user_profile": profile,
+            "resolved_stocks": resolved[:5],
+            "explicit_stock_codes": explicit_codes,
+        }
 
     def handle(
         self,
         message: str,
-        compressed_context: str = "",
         customer_id: str = "",
         chat_history: List[Dict[str, str]] | None = None,
         thread_id: str | None = None,
@@ -262,6 +320,33 @@ class SlotExtractionAgent(BaseFinanceAgent):
             parts.append("  暂未识别到明确的投资参数")
 
         return "\n".join(parts)
+
+
+def create_extract_finance_slots_tool(
+    agent: SlotExtractionAgent,
+    existing_profile: Dict[str, Any] | None = None,
+    conversation_context: str = "",
+) -> BaseTool:
+    """创建绑定当前工作流状态的原生槽位提取工具。"""
+
+    @tool("extract_finance_slots")
+    def extract_finance_slots(
+        intent: Literal["market_query", "stock_recommendation", "asset_allocation"],
+        query: str,
+    ) -> Dict[str, Any]:
+        """从需要结构化参数的金融子请求中提取画像与股票身份。
+
+        仅在具体个股行情/基本面、明确股票比较或资产配置时调用。
+        板块行情、主题候选搜索、泛化选股和理财闲聊不得调用。
+        """
+        result = agent.extract_slots(
+            query,
+            existing_profile=existing_profile or {},
+            conversation_context=conversation_context,
+        )
+        return {"intent": intent, **result}
+
+    return extract_finance_slots
 
 
 # 兼容已有外部导入。

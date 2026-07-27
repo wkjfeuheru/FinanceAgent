@@ -10,12 +10,14 @@ from __future__ import annotations
 
 from typing import Any, AsyncIterator, Dict, List
 
-from langgraph.prebuilt import create_react_agent
+from langchain.agents import create_agent
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
 
 from finance_agent.config import get_model_for_agent
 from finance_agent.core.shared_state import SharedWorkingMemory
+from finance_agent.middleware import content_filter, model_retry
 
 
 class BaseFinanceAgent:
@@ -34,25 +36,29 @@ class BaseFinanceAgent:
     def __init__(
         self,
         shared_memory: SharedWorkingMemory | None = None,
+        checkpointer: BaseCheckpointSaver | None = None,
     ):
         self.shared_memory = shared_memory
-        self._memory_saver = MemorySaver()
+        # 优先使用外部传入的持久化 checkpointer（如 SqliteSaver），
+        # 未传入时回退到内存 MemorySaver（开发/测试兼容）。
+        self._memory_saver: BaseCheckpointSaver = checkpointer or MemorySaver()
         self._agent: CompiledStateGraph | None = None
 
     @property
-    def memory_saver(self) -> MemorySaver:
+    def memory_saver(self) -> BaseCheckpointSaver:
         return self._memory_saver
 
     @property
     def agent(self) -> CompiledStateGraph:
         """懒初始化 ReAct Agent。"""
         if self._agent is None:
-            self._agent = create_react_agent(
+            self._agent = create_agent(
                 model=get_model_for_agent(self.agent_name),
                 tools=self._get_tools(),
-                prompt=self._get_system_prompt(),
+                system_prompt=self._get_system_prompt(),
                 name=self.agent_name,
                 checkpointer=self._memory_saver,
+                middleware=[model_retry, content_filter],
             )
         return self._agent
 
@@ -64,10 +70,33 @@ class BaseFinanceAgent:
         """子类覆盖：返回系统提示词。"""
         return "你是一个金融客服系统的专业 Agent。"
 
+    def build_business_state(self, profile: Dict[str, Any]) -> Dict[str, Any]:
+        """构建业务执行所需的内部 JSON 状态；无要求的 Agent 默认可执行。"""
+        return {
+            "agent": self.agent_name,
+            "status": "ready",
+            "required_fields": {},
+            "missing_fields": [],
+        }
+
+    def build_missing_fields_response(self, business_state: Dict[str, Any]) -> str:
+        """根据业务状态一次性生成全部缺失字段的引导语。"""
+        required = business_state.get("required_fields", {}) or {}
+        missing = business_state.get("missing_fields", []) or []
+        prompts = [
+            str(required.get(field, {}).get("prompt", "")).strip()
+            for field in missing
+        ]
+        prompts = [prompt for prompt in prompts if prompt]
+        if not prompts:
+            return "继续执行前，请补充必要的业务信息。"
+        return "继续执行前，请补充以下信息：\n" + "\n".join(
+            f"- {prompt}" for prompt in prompts
+        )
+
     def _build_effective_message(
         self,
         message: str,
-        compressed_context: str = "",
         customer_id: str = "",
         memory_context: str = "",
     ) -> str:
@@ -78,12 +107,12 @@ class BaseFinanceAgent:
         """
         parts = []
 
-        # 1. 注入共享工作内存中的已确认事实（如持仓、余额等）
+        # 1. 注入共享工作内存中的事实（如持仓、余额等）
         if self.shared_memory and self.shared_memory.facts:
             facts_text = self.shared_memory.format_facts_for_prompt()
             if facts_text:
-                parts.append(f"""[共享上下文 - 其他 Agent 已确认的信息]
-以下是当前已验证的客户账户信息，请直接引用这些数据回答用户问题：
+                parts.append(f"""[共享上下文]
+以下是当前任务的内部分析材料，请直接回答用户问题，不要向用户说明材料来源：
 
 {facts_text}""")
 
@@ -95,11 +124,7 @@ class BaseFinanceAgent:
         if memory_context:
             parts.append(memory_context)
 
-        # 4. 压缩上下文
-        if compressed_context and compressed_context != "无历史对话。":
-            parts.append(f"对话上下文：\n{compressed_context}")
-
-        # 5. 当前用户输入
+        # 4. 当前用户输入
         parts.append(f"用户问题：{message}")
 
         return "\n\n".join(parts)
@@ -107,7 +132,6 @@ class BaseFinanceAgent:
     def handle(
         self,
         message: str,
-        compressed_context: str = "",
         customer_id: str = "",
         chat_history: List[Dict[str, str]] | None = None,
         thread_id: str | None = None,
@@ -117,7 +141,6 @@ class BaseFinanceAgent:
 
         Args:
             message: 当前用户输入
-            compressed_context: 压缩后的历史上下文
             customer_id: 已验证的客户号
             chat_history: 原始对话历史（可选，用于构建消息列表）
             thread_id: MemorySaver 的 thread_id，用于跨轮对话持久化
@@ -126,7 +149,7 @@ class BaseFinanceAgent:
             Agent 生成的回复文本
         """
         effective = self._build_effective_message(
-            message, compressed_context, customer_id, memory_context,
+            message, customer_id, memory_context,
         )
 
         # 构建消息列表
@@ -159,7 +182,6 @@ class BaseFinanceAgent:
     async def handle_stream(
         self,
         message: str,
-        compressed_context: str = "",
         customer_id: str = "",
         chat_history: List[Dict[str, str]] | None = None,
         thread_id: str | None = None,
@@ -170,7 +192,7 @@ class BaseFinanceAgent:
         支持流式输出，前端可以逐字展示。
         """
         effective = self._build_effective_message(
-            message, compressed_context, customer_id, memory_context,
+            message, customer_id, memory_context,
         )
 
         messages = []

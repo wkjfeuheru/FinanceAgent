@@ -24,6 +24,7 @@ classifiers = [
 dependencies = [
     "langchain",
     "langgraph",
+    "langgraph-checkpoint-sqlite",
     "langchain-community",
     "langchain-deepseek",
     "python-dotenv",
@@ -36,6 +37,8 @@ dependencies = [
     "scipy",
     "pydantic",
     "requests",
+    "transformers>=4.44",
+    "torch>=2.2",
 ]
 
 [project.optional-dependencies]
@@ -44,7 +47,6 @@ dev = [
     "pytest-asyncio",
     "httpx",
 ]
-
 [tool.setuptools.packages.find]
 include = ["finance_agent*"]
 

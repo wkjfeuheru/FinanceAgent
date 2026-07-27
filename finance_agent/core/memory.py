@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import json
 import re
-import sqlite3
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any
 import redis
-from finance_agent.config import REDIS_URL
-from finance_agent.core.database import SQLiteStore, get_database
+from finance_agent.config import REDIS_MEMORY_TTL_SECONDS, REDIS_URL
 
 
 @dataclass
@@ -32,6 +30,14 @@ class UserProfileCard:
         return cls(**filtered)
 
 
+# ── Profile checkpoint helper ───────────────────────────────────
+
+def _profile_thread_id(customer_id: str) -> str:
+    return f"profile:{customer_id.upper()}"
+
+
+# ── Redis 层 ─────────────────────────────────────────────────
+
 class RedisMemoryStore:
     """对话级别的 Redis 记忆存储。
 
@@ -43,8 +49,13 @@ class RedisMemoryStore:
     对话之间完全隔离。
     """
 
-    def __init__(self, redis_url: str = REDIS_URL):
+    def __init__(
+        self,
+        redis_url: str = REDIS_URL,
+        ttl_seconds: int = REDIS_MEMORY_TTL_SECONDS,
+    ):
         self.redis_url = redis_url
+        self.ttl_seconds = ttl_seconds
         self._client = None
         self._last_error = ""
 
@@ -78,9 +89,10 @@ class RedisMemoryStore:
             "timestamp": datetime.now().isoformat(timespec="seconds"),
         }
         try:
-            self._get_client().rpush(
-                self._key(customer_id), json.dumps(payload, ensure_ascii=False)
-            )
+            client = self._get_client()
+            key = self._key(customer_id)
+            client.rpush(key, json.dumps(payload, ensure_ascii=False))
+            client.expire(key, self.ttl_seconds)
             self._last_error = ""
             return True
         except redis.RedisError as exc:
@@ -129,6 +141,7 @@ class RedisMemoryStore:
             key = self._window_key(conversation_id)
             client.rpush(key, json.dumps(payload, ensure_ascii=False))
             client.ltrim(key, -abs(window_size), -1)
+            client.expire(key, self.ttl_seconds)
             self._last_error = ""
             return True
         except redis.RedisError as exc:
@@ -165,6 +178,8 @@ class RedisMemoryStore:
                     "timestamp": msg.get("timestamp", datetime.now().isoformat(timespec="seconds")),
                 }
                 client.rpush(key, json.dumps(payload, ensure_ascii=False))
+            if messages[-window_size:]:
+                client.expire(key, self.ttl_seconds)
             self._last_error = ""
             return True
         except redis.RedisError as exc:
@@ -184,7 +199,11 @@ class RedisMemoryStore:
 
     def set_summary(self, conversation_id: str, summary: str) -> bool:
         try:
-            self._get_client().set(self._summary_key(conversation_id), summary)
+            self._get_client().set(
+                self._summary_key(conversation_id),
+                summary,
+                ex=self.ttl_seconds,
+            )
             self._last_error = ""
             return True
         except redis.RedisError as exc:
@@ -209,7 +228,6 @@ class RedisMemoryStore:
         """Deprecated: 旧版 customer-scoped 消息列表键。"""
         return f"finance_cs:{customer_id.upper()}:messages"
 
-    # 用户级别的 profile 缓存（SQLite 是持久主存储，Redis 是加速缓存）
     def _profile_key(self, customer_id: str) -> str:
         return f"finance_cs:{customer_id.upper()}:profile"
 
@@ -235,11 +253,13 @@ class RedisMemoryStore:
             return False
 
 
+# ── 记忆上下文 ─────────────────────────────────────────────────
+
 class AgentMemoryContext:
     """按对话隔离的 Agent 记忆上下文。
 
     三层记忆：
-    1. 用户档案卡 —— SQLite 持久化，跨对话共享（风险偏好、预算等）
+    1. 用户档案卡 —— checkpoint 持久化，跨对话共享（风险偏好、预算等）
     2. 对话摘要 —— 当前对话的压缩历史（Redis，按 conversation_id）
     3. 滑动窗口 —— 当前对话的最近 N 条消息（Redis，按 conversation_id）
 
@@ -249,12 +269,13 @@ class AgentMemoryContext:
     def __init__(
         self,
         store: RedisMemoryStore | None = None,
+        checkpointer: Any = None,
         window_size: int = 5,
         summary_size: int = 10,
         max_context_chars: int = 6000,
     ):
         self.store = store or RedisMemoryStore()
-        self.database: SQLiteStore = get_database()
+        self.checkpointer = checkpointer
         self.window_size = window_size
         self.summary_size = summary_size
         self.max_context_chars = max_context_chars
@@ -267,16 +288,7 @@ class AgentMemoryContext:
         conversation_id: str,
         fallback_messages: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """加载当前对话的完整上下文。
-
-        Args:
-            customer_id: 用户 ID（用于加载长期画像）
-            conversation_id: 对话 ID（用于加载对话级记忆）
-            fallback_messages: 当 Redis 中无窗口消息时的回退
-
-        Returns:
-            包含 profile、summary、sliding_window、context_text 的字典
-        """
+        """加载当前对话的完整上下文。"""
         profile = self.get_profile(customer_id)
         profile_text = self.format_profile(profile)
         recent_summary = self.store.get_summary(conversation_id)
@@ -310,40 +322,84 @@ class AgentMemoryContext:
         self,
         conversation_id: str,
         messages: list[dict[str, Any]],
-        summary_text: str = "",
     ) -> bool:
-        """更新当前对话的近期摘要。"""
-        recent = messages[-self.summary_size:]
-        summary = summary_text.strip() or self.build_rule_summary(recent)
+        """确定性地滚动更新当前对话摘要，不额外调用大模型。
+
+        调用方只需传入本轮新增消息。已有摘要会与本轮摘要合并，并按
+        ``max_context_chars`` 的一半限制长度；滑动窗口仍独立保存最近 N 条
+        原始消息。这样下一轮可同时注入较早摘要和最近原文。
+        """
+        existing = self.store.get_summary(conversation_id).strip()
+        current = self.build_rule_summary(messages[-self.summary_size:]).strip()
+        if existing and current and not existing.endswith(current):
+            summary = f"{existing}\n{current}"
+        else:
+            summary = current or existing
+
+        summary_limit = max(1000, self.max_context_chars // 2)
+        summary = self._fit_text(summary, summary_limit)
         return self.store.set_summary(conversation_id, summary)
 
-    # ── 用户档案（跨对话共享的长期信息） ────────────────────────
+    # ── 用户档案（checkpoint 持久化，跨对话共享）────────────────
 
     def get_profile(self, customer_id: str) -> UserProfileCard:
-        data = self.database.get_profile(customer_id)
-        # One-time compatibility migration from Redis profile cache to SQLite.
-        if not data:
-            try:
-                raw = self.store._get_client().get(self.store._profile_key(customer_id))
-                if raw:
-                    data = json.loads(raw)
-                    data.setdefault("customer_id", customer_id.upper())
-                    self.database.save_profile(data)
-                    self.store._get_client().delete(self.store._profile_key(customer_id))
-            except (redis.RedisError, json.JSONDecodeError, sqlite3.Error, OSError, ValueError) as exc:
-                self.store._last_error = str(exc)
-        if not data:
+        """从 checkpoint 加载用户画像。"""
+        if self.checkpointer is None:
             return UserProfileCard(customer_id=customer_id.upper())
-        data.setdefault("customer_id", customer_id.upper())
-        return UserProfileCard.from_dict(data)
+
+        try:
+            config = {"configurable": {"thread_id": _profile_thread_id(customer_id)}}
+            ckpt = self.checkpointer.get(config)
+            if ckpt and ckpt.get("channel_values"):
+                data = ckpt["channel_values"].get("user_profile")
+                if data:
+                    data.setdefault("customer_id", customer_id.upper())
+                    return UserProfileCard.from_dict(data)
+        except Exception:
+            pass
+        return UserProfileCard(customer_id=customer_id.upper())
 
     def save_profile(self, profile: UserProfileCard) -> bool:
+        """将用户画像写入 checkpoint。"""
+        if self.checkpointer is None:
+            return False
         profile.updated_at = datetime.now().isoformat(timespec="seconds")
+        thread_id = _profile_thread_id(profile.customer_id)
+        profile_dict = asdict(profile)
+        now = profile.updated_at
+        ckpt_id = now  # use timestamp as stable checkpoint id
         try:
-            self.database.save_profile(asdict(profile))
+            self.checkpointer.put(
+                {
+                    "configurable": {
+                        "thread_id": thread_id,
+                        "checkpoint_ns": "",
+                    }
+                },
+                {
+                    "v": 1,
+                    "id": ckpt_id,
+                    "ts": now,
+                    "channel_values": {
+                        "user_profile": profile_dict,
+                        "updated_at": now,
+                    },
+                    "channel_versions": {
+                        "user_profile": ckpt_id,
+                        "updated_at": ckpt_id,
+                    },
+                    "versions_seen": {},
+                    "updated_channels": None,
+                },
+                {
+                    "source": "user_profile",
+                    "customer_id": profile.customer_id.upper(),
+                    "step": 0,
+                },
+                {"user_profile": ckpt_id, "updated_at": ckpt_id},
+            )
             return True
-        except (OSError, ValueError, sqlite3.Error) as exc:
-            self.store._last_error = str(exc)
+        except Exception:
             return False
 
     def update_profile_from_result(
@@ -404,6 +460,18 @@ class AgentMemoryContext:
                         break
                 except ValueError:
                     pass
+
+        # 使用槽位 Agent 的本轮抽取结果更新投资目标。该字段不能只依赖长期画像，
+        # 否则“我的投资目标是……”在快速选股流程中不会同步到右侧画像。
+        result_profile = result.get("user_profile", {}) or {}
+        investment_goal = (
+            str(result_profile.get("investment_goal", "") or "").strip()
+            if isinstance(result_profile, dict)
+            else ""
+        )
+        if investment_goal and profile.investment_goal != investment_goal:
+            profile.investment_goal = investment_goal
+            changed = True
 
         # 只持久化用户在当前消息中明确输入的股票代码
         stock_codes = re.findall(
