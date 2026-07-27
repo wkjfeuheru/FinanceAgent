@@ -1,26 +1,29 @@
-/* 全局样式：金融智能投顾系统 —— 蓝/白专业主题 */
+/* 全局样式：金融智能投顾系统 —— 技术极简金融主题 */
 
 :root {
-  --color-primary: #1e3a8a;
-  --color-primary-light: #3b5bdb;
-  --color-primary-soft: #dbeafe;
-  --color-accent: #fbbf24;
-  --color-bg: #f5f7fb;
+  --color-primary: #1a3c2b;
+  --color-primary-light: #24533b;
+  --color-primary-soft: #e8efe9;
+  --color-accent: #f4d35e;
+  --color-coral: #ff8c69;
+  --color-mint: #9effbf;
+  --color-bg: #f7f7f5;
   --color-surface: #ffffff;
-  --color-surface-alt: #f8fafc;
-  --color-border: #e2e8f0;
-  --color-text: #1e293b;
-  --color-text-secondary: #64748b;
-  --color-text-muted: #94a3b8;
-  --color-success: #10b981;
-  --color-danger: #ef4444;
-  --color-user-bubble: #1e3a8a;
-  --color-assistant-bubble: #f1f5f9;
-  --shadow-card: 0 1px 3px rgba(15, 23, 42, 0.06), 0 1px 2px rgba(15, 23, 42, 0.04);
-  --shadow-elevated: 0 10px 25px -5px rgba(15, 23, 42, 0.1), 0 8px 10px -6px rgba(15, 23, 42, 0.05);
-  --radius-sm: 8px;
-  --radius-md: 12px;
-  --radius-lg: 16px;
+  --color-surface-alt: #f1f2ee;
+  --color-border: rgba(58, 58, 56, 0.2);
+  --color-text: #202320;
+  --color-text-secondary: #62665f;
+  --color-text-muted: #8a8f87;
+  --color-success: #26734a;
+  --color-danger: #b74432;
+  --color-user-bubble: #1a3c2b;
+  --color-assistant-bubble: #ffffff;
+  --shadow-card: none;
+  --shadow-elevated: 0 14px 36px rgba(26, 60, 43, 0.1);
+  --radius-sm: 2px;
+  --radius-md: 4px;
+  --radius-lg: 6px;
+  --font-mono: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
 }
 
 * {
@@ -44,6 +47,15 @@ body {
   -moz-osx-font-smoothing: grayscale;
   font-size: 14px;
   line-height: 1.6;
+  background-image:
+    linear-gradient(var(--color-border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--color-border) 1px, transparent 1px);
+  background-size: 96px 96px;
+}
+
+button, input, textarea, a { outline-offset: 3px; }
+button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visible {
+  outline: 2px solid var(--color-primary);
 }
 
 #app {
@@ -91,14 +103,14 @@ body {
 
 /* Element Plus 主题色覆盖 */
 :root {
-  --el-color-primary: #1e3a8a;
-  --el-color-primary-light-3: #3b5bdb;
-  --el-color-primary-light-5: #6084e6;
-  --el-color-primary-light-7: #a5b9f0;
-  --el-color-primary-light-8: #c4d2f5;
-  --el-color-primary-light-9: #dbeafe;
-  --el-color-primary-dark-2: #162d6e;
-  --el-border-radius-base: 8px;
+  --el-color-primary: #1a3c2b;
+  --el-color-primary-light-3: #527561;
+  --el-color-primary-light-5: #88a092;
+  --el-color-primary-light-7: #bdcbbf;
+  --el-color-primary-light-8: #d6ded7;
+  --el-color-primary-light-9: #e8efe9;
+  --el-color-primary-dark-2: #10271b;
+  --el-border-radius-base: 4px;
 }
 
 /* 段落与 markdown 文本渲染 */

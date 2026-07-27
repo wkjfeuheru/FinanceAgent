@@ -127,10 +127,14 @@ onMounted(() => {
         </button>
         <div class="brand">
           <span class="brand-mark">¥</span>
-          <h1 class="app-title">金融智能投顾系统</h1>
+          <div class="brand-copy">
+            <h1 class="app-title">金融智能投顾系统</h1>
+            <span class="brand-meta">FINANCE INTELLIGENCE / WORKSPACE</span>
+          </div>
         </div>
         <div class="header-right">
-          <el-tag type="info" effect="dark" round>
+          <span class="system-status"><i></i>系统在线</span>
+          <el-tag type="info" effect="plain">
             {{ displayName }}
           </el-tag>
           <el-tooltip content="登出" placement="bottom">
@@ -184,11 +188,12 @@ onMounted(() => {
   flex-direction: column;
   height: 100%;
   overflow: hidden;
+  background: var(--color-bg);
 }
 
 .app-header {
-  background: linear-gradient(90deg, #1e3a8a 0%, #1e40af 50%, #1e3a8a 100%);
-  box-shadow: 0 2px 8px rgba(30, 58, 138, 0.25);
+  background: rgba(247, 247, 245, 0.96);
+  border-bottom: 1px solid var(--color-border);
   position: relative;
   z-index: 100;
   flex-shrink: 0;
@@ -197,9 +202,9 @@ onMounted(() => {
 .header-inner {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 0 20px;
-  height: 60px;
+  gap: 16px;
+  padding: 0 24px;
+  height: 64px;
   max-width: 100%;
 }
 
@@ -215,26 +220,28 @@ onMounted(() => {
   justify-content: center;
   width: 34px;
   height: 34px;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.15);
-  color: #fbbf24;
+  border-radius: 0;
+  background: var(--color-primary);
+  color: #fff;
   font-weight: 800;
   font-size: 18px;
-  backdrop-filter: blur(4px);
 }
+
+.brand-copy { display: flex; flex-direction: column; line-height: 1.15; }
+.brand-meta { margin-top: 4px; color: var(--color-text-muted); font: 9px/1 var(--font-mono); letter-spacing: .12em; }
 
 .menu-toggle {
   display: none;
   background: transparent;
   border: none;
-  color: #fff;
+  color: var(--color-text);
   cursor: pointer;
   padding: 6px;
-  border-radius: 8px;
+  border-radius: 2px;
   align-items: center;
 }
 .menu-toggle:hover {
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--color-primary-soft);
 }
 
 .header-right {
@@ -245,13 +252,18 @@ onMounted(() => {
 }
 
 .logout-btn {
-  background: rgba(255, 255, 255, 0.15);
-  border: none;
-  color: #fff;
+  background: transparent;
+  border: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
 }
 .logout-btn:hover {
-  background: rgba(239, 68, 68, 0.6);
+  background: rgba(183, 68, 50, 0.08);
+  color: var(--color-danger);
+  border-color: var(--color-danger);
 }
+
+.system-status { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--color-border); padding: 5px 10px; color: var(--color-text-secondary); font: 10px/1 var(--font-mono); letter-spacing: .08em; }
+.system-status i { width: 7px; height: 7px; background: var(--color-success); }
 
 .app-main {
   flex: 1;
@@ -281,10 +293,11 @@ onMounted(() => {
 .sidebar-content {
   flex: 1;
   overflow-y: auto;
-  padding: 16px;
+  padding: 20px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
+  background: var(--color-surface-alt);
 }
 
 .sidebar-backdrop {
@@ -306,7 +319,7 @@ onMounted(() => {
   }
   .sidebar-area {
     position: fixed;
-    top: 60px;
+    top: 64px;
     right: 0;
     bottom: 0;
     width: 88%;
@@ -315,7 +328,7 @@ onMounted(() => {
     transform: translateX(100%);
     transition: transform 0.3s ease;
     background: var(--color-bg);
-    box-shadow: -8px 0 24px rgba(15, 23, 42, 0.12);
+    box-shadow: -12px 0 32px rgba(26, 60, 43, 0.12);
   }
   .sidebar-area.open {
     transform: translateX(0);
@@ -323,7 +336,7 @@ onMounted(() => {
   .sidebar-backdrop {
     display: block;
     position: fixed;
-    top: 60px;
+    top: 64px;
     left: 0;
     right: 0;
     bottom: 0;

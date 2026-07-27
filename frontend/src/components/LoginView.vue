@@ -131,6 +131,18 @@ function switchTab(tab: TabKey) {
 <template>
   <div class="login-view">
     <div class="login-bg"></div>
+    <section class="trust-panel">
+      <div class="trust-brand"><span>¥</span> FINANCE AGENT / 01</div>
+      <h1>让每一次投资决策<br />都有清晰依据。</h1>
+      <p>多 Agent 协作完成行情研究、标的筛选、风险画像与资产配置。</p>
+      <div class="capability-grid">
+        <div><b>01</b><span>多意图识别</span></div>
+        <div><b>02</b><span>实时分析链路</span></div>
+        <div><b>03</b><span>合规风险控制</span></div>
+        <div><b>04</b><span>个性化配置</span></div>
+      </div>
+      <div class="trust-status"><i></i> 服务状态正常 · 数据安全连接</div>
+    </section>
     <div class="login-card">
       <div class="brand-row">
         <div class="brand-mark">¥</div>
@@ -273,35 +285,50 @@ function switchTab(tab: TabKey) {
   min-height: 100%;
   width: 100%;
   display: flex;
-  align-items: center;
+  align-items: stretch;
   justify-content: center;
-  padding: 24px;
+  padding: 0;
   overflow: hidden;
 }
 
 .login-bg {
   position: absolute;
   inset: 0;
-  background: linear-gradient(135deg, #1e3a8a 0%, #1e40af 45%, #3b5bdb 100%);
+  background-color: var(--color-bg);
+  background-image: linear-gradient(var(--color-border) 1px, transparent 1px), linear-gradient(90deg, var(--color-border) 1px, transparent 1px);
+  background-size: 96px 96px;
 }
 .login-bg::before {
   content: '';
   position: absolute;
   inset: 0;
-  background:
-    radial-gradient(circle at 20% 30%, rgba(251, 191, 36, 0.12), transparent 40%),
-    radial-gradient(circle at 80% 70%, rgba(96, 165, 250, 0.18), transparent 45%);
+  background: linear-gradient(90deg, rgba(26,60,43,.035), transparent 45%, rgba(244,211,94,.08));
 }
+
+.trust-panel { position: relative; z-index: 1; width: min(52%, 720px); padding: clamp(48px, 8vw, 120px); display: flex; flex-direction: column; justify-content: center; border-right: 1px solid var(--color-border); }
+.trust-brand { color: var(--color-primary); font: 11px/1 var(--font-mono); letter-spacing: .12em; }
+.trust-brand span { display: inline-flex; width: 28px; height: 28px; align-items: center; justify-content: center; margin-right: 10px; background: var(--color-primary); color: #fff; font: 700 15px/1 sans-serif; }
+.trust-panel h1 { margin: 56px 0 24px; color: var(--color-primary); font-size: clamp(40px, 5vw, 72px); line-height: 1.03; letter-spacing: -.05em; }
+.trust-panel > p { max-width: 540px; margin: 0; color: var(--color-text-secondary); font-size: 16px; line-height: 1.9; }
+.capability-grid { display: grid; grid-template-columns: repeat(2, 1fr); margin-top: 56px; border-top: 1px solid var(--color-border); border-left: 1px solid var(--color-border); }
+.capability-grid div { display: flex; flex-direction: column; gap: 12px; padding: 20px; border-right: 1px solid var(--color-border); border-bottom: 1px solid var(--color-border); background: rgba(255,255,255,.45); }
+.capability-grid b { color: var(--color-text-muted); font: 10px/1 var(--font-mono); }
+.capability-grid span { color: var(--color-text); font-weight: 600; }
+.trust-status { margin-top: auto; padding-top: 40px; color: var(--color-text-muted); font: 10px/1 var(--font-mono); letter-spacing: .08em; }
+.trust-status i { display: inline-block; width: 7px; height: 7px; margin-right: 8px; background: var(--color-success); }
 
 .login-card {
   position: relative;
   z-index: 1;
   width: 100%;
-  max-width: 420px;
+  align-self: center;
+  max-width: 440px;
   background: var(--color-surface);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-elevated);
-  padding: 36px 32px 28px;
+  border: 1px solid var(--color-border);
+  border-radius: 0;
+  box-shadow: none;
+  padding: 40px;
+  margin: 40px clamp(28px, 6vw, 96px);
 }
 
 .brand-row {
@@ -317,12 +344,12 @@ function switchTab(tab: TabKey) {
   justify-content: center;
   width: 44px;
   height: 44px;
-  border-radius: 12px;
-  background: linear-gradient(135deg, #1e3a8a, #3b5bdb);
-  color: #fbbf24;
+  border-radius: 0;
+  background: var(--color-primary);
+  color: #fff;
   font-weight: 800;
   font-size: 22px;
-  box-shadow: 0 6px 16px rgba(30, 58, 138, 0.3);
+  box-shadow: none;
 }
 
 .brand-text {
@@ -347,8 +374,9 @@ function switchTab(tab: TabKey) {
 .tabs {
   display: flex;
   background: var(--color-surface-alt);
-  border-radius: var(--radius-md);
-  padding: 4px;
+  border: 1px solid var(--color-border);
+  border-radius: 0;
+  padding: 0;
   margin-bottom: 20px;
 }
 
@@ -357,7 +385,8 @@ function switchTab(tab: TabKey) {
   border: none;
   background: transparent;
   padding: 8px 12px;
-  border-radius: 8px;
+  border-radius: 0;
+  border-right: 1px solid var(--color-border);
   cursor: pointer;
   font-size: 14px;
   font-weight: 500;
@@ -370,9 +399,9 @@ function switchTab(tab: TabKey) {
 }
 
 .tab.active {
-  background: var(--color-surface);
-  color: var(--color-primary);
-  box-shadow: var(--shadow-card);
+  background: var(--color-primary);
+  color: #fff;
+  box-shadow: none;
   font-weight: 600;
 }
 
@@ -399,7 +428,7 @@ function switchTab(tab: TabKey) {
   font-size: 15px;
   font-weight: 600;
   margin-top: 6px;
-  border-radius: var(--radius-md);
+  border-radius: 2px;
 }
 
 .hint {
@@ -419,7 +448,10 @@ function switchTab(tab: TabKey) {
 }
 
 @media (max-width: 480px) {
+  .login-view { padding: 20px; }
+  .trust-panel { display: none; }
   .login-card {
+    margin: 0;
     padding: 28px 20px 20px;
   }
   .brand-title {
