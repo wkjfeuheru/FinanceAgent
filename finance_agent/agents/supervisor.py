@@ -153,25 +153,41 @@ def needs_market_overview_search(message: str) -> bool:
     )
 
 
-def needs_slot_extraction(intent: str, query: str) -> bool:
-    """确定槽位工具的候选边界；模型在候选范围内生成原生 tool_calls。"""
-    if intent == "asset_allocation":
+def _has_explicit_stock_reference(query: str) -> bool:
+    text = (query or "").strip()
+    if re.search(
+        r"(?<!\d)(?:60\d{4}|00\d{4}|30\d{4}|68\d{4}|8\d{5}|4\d{5})(?!\d)",
+        text,
+    ):
         return True
-    if intent == "market_query":
-        broad_market = any(word in (query or "") for word in ("大盘", "指数", "市场整体"))
-        return not needs_market_overview_search(query) and not broad_market
-    if intent == "stock_recommendation":
-        return not needs_stock_screening(query)
-    return False
+    if any(word in text for word in ("个股", "这只股票", "该股", "这只股")):
+        return True
+    common_names = (
+        "贵州茅台", "茅台", "五粮液", "宁德时代", "招商银行", "招行",
+        "浦发银行", "工商银行", "建设银行", "农业银行", "中国银行",
+        "中国平安", "比亚迪", "格力电器", "美的集团", "中芯国际",
+    )
+    return any(name in text for name in common_names)
+
+
+def _has_non_stock_market_scope(query: str) -> bool:
+    text = (query or "").strip()
+    markers = (
+        "板块", "行业", "概念", "指数", "大盘", "市场整体",
+        "黄金", "白银", "原油", "商品", "期货", "外汇", "汇率",
+        "美元", "人民币", "欧元", "日元",
+    )
+    return any(marker in text for marker in markers)
 
 
 def needs_slot_extraction(intent: str, query: str) -> bool:
     """确定槽位工具的候选边界；模型在候选范围内生成原生 tool_calls。"""
     if intent == "asset_allocation":
         return True
+    if _has_non_stock_market_scope(query):
+        return False
     if intent == "market_query":
-        broad_market = any(word in (query or "") for word in ("大盘", "指数", "市场整体"))
-        return not needs_market_overview_search(query) and not broad_market
+        return _has_explicit_stock_reference(query)
     if intent == "stock_recommendation":
         return not needs_stock_screening(query)
     return False
