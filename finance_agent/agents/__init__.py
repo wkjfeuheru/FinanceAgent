@@ -1,4 +1,4 @@
-"""Agent 定义 —— 监督者、画像抽取、数据获取、基本面分析、资产配置、合规风控。"""
+"""Agent 定义 —— 监督者、画像抽取、数据获取、股票分析、资产配置、合规风控。"""
 
 from finance_agent.agents.base import BaseFinanceAgent
 from finance_agent.agents.supervisor import SupervisorAgent
