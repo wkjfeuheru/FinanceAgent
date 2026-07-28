@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 将 `FundamentalAnalysisAgent` 重构为 `StockAnalysisAgent`，通过 ReAct Agent 自主决策执行基本面分析、技术面分析或两者，技术指标（MACD/KDJ/RSI/BOLL/MA/WR）基于K线数据纯 Python 自算。
+**Goal:** 将 `FundamentalAnalysisAgent` 重构为 `StockAnalysisAgent`，通过 ReAct Agent 自主决策执行基本面分析、技术面分析或两者，技术指标（MACD/KDJ/RSI/BOLL/MA/WR）基于K线数据纯 Python 自算。✅ 已完成 2026-07-28。
 
 **Architecture:** 在 Agent 内部使用 `create_react_agent` + `bind_tools([analyze_fundamentals, analyze_technicals])`。Agent 接收近期对话摘要 + 当前用户问题 + 可用数据描述，ReAct 推理选择调用哪个工具。工具返回结构化 JSON，Agent 合成最终回复。指标计算为独立纯 Python 模块，零外部依赖。
 
