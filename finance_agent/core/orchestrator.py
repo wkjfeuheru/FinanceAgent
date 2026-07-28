@@ -1491,7 +1491,7 @@ class AdvisorSystem:
             "task_plan": result["task_plan"],
             "user_profile": result.get("user_profile", {}),
             "stock_data": result.get("stock_data", {}),
-            "fundamental_analysis": result.get("stock_analysis", {}),
+            "stock_analysis": result.get("stock_analysis", {}),
             "allocation_result": result.get("allocation_result", {}),
             "compliance_result": result.get("compliance_result", {}),
             "shared_memory_snapshot": result.get("shared_memory_snapshot", {}),
