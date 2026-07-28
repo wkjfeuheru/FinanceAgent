@@ -1,8 +1,8 @@
 """金融投顾多 Agent 系统。
 
 核心特性:
-- 6 Agent 流水线：监督者 → 画像抽取 → 数据获取 → 基本面分析 → 资产配置 → 合规风控
-- data_fetch 与 fundamental_analysis 使用 LangGraph @task 按股票 fan-out 并行执行
+- 6 Agent 流水线：监督者 → 画像抽取 → 数据获取 → 股票分析 → 资产配置 → 合规风控
+- data_fetch 与 stock_analysis 使用 LangGraph @task 按股票 fan-out 并行执行
 - 股票识别采用 LLM 驱动（识别中文全称/简称/代码 → 返回 code/name/industry）
 - SharedWorkingMemory 跨 Agent 信息共享（线程安全，支持并行节点）
 - 三层记忆机制（长期画像、近期摘要、滑动窗口）
@@ -12,7 +12,7 @@
 工作流:
   START → supervisor → slot_extraction（画像与股票识别）
        → data_fetch_batch（@task × N 并行）
-       → fundamental_batch（@task × N 并行）
+       → stock_analysis_batch（@task × N 并行）
        → asset_allocation → compliance → final_snapshot → END
 """
 
@@ -50,7 +50,7 @@ from finance_agent.tools.finance_slots import (
     create_extract_finance_slots_tool,
 )
 from finance_agent.agents.data_fetch import DataFetchAgent
-from finance_agent.agents.fundamental_analysis import FundamentalAnalysisAgent
+from finance_agent.agents.stock_analysis import StockAnalysisAgent
 from finance_agent.agents.asset_allocation import AssetAllocationAgent
 from finance_agent.agents.compliance import ComplianceAgent
 from finance_agent.tools.qianfan_search import QianfanSearchError, QianfanStockSearch
@@ -79,7 +79,8 @@ class AdvisorState(TypedDict):
     stock_search_error: str
     stock_resolution_error: str
     stock_data: Dict[str, Any]        # 获取的金融数据（join 节点填充）
-    fundamental_analysis: Dict[str, Any]   # 基本面分析结果（join 节点填充）
+    stock_analysis: Dict[str, Any]   # 股票综合分析结果（join 节点填充）
+    technical_analysis: Dict[str, Any]   # 技术面分析结果
     allocation_result: Dict[str, Any]       # 资产配置结果
     agent_response: str               # 最终投顾回复
     compliance_result: Dict[str, Any]       # 合规审查结果
@@ -91,7 +92,7 @@ class AdvisorState(TypedDict):
     explicit_user_stock_codes: List[str]
     # 保留批处理明细字段以兼容 checkpoint 与调用方。
     stock_data_entries: List[Dict[str, Any]]
-    fundamental_entries: List[Dict[str, Any]]
+    stock_analysis_entries: List[Dict[str, Any]]
     detected_intents: List[Dict[str, Any]]
     intent_results: Dict[str, Dict[str, Any]]
     intent_source: str
@@ -126,7 +127,7 @@ class AdvisorSystem:
         self.data_fetch_agent = DataFetchAgent(
             shared_memory=self.shared_memory, checkpointer=self.checkpointer,
         )
-        self.fundamental_agent = FundamentalAnalysisAgent(
+        self.stock_agent = StockAnalysisAgent(
             shared_memory=self.shared_memory, checkpointer=self.checkpointer,
         )
         self.allocation_agent = AssetAllocationAgent(
@@ -333,10 +334,10 @@ class AdvisorSystem:
         )
         return cleaned.strip()
 
-    def _build_fundamental_summary(
+    def _build_stock_analysis_summary(
         self, analysis: Dict[str, Any], codes: List[str], screening: bool = False
     ) -> str:
-        """根据基本面分析结果生成摘要回复（跳过 asset_allocation 时使用）。"""
+        """根据股票分析结果生成摘要回复（跳过 asset_allocation 时使用）。"""
         def metric(value: Any, suffix: str = "") -> str:
             if value is None or value == "":
                 return "暂无"
@@ -351,7 +352,7 @@ class AdvisorSystem:
                 "请提供A股代码（如600519、000001）以便进行分析。"
             )
 
-        title = "## 候选股票基本面对比" if screening else "## 基本面分析报告"
+        title = "## 候选股票分析对比" if screening else "## 股票分析报告"
         parts = [title, ""]
         if screening:
             parts.extend([
@@ -404,6 +405,15 @@ class AdvisorSystem:
                     f"流动比率 {metric(data.get('current_ratio'))}"
                 )
             parts.append(f"- **总结**：{summary}")
+            # 技术面分析（如 Agent 返回了 technical_analysis）
+            tech = a.get("technical_analysis")
+            if isinstance(tech, dict):
+                trend = tech.get("trend", "")
+                signals = tech.get("signals", "")
+                if trend:
+                    parts.append(f"- **技术趋势**：{trend}")
+                if signals:
+                    parts.append(f"- **技术信号**：{signals}")
             if advantages:
                 parts.append(f"- **优势**：{'；'.join(advantages)}")
             if risks:
@@ -1010,7 +1020,7 @@ class AdvisorSystem:
                     state["intent_results"] = intent_results
             return state
 
-        # ── 节点 5: 基本面分析（@task fan-out 按股票并行）──
+        # ── 节点 5: 股票综合分析（@task fan-out 按股票并行）──
 
         @task
         def analyze_stock_task(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1020,7 +1030,11 @@ class AdvisorSystem:
             if isinstance(stock_item, dict):
                 _publish_stock_entry({"code": code, **stock_item})
             try:
-                entry = self.fundamental_agent.handle_single_stock(code)
+                entry = self.stock_agent.handle_single_stock(
+                    code,
+                    user_message=payload.get("user_message", ""),
+                    memory_context=payload.get("memory_context", ""),
+                )
                 entry.setdefault("status", "success")
             except Exception as exc:
                 entry = {
@@ -1028,17 +1042,17 @@ class AdvisorSystem:
                     "status": "error",
                     "error": str(exc),
                     "rating": "未知",
-                    "summary": "基本面分析执行异常",
+                    "summary": "股票分析执行异常",
                     "overall_score": 50,
                 }
             entry["code"] = code
             entry["_run_id"] = str(payload.get("run_id", ""))
             return entry
 
-        def fundamental_batch_handler(state: AdvisorState) -> AdvisorState:
-            """并发分析全部股票，并统一聚合基本面结果。
+        def stock_analysis_batch_handler(state: AdvisorState) -> AdvisorState:
+            """并发分析全部股票，并统一聚合分析结果。
 
-            当 task_plan 不包含 asset_allocation 时，同时生成基本面摘要回复。
+            当 task_plan 不包含 asset_allocation 时，同时生成分析摘要回复。
             """
             codes = _resolve_stock_codes(state)
             stock_data = state.get("stock_data", {}) or {}
@@ -1047,22 +1061,25 @@ class AdvisorSystem:
                     "code": code,
                     "run_id": state.get("run_id", ""),
                     "stock_data": stock_data.get(code, {}),
+                    "user_message": state.get("user_message", ""),
+                    "memory_context": state.get("memory_context", ""),
                 }
                 for code in codes
             ]
             futures = []
             for payload in payloads:
                 code = payload["code"]
-                self._trace_agent(state, "FundamentalAnalysisAgent", code)
+                self._trace_agent(state, "StockAnalysisAgent", code)
                 self._emit_progress(
-                    "fundamental_analysis", f"正在分析 {code} 的基本面",
+                    "stock_analysis", f"正在分析 {code}",
                     str(state.get("thread_id", "")),
                 )
                 futures.append(analyze_stock_task(payload))
             entries = [future.result() for future in futures]
-            state["fundamental_entries"] = entries
+            state["stock_analysis_entries"] = entries
 
             analysis: Dict[str, Any] = {}
+            technical: Dict[str, Any] = {}
             for entry in entries:
                 if entry.get("_run_id") != state.get("run_id", ""):
                     continue
@@ -1071,17 +1088,22 @@ class AdvisorSystem:
                     continue
                 result = {key: value for key, value in entry.items() if key != "_run_id"}
                 analysis[code] = result
+                # Extract technical analysis from result if present
+                tech_result = entry.get("technical_analysis")
+                if isinstance(tech_result, dict):
+                    technical[code] = tech_result
                 self.shared_memory.publish_fact(
                     f"fundamental_analysis_{code}",
                     result,
-                    source=self.fundamental_agent.agent_name,
+                    source=self.stock_agent.agent_name,
                 )
-            state["fundamental_analysis"] = analysis
+            state["stock_analysis"] = analysis
+            state["technical_analysis"] = technical
 
-            # 条件路由：task_plan 不含 asset_allocation 或股票数 < 2 时，生成基本面摘要回复
+            # 条件路由：task_plan 不含 asset_allocation 或股票数 < 2 时，生成分析摘要回复
             task_plan = state.get("task_plan", []) or []
             if "asset_allocation" not in task_plan or len(codes) < 2:
-                state["agent_response"] = self._build_fundamental_summary(
+                state["agent_response"] = self._build_stock_analysis_summary(
                     analysis, codes, screening=bool(state.get("candidate_stocks"))
                 )
 
@@ -1101,7 +1123,7 @@ class AdvisorSystem:
                 recommendation_analysis = {
                     code: analysis[code] for code in recommendation_codes if code in analysis
                 }
-                summary = self._build_fundamental_summary(
+                summary = self._build_stock_analysis_summary(
                     recommendation_analysis, recommendation_codes, screening=True,
                 )
                 intent_results["stock_recommendation"] = {
@@ -1117,7 +1139,7 @@ class AdvisorSystem:
                 market_analysis = {
                     code: analysis[code] for code in market_codes if code in analysis
                 }
-                summary = self._build_fundamental_summary(
+                summary = self._build_stock_analysis_summary(
                     market_analysis, market_codes, screening=False,
                 )
                 intent_results["market_query"] = {
@@ -1220,7 +1242,7 @@ class AdvisorSystem:
             state["agent_response"] = self._compose_intent_draft(state)
 
             has_verified_analysis = bool(
-                state.get("fundamental_analysis")
+                state.get("stock_analysis")
                 or state.get("allocation_result")
                 or state.get("stock_data")
             )
@@ -1262,7 +1284,7 @@ class AdvisorSystem:
         # ── 构建图 ─────────────────────────────────────────
         # START → supervisor → slot_extraction（画像与股票识别）
         #       → data_fetch_batch（@task × N 并行）
-        #       → fundamental_batch（@task × N 并行）
+        #       → stock_analysis_batch（@task × N 并行）
         #       → route_after_fundamental ─┬─ asset_allocation → compliance
         #                                └──────────────────→ compliance
         #       → final_snapshot → END
@@ -1276,7 +1298,7 @@ class AdvisorSystem:
         graph.add_node("stock_resolution", stock_resolution_handler)
 
         graph.add_node("data_fetch_batch", data_fetch_batch_handler)
-        graph.add_node("fundamental_batch", fundamental_batch_handler)
+        graph.add_node("fundamental_batch", stock_analysis_batch_handler)
 
         graph.add_node("asset_allocation", asset_allocation_handler)
         graph.add_node("casual_chat", casual_chat_handler)
@@ -1365,6 +1387,7 @@ class AdvisorSystem:
                 "user_profile": {},
                 "stock_data": {},
                 "fundamental_analysis": {},
+                "technical_analysis": {},
                 "allocation_result": {},
                 "compliance_result": {},
                 "shared_memory_snapshot": {},
@@ -1425,7 +1448,8 @@ class AdvisorSystem:
             "stock_search_error": "",
             "stock_resolution_error": "",
             "stock_data": {},
-            "fundamental_analysis": {},
+            "stock_analysis": {},
+            "technical_analysis": {},
             "allocation_result": {},
             "agent_response": "",
             "compliance_result": {},
@@ -1436,7 +1460,7 @@ class AdvisorSystem:
             "run_id": uuid.uuid4().hex,
             "explicit_user_stock_codes": [],
             "stock_data_entries": [],
-            "fundamental_entries": [],
+            "stock_analysis_entries": [],
             "detected_intents": [],
             "intent_results": {},
             "intent_source": "",
@@ -1467,7 +1491,7 @@ class AdvisorSystem:
             "task_plan": result["task_plan"],
             "user_profile": result.get("user_profile", {}),
             "stock_data": result.get("stock_data", {}),
-            "fundamental_analysis": result.get("fundamental_analysis", {}),
+            "fundamental_analysis": result.get("stock_analysis", {}),
             "allocation_result": result.get("allocation_result", {}),
             "compliance_result": result.get("compliance_result", {}),
             "shared_memory_snapshot": result.get("shared_memory_snapshot", {}),
