@@ -72,7 +72,7 @@ def test_candidate_search_mode_calls_candidate_search_without_query_keywords():
         "basic_info": {"name": "浦发银行", "industry": "银行"},
         "history": {"code": code, "dates": ["2025-01-01"], "close": [10]},
     }
-    system.fundamental_agent.handle_single_stock = lambda code: {
+    system.stock_agent.handle_single_stock = lambda code: {
         "code": code, "name": "浦发银行", "rating": "中性",
         "overall_score": 70, "summary": "基本面数据可供研究",
         "indicators": {}, "quote": {},

@@ -512,7 +512,7 @@ def test_allocation_uses_its_own_stocks_instead_of_query_keywords():
         "basic_info": {"name": code, "industry": "测试"},
         "history": {"code": code, "dates": ["2025-01-01"], "close": [10]},
     }
-    system.fundamental_agent.handle_single_stock = lambda code: {
+    system.stock_agent.handle_single_stock = lambda code: {
         "code": code, "name": code, "rating": "中性", "overall_score": 70,
         "summary": "基本面数据可供研究", "indicators": {}, "quote": {},
     }
@@ -591,7 +591,7 @@ def test_recommendation_allocation_and_chat_are_combined():
         "basic_info": {"name": code, "industry": "银行"},
         "history": {"code": code, "dates": ["2025-01-01"], "close": [10]},
     }
-    system.fundamental_agent.handle_single_stock = lambda code: {
+    system.stock_agent.handle_single_stock = lambda code: {
         "code": code, "name": code, "rating": "中性", "overall_score": 70,
         "summary": "基本面数据可供进一步研究", "indicators": {}, "quote": {},
     }
