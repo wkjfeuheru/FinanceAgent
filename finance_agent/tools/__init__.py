@@ -16,6 +16,16 @@ from finance_agent.tools.finance_slots import (
     create_extract_finance_slots_tool,
     extract_investment_goal,
 )
+from finance_agent.tools.technical_indicators import (
+    INDICATOR_NAMES,
+    calc_boll,
+    calc_kdj,
+    calc_ma,
+    calc_macd,
+    calc_rsi,
+    calc_wr,
+    compute_all_indicators,
+)
 
 __all__ = [
     "get_stock_basic_info",
@@ -34,4 +44,12 @@ __all__ = [
     "FinanceSlotsExtractor",
     "create_extract_finance_slots_tool",
     "extract_investment_goal",
+    "compute_all_indicators",
+    "INDICATOR_NAMES",
+    "calc_macd",
+    "calc_kdj",
+    "calc_rsi",
+    "calc_boll",
+    "calc_ma",
+    "calc_wr",
 ]
