@@ -272,3 +272,5 @@ technical_analysis: Dict[str, Any]  # 技术面分析结果
 - `handle()` 方法签名保持不变
 - 共享内存中新增 `technical_analysis_{code}` fact，但下游 Agent 可选读取
 - 现有 checkpoint 数据格式兼容
+- `handle_message_locked` 返回中 `fundamental_analysis` 更名为 `stock_analysis`
+- 用户画像读写从 checkpoint 迁移到 `finance_agent.db` 的 SQLite 持久化
