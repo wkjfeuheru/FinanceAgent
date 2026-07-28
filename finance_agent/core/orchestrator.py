@@ -409,11 +409,11 @@ class AdvisorSystem:
             tech = a.get("technical_analysis")
             if isinstance(tech, dict):
                 trend = tech.get("trend", "")
-                signals = tech.get("signals", "")
+                signals = tech.get("signals", []) or []
                 if trend:
                     parts.append(f"- **技术趋势**：{trend}")
                 if signals:
-                    parts.append(f"- **技术信号**：{signals}")
+                    parts.append(f"- **技术信号**：{'；'.join(signals[:5])}")
             if advantages:
                 parts.append(f"- **优势**：{'；'.join(advantages)}")
             if risks:
