@@ -1,10 +1,7 @@
-"""此文件已弃用。
+"""关系型数据库持久化层。
 
-长期记忆（对话、用户画像）已迁移至 LangGraph checkpoint（SqliteSaver）。
+对话管理（conversations + messages）和用户画像（user_profiles）均存储于此。
 用户认证（users + sessions）已迁移至 finance_agent/tools/auth.py 的内置 AuthDB。
-
-保留此文件仅为向后兼容——旧版 finance_agent.db 迁移场景可能仍需 SQLiteStore。
-如无迁移需求，可安全删除此文件。
 """
 from __future__ import annotations
 
@@ -20,10 +17,7 @@ from finance_agent.config import SQLITE_PATH
 
 
 class SQLiteStore:
-    """Deprecated: 长期记忆已迁移至 LangGraph checkpoint。
-
-    仅保留以支持从旧版 finance_agent.db 迁移数据的场景。
-    """
+    """关系型数据库持久化存储。对话、用户画像和旧版认证数据均存储于此。"""
 
     def __init__(self, path: str = SQLITE_PATH):
         self.path = Path(path)
@@ -142,8 +136,9 @@ class SQLiteStore:
                 cursor = db.execute("DELETE FROM user_profiles")
             return cursor.rowcount
 
-    def create_conversation(self, customer_id: str, title: str = "新对话") -> dict[str, Any]:
-        conversation_id = uuid.uuid4().hex
+    def create_conversation(self, customer_id: str, title: str = "新对话",
+                            conversation_id: str | None = None) -> dict[str, Any]:
+        conversation_id = conversation_id or uuid.uuid4().hex
         now = datetime.now().isoformat(timespec="seconds")
         with self.connect() as db:
             db.execute(

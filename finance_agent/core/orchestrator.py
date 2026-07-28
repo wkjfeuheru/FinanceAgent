@@ -55,6 +55,7 @@ from finance_agent.agents.asset_allocation import AssetAllocationAgent
 from finance_agent.agents.compliance import ComplianceAgent
 from finance_agent.tools.qianfan_search import QianfanSearchError, QianfanStockSearch
 from finance_agent.middleware import BLOCKED_RESPONSE, find_sensitive_word
+from finance_agent.core.database import get_database
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -1499,8 +1500,19 @@ class AdvisorSystem:
             "conversation_id": conversation_id,
         }
 
-        # 更新 checkpoint metadata（对话标题 + customer_id）
+        # 更新对话记录（finance_agent.db）
         self._update_conversation_meta(conversation_id, message, customer_id)
+
+        # 持久化消息到 finance_agent.db
+        try:
+            db = get_database()
+            db.append_conversation_message(conversation_id, "user", message)
+            db.append_conversation_message(
+                conversation_id, "assistant", output["response"],
+                {"task_plan": output["task_plan"]},
+            )
+        except Exception:
+            pass
 
         # 更新记忆（按对话隔离）
         self.memory.append_window_message(conversation_id, "user", message)
@@ -1523,127 +1535,45 @@ class AdvisorSystem:
     def _update_conversation_meta(
         self, conversation_id: str, message: str, customer_id: str,
     ) -> None:
-        """更新 checkpoint 中的对话元数据（标题 + customer_id）。"""
-        default_title = " ".join(message.strip().split())[:28] or "新对话"
+        """在 finance_agent.db 中创建或更新对话记录。"""
         try:
-            conn = self.checkpointer.conn
-            existing = conn.execute(
-                """SELECT json_extract(metadata, '$.title')
-                   FROM checkpoints
-                   WHERE thread_id = ?
-                     AND json_extract(metadata, '$.title') IS NOT NULL
-                   ORDER BY checkpoint_id ASC LIMIT 1""",
-                (conversation_id,),
-            ).fetchone()
-            title = str(existing[0]) if existing and existing[0] else default_title
-            conn.execute(
-                """UPDATE checkpoints
-                   SET metadata = json_set(
-                     json_set(metadata, '$.title', ?),
-                     '$.source', 'conversation',
-                     '$.customer_id', ?
-                   )
-                   WHERE rowid = (
-                     SELECT rowid FROM checkpoints
-                     WHERE thread_id = ?
-                     ORDER BY checkpoint_id DESC LIMIT 1
-                   )""",
-                (title, customer_id.upper(), conversation_id),
-            )
-            conn.commit()
+            db = get_database()
+            existing = db.get_conversation(conversation_id, customer_id)
+            if existing:
+                db.rename_conversation_from_message(conversation_id, message)
+            else:
+                default_title = " ".join(message.strip().split())[:28] or "新对话"
+                db.create_conversation(customer_id, default_title,
+                                       conversation_id=conversation_id)
         except Exception:
             pass
 
-    def _get_checkpoint_title(self, conversation_id: str) -> str:
-        """从 checkpoint metadata 读取对话标题。"""
-        try:
-            row = self.checkpointer.conn.execute(
-                """SELECT json_extract(metadata, '$.title') AS title
-                   FROM checkpoints
-                   WHERE thread_id = ?
-                   ORDER BY checkpoint_id DESC LIMIT 1""",
-                (conversation_id,),
-            ).fetchone()
-            return row[0] if row and row[0] else "新对话"
-        except Exception:
-            return "新对话"
-
     def list_checkpoint_conversations(self, customer_id: str) -> list[dict[str, Any]]:
-        """从 checkpoint 查询指定用户的所有对话列表。"""
+        """从 finance_agent.db 查询指定用户的所有对话列表。"""
         try:
-            rows = self.checkpointer.conn.execute(
-                """SELECT thread_id,
-                          MAX(json_extract(metadata, '$.title')) AS title,
-                          MAX(checkpoint_id) AS updated_at
-                   FROM checkpoints
-                   WHERE json_extract(metadata, '$.source') = 'conversation'
-                     AND json_extract(metadata, '$.customer_id') = ?
-                   GROUP BY thread_id
-                   ORDER BY updated_at DESC""",
-                (customer_id.upper(),),
-            ).fetchall()
-            return [
-                {
-                    "conversation_id": row[0],
-                    "title": row[1] or "新对话",
-                    "updated_at": row[2] or "",
-                }
-                for row in rows
-            ]
+            return get_database().list_conversations(customer_id)
         except Exception:
             return []
 
     def get_checkpoint_conversation_messages(
         self, conversation_id: str, limit: int = 100,
     ) -> list[dict[str, Any]]:
-        """从 checkpoint 重建对话消息列表。"""
+        """从 finance_agent.db 的 conversation_messages 表读取消息。"""
         try:
-            config = {"configurable": {"thread_id": conversation_id}}
-            ckpt = self.checkpointer.get(config)
-            if not ckpt or not ckpt.get("channel_values"):
-                return []
-            state = ckpt["channel_values"]
-            messages: list[dict[str, Any]] = [
-                {
-                    "role": item.get("role", "user"),
-                    "content": str(item.get("content", "")),
-                    **({"metadata": item.get("metadata", {})} if item.get("metadata") else {}),
-                }
-                for item in (state.get("chat_history", []) or [])
-                if item.get("role") in {"user", "assistant"} and item.get("content")
-            ]
-            user_msg = state.get("user_message", "")
-            agent_resp = state.get("agent_response", "")
-            if user_msg and not (
-                messages
-                and messages[-1].get("role") == "user"
-                and messages[-1].get("content") == user_msg
-            ):
-                messages.append({"role": "user", "content": user_msg})
-            if agent_resp:
-                messages.append({
-                    "role": "assistant",
-                    "content": agent_resp,
-                    "metadata": {"task_plan": state.get("task_plan", [])},
-                })
-            return messages[-limit:]
+            return get_database().get_conversation_messages(conversation_id, limit)
         except Exception:
             return []
 
     def delete_checkpoint_conversation(self, conversation_id: str, customer_id: str) -> bool:
-        """删除 checkpoint 中指定对话的全部数据。"""
+        """删除指定对话的全部数据（finance_agent.db + checkpoint + Redis）。"""
+        try:
+            db = get_database()
+            db.delete_conversation(conversation_id, customer_id)
+        except Exception:
+            pass
+        # 同时清除 checkpoint 中的图状态
         try:
             conn = self.checkpointer.conn
-            # 校验 ownership
-            row = conn.execute(
-                """SELECT 1 FROM checkpoints
-                   WHERE thread_id = ?
-                     AND json_extract(metadata, '$.customer_id') = ?
-                   LIMIT 1""",
-                (conversation_id, customer_id.upper()),
-            ).fetchone()
-            if not row:
-                return False
             conn.execute("DELETE FROM writes WHERE thread_id = ?", (conversation_id,))
             conn.execute("DELETE FROM checkpoints WHERE thread_id = ?", (conversation_id,))
             conn.commit()
@@ -1654,24 +1584,13 @@ class AdvisorSystem:
             return False
 
     def clear_profile(self, customer_id: str | None = None) -> int:
-        """清除 checkpoint 中的用户画像。返回清除数量。"""
+        """清除用户画像。返回清除数量。"""
         try:
-            conn = self.checkpointer.conn
-            from finance_agent.core.memory import _profile_thread_id
+            db = get_database()
             if customer_id:
-                thread_id = _profile_thread_id(customer_id)
-                conn.execute("DELETE FROM writes WHERE thread_id = ?", (thread_id,))
-                count = conn.execute(
-                    "DELETE FROM checkpoints WHERE thread_id = ?", (thread_id,)
-                ).rowcount
+                count = db.delete_profiles(customer_id)
             else:
-                conn.execute(
-                    "DELETE FROM writes WHERE thread_id LIKE 'profile:%'"
-                )
-                count = conn.execute(
-                    "DELETE FROM checkpoints WHERE thread_id LIKE 'profile:%'"
-                ).rowcount
-            conn.commit()
+                count = db.delete_profiles()
             return count
         except Exception:
             return 0

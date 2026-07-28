@@ -220,42 +220,20 @@ async def get_history(customer_id: str, limit: int = 50) -> HistoryResponse:
         raise HTTPException(status_code=500, detail=f"获取历史失败：{exc}")
 
 
-# ── 对话管理（基于 checkpoint）───────────────────────────────────
+# ── 对话管理（基于 finance_agent.db）───────────────────────────────────
 
 @router.post("/api/conversations/{customer_id}")
 async def create_conversation(customer_id: str) -> dict[str, Any]:
-    """创建一个新对话（仅生成 conversation_id，数据在首次消息时写入 checkpoint）。"""
-    conversation_id = uuid.uuid4().hex
-    return {
-        "conversation_id": conversation_id,
-        "customer_id": customer_id.upper(),
-        "title": "新对话",
-        "created_at": "",
-        "updated_at": "",
-    }
+    """创建一个新对话。"""
+    from finance_agent.core.database import get_database
+    return get_database().create_conversation(customer_id)
 
 
 @router.get("/api/conversations/{customer_id}")
 async def list_conversations(customer_id: str) -> dict[str, Any]:
-    """获取用户的历史对话列表（从 checkpoint 查询）。"""
+    """获取用户的历史对话列表（从 finance_agent.db 查询）。"""
     system = get_system()
     items = system.list_checkpoint_conversations(customer_id)
-    # One-time migration of the pre-conversation Redis sliding window:
-    # if no checkpoint conversations exist, migrate legacy Redis data.
-    if not items:
-        legacy_messages = system.memory.store.get_messages(customer_id)
-        if legacy_messages:
-            first_user = next(
-                (str(item.get("content", "")) for item in legacy_messages if item.get("role") == "user"),
-                "历史对话",
-            )
-            conversation_id = uuid.uuid4().hex
-            # 旧数据不做完整迁移，引导用户开启新对话
-            items = [{
-                "conversation_id": conversation_id,
-                "title": first_user[:28] or "历史对话",
-                "updated_at": "",
-            }]
     return {"customer_id": customer_id.upper(), "conversations": items}
 
 
@@ -263,13 +241,13 @@ async def list_conversations(customer_id: str) -> dict[str, Any]:
 async def get_conversation_messages(
     customer_id: str, conversation_id: str, limit: int = 100,
 ) -> dict[str, Any]:
-    """读取指定对话的消息（从 checkpoint 重建）。"""
-    system = get_system()
+    """读取指定对话的消息（从 finance_agent.db 查询）。"""
+    from finance_agent.core.database import get_database
     # 确认对话属于该 customer
-    items = system.list_checkpoint_conversations(customer_id)
-    found = any(c["conversation_id"] == conversation_id for c in items)
-    if not found:
+    conv = get_database().get_conversation(conversation_id, customer_id)
+    if not conv:
         raise HTTPException(status_code=404, detail="对话不存在")
+    system = get_system()
     return {
         "conversation_id": conversation_id,
         "messages": system.get_checkpoint_conversation_messages(conversation_id, limit),
@@ -278,7 +256,7 @@ async def get_conversation_messages(
 
 @router.delete("/api/conversations/{customer_id}/{conversation_id}")
 async def delete_conversation(customer_id: str, conversation_id: str) -> dict[str, Any]:
-    """删除指定历史对话及其全部 checkpoint 数据。"""
+    """删除指定历史对话及其全部数据。"""
     deleted = get_system().delete_checkpoint_conversation(conversation_id, customer_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="对话不存在")
