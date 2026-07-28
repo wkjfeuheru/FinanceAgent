@@ -38,3 +38,4 @@ Thumbs.db
 finance_agent/checkpoint.db
 checkpoint.db-shm
 checkpoint.db-wal
+finance_agent/auth.db
