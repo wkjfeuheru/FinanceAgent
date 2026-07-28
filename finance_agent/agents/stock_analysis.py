@@ -119,8 +119,8 @@ class StockAnalysisAgent(BaseFinanceAgent):
 
     agent_name: str = "stock_analysis"
 
-    def __init__(self, shared_memory=None):
-        super().__init__(shared_memory=shared_memory)
+    def __init__(self, shared_memory=None, checkpointer=None):
+        super().__init__(shared_memory=shared_memory, checkpointer=checkpointer)
         # 基本面分析链（保持独立，供 tool 内部复用）
         self._fundamental_chain = None
 
