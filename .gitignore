@@ -35,3 +35,4 @@ Thumbs.db
 
 # Environment (contains secrets)
 .env
+finance_agent/checkpoint.db
