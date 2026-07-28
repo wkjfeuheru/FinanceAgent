@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any
 import redis
 from finance_agent.config import REDIS_MEMORY_TTL_SECONDS, REDIS_URL
+from finance_agent.core.database import get_database
 
 
 @dataclass
@@ -30,10 +31,7 @@ class UserProfileCard:
         return cls(**filtered)
 
 
-# ── Profile checkpoint helper ───────────────────────────────────
 
-def _profile_thread_id(customer_id: str) -> str:
-    return f"profile:{customer_id.upper()}"
 
 
 # ── Redis 层 ─────────────────────────────────────────────────
@@ -340,64 +338,26 @@ class AgentMemoryContext:
         summary = self._fit_text(summary, summary_limit)
         return self.store.set_summary(conversation_id, summary)
 
-    # ── 用户档案（checkpoint 持久化，跨对话共享）────────────────
+    # ── 用户档案（finance_agent.db 持久化，跨对话共享）────────────────
 
     def get_profile(self, customer_id: str) -> UserProfileCard:
-        """从 checkpoint 加载用户画像。"""
-        if self.checkpointer is None:
-            return UserProfileCard(customer_id=customer_id.upper())
-
+        """从 finance_agent.db 的 user_profiles 表加载用户画像。"""
         try:
-            config = {"configurable": {"thread_id": _profile_thread_id(customer_id)}}
-            ckpt = self.checkpointer.get(config)
-            if ckpt and ckpt.get("channel_values"):
-                data = ckpt["channel_values"].get("user_profile")
-                if data:
-                    data.setdefault("customer_id", customer_id.upper())
-                    return UserProfileCard.from_dict(data)
+            db = get_database()
+            data = db.get_profile(customer_id)
+            if data:
+                data.setdefault("customer_id", customer_id.upper())
+                return UserProfileCard.from_dict(data)
         except Exception:
             pass
         return UserProfileCard(customer_id=customer_id.upper())
 
     def save_profile(self, profile: UserProfileCard) -> bool:
-        """将用户画像写入 checkpoint。"""
-        if self.checkpointer is None:
-            return False
+        """将用户画像写入 finance_agent.db 的 user_profiles 表。"""
         profile.updated_at = datetime.now().isoformat(timespec="seconds")
-        thread_id = _profile_thread_id(profile.customer_id)
-        profile_dict = asdict(profile)
-        now = profile.updated_at
-        ckpt_id = now  # use timestamp as stable checkpoint id
         try:
-            self.checkpointer.put(
-                {
-                    "configurable": {
-                        "thread_id": thread_id,
-                        "checkpoint_ns": "",
-                    }
-                },
-                {
-                    "v": 1,
-                    "id": ckpt_id,
-                    "ts": now,
-                    "channel_values": {
-                        "user_profile": profile_dict,
-                        "updated_at": now,
-                    },
-                    "channel_versions": {
-                        "user_profile": ckpt_id,
-                        "updated_at": ckpt_id,
-                    },
-                    "versions_seen": {},
-                    "updated_channels": None,
-                },
-                {
-                    "source": "user_profile",
-                    "customer_id": profile.customer_id.upper(),
-                    "step": 0,
-                },
-                {"user_profile": ckpt_id, "updated_at": ckpt_id},
-            )
+            db = get_database()
+            db.save_profile(asdict(profile))
             return True
         except Exception:
             return False
