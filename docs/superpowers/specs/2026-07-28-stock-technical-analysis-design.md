@@ -241,20 +241,23 @@ def handle_single_stock(
 from finance_agent.agents.stock_analysis import StockAnalysisAgent  # was FundamentalAnalysisAgent
 
 # 实例化变更
-self.stock_analysis_agent = StockAnalysisAgent(
+self.stock_agent = StockAnalysisAgent(
     shared_memory=self.shared_memory, checkpointer=self.checkpointer,
 )
 
 # fundamental_batch_handler 中引用变更
-entry = self.stock_analysis_agent.handle_single_stock(code)
+entry = self.stock_agent.handle_single_stock(code)
 
 # _build_fundamental_summary 可保留（技术面结果附加到分析 dict 中，报告生成时合并）
 ```
 
 在 `AdvisorState` 中新增可选字段：
 ```python
-technical_analysis: Dict[str, Any]  # 技术面分析结果
+stock_analysis: Dict[str, Any]         # 股票综合分析结果（改名自 fundamental_analysis）
+technical_analysis: Dict[str, Any]     # 技术面分析结果
 ```
+
+在 `handle_message_locked` 返回中将 `"fundamental_analysis"` 更名为 `"stock_analysis"`。
 
 ## 九、错误处理
 
