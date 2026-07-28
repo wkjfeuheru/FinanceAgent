@@ -100,6 +100,7 @@ AGENT_TEMPERATURES = {
     "slot_extraction": 0.1, # 画像与股票槽位：低温保证抽取准确
     "data_fetch": 0.0,        # 数据获取：零温度保证工具调用准确
     "fundamental": 0.3,      # 基本面分析：适度温度保证分析深度
+    "stock_analysis": 0.3,   # 股票综合分析：适度温度保证分析深度与决策灵活性
     "allocation": 0.2,        # 资产配置：低温保证计算严谨
     "compliance": 0.0,        # 合规审查：零温度保证一致性
 }
