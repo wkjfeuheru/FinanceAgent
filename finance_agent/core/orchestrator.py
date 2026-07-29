@@ -53,7 +53,7 @@ from finance_agent.agents.data_fetch import DataFetchAgent
 from finance_agent.agents.stock_analysis import StockAnalysisAgent
 from finance_agent.agents.asset_allocation import AssetAllocationAgent
 from finance_agent.agents.compliance import ComplianceAgent
-from finance_agent.tools.qianfan_search import QianfanSearchError, QianfanStockSearch
+from finance_agent.tools.web_search import WebSearchError, MarketSearch
 from finance_agent.middleware import BLOCKED_RESPONSE, find_sensitive_word
 from finance_agent.core.database import get_database
 
@@ -64,6 +64,51 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _format_indicator_line(name: str, data: dict[str, Any]) -> str:
+    """将单个技术指标结果格式化为单行展示文本。"""
+    if not isinstance(data, dict):
+        return ""
+    latest = data.get("latest", {}) or {}
+    if name == "MACD":
+        sig = data.get("signal") or "无信号"
+        trend = data.get("trend", "震荡")
+        div = data.get("divergence") or ""
+        return (
+            f"DIF {latest.get('DIF', '暂无')}，DEA {latest.get('DEA', '暂无')}，"
+            f"柱状线 {latest.get('histogram', '暂无')}；信号 {sig}，趋势 {trend}"
+            + (f"，{div}" if div else "")
+        )
+    if name == "KDJ":
+        sig = data.get("signal") or "无信号"
+        zone = data.get("zone", "正常")
+        return (
+            f"K {latest.get('K', '暂无')}，D {latest.get('D', '暂无')}，"
+            f"J {latest.get('J', '暂无')}；信号 {sig}，区间 {zone}"
+        )
+    if name == "RSI":
+        zones = data.get("zones", {}) or {}
+        zone_desc = "、".join(f"{k}{v}" for k, v in zones.items()) or "正常"
+        vals = "，".join(f"{k}={v}" for k, v in latest.items())
+        return f"{vals}；区间 {zone_desc}" if vals else ""
+    if name == "BOLL":
+        pos = data.get("position", "轨内")
+        bw = data.get("bandwidth", "暂无")
+        return (
+            f"MID {latest.get('MID', '暂无')}，UPPER {latest.get('UPPER', '暂无')}，"
+            f"LOWER {latest.get('LOWER', '暂无')}；带宽 {bw}，位置 {pos}"
+        )
+    if name == "MA":
+        pos = data.get("position", "")
+        vals = "，".join(f"{k}={v}" for k, v in latest.items())
+        return (f"{vals}；{pos}").strip("；")
+    if name == "WR":
+        zones = data.get("zones", {}) or {}
+        zone_desc = "、".join(f"{k}{v}" for k, v in zones.items()) or "正常"
+        vals = "，".join(f"{k}={v}" for k, v in latest.items())
+        return f"{vals}；区间 {zone_desc}" if vals else ""
+    return ""
 
 
 # ── State ──────────────────────────────────────────────────────
@@ -137,7 +182,7 @@ class AdvisorSystem:
         self.compliance_agent = ComplianceAgent(
             shared_memory=self.shared_memory, checkpointer=self.checkpointer,
         )
-        self.stock_search = QianfanStockSearch()
+        self.stock_search = MarketSearch()
         self._session_counter: Dict[str, int] = {}
         self._progress_context = threading.local()
         self._progress_callbacks: Dict[str, Callable[[str, str], None]] = {}
@@ -411,10 +456,21 @@ class AdvisorSystem:
             if isinstance(tech, dict):
                 trend = tech.get("trend", "")
                 signals = tech.get("signals", []) or []
+                risks_tech = tech.get("risks", []) or []
                 if trend:
                     parts.append(f"- **技术趋势**：{trend}")
+                # 展示各指标的具体数值
+                indicators_map = tech.get("indicators", {}) or {}
+                for ind_name, ind_data in indicators_map.items():
+                    if not isinstance(ind_data, dict):
+                        continue
+                    line = _format_indicator_line(ind_name, ind_data)
+                    if line:
+                        parts.append(f"- **{ind_name}**：{line}")
                 if signals:
                     parts.append(f"- **技术信号**：{'；'.join(signals[:5])}")
+                if risks_tech:
+                    parts.append(f"- **技术风险**：{'；'.join(risks_tech[:5])}")
             if advantages:
                 parts.append(f"- **优势**：{'；'.join(advantages)}")
             if risks:
@@ -805,7 +861,7 @@ class AdvisorSystem:
                     intent_results["market_query"] = {
                         "status": "success", "content": market_response,
                     }
-                except QianfanSearchError as exc:
+                except WebSearchError as exc:
                     intent_results["market_query"] = {
                         "status": "error", "content": "市场资料搜索失败：" + str(exc),
                     }
@@ -832,7 +888,7 @@ class AdvisorSystem:
                         if stock.get("code") not in by_code:
                             resolved.append(stock)
                     self._emit_progress("stock_validation", "候选代码已确认，准备获取权威证券信息")
-                except QianfanSearchError as exc:
+                except WebSearchError as exc:
                     state["stock_search_error"] = str(exc)
                     intent_results["stock_recommendation"] = {
                         "status": "error",
@@ -877,9 +933,9 @@ class AdvisorSystem:
                         {"code": s["code"], "name": s["name"], "industry": s.get("industry", "")},
                         source="slot_extraction",
                     )
-                if s.get("source") == "baidu_qianfan_search":
+                if s.get("source") == "eastmoney_sector":
                     self.shared_memory.publish_fact(
-                        f"stock_search_candidate_{s['code']}", s, source="baidu_qianfan_search"
+                        f"stock_search_candidate_{s['code']}", s, source="eastmoney_sector"
                     )
 
             return state
@@ -991,7 +1047,7 @@ class AdvisorSystem:
             if state.get("stock_search_error"):
                 state["agent_response"] = (
                     "无法确定需要分析的股票候选：" + state["stock_search_error"]
-                    + "。请配置百度千帆搜索 API，或直接提供股票名称/代码。"
+                    + "。请直接提供股票名称/代码。"
                 )
                 return state
             if "fundamental_analysis" not in (state.get("task_plan", []) or []):

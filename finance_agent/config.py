@@ -67,18 +67,10 @@ STOCK_CACHE_DIR = os.getenv("STOCK_CACHE_DIR", ".cache/finance_agent")
 STOCK_CACHE_TTL = int(os.getenv("STOCK_CACHE_TTL", "3600"))
 BAOSTOCK_SOCKET_TIMEOUT = float(os.getenv("BAOSTOCK_SOCKET_TIMEOUT", "15"))
 
-# 百度千帆智能搜索（行业/主题选股时使用）
-QIANFAN_API_KEY = os.getenv("QIANFAN_API_KEY", "").strip()
-QIANFAN_SEARCH_MODEL = os.getenv("QIANFAN_SEARCH_MODEL", "deepseek-v4-flash").strip()
-QIANFAN_SEARCH_TIMEOUT = int(os.getenv("QIANFAN_SEARCH_TIMEOUT", "60"))
-ZHIPU_API_KEY = os.getenv("ZHIPU_API_KEY", "").strip()
-ZHIPU_BASE_URL = os.getenv(
-    "ZHIPU_BASE_URL",
-    "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-).strip()
-ZHIPU_INTENT_MODEL = os.getenv("ZHIPU_INTENT_MODEL", "glm-4.7-flash").strip()
-ZHIPU_INTENT_TIMEOUT = float(os.getenv("ZHIPU_INTENT_TIMEOUT", "30"))
-ZHIPU_INTENT_MAX_RETRIES = int(os.getenv("ZHIPU_INTENT_MAX_RETRIES", "1"))
+# DashScope 联网搜索已移除，板块/行业市场资料改用东方财富/新浪财经直接抓取
+DEEPSEEK_INTENT_MODEL = os.getenv("DEEPSEEK_INTENT_MODEL", "deepseek-chat").strip()
+DEEPSEEK_INTENT_TIMEOUT = float(os.getenv("DEEPSEEK_INTENT_TIMEOUT", "30"))
+DEEPSEEK_INTENT_MAX_RETRIES = int(os.getenv("DEEPSEEK_INTENT_MAX_RETRIES", "1"))
 LLM_REQUEST_TIMEOUT = float(os.getenv("LLM_REQUEST_TIMEOUT", "45"))
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "1"))
 FINAL_SYNTHESIS_TIMEOUT = float(os.getenv("FINAL_SYNTHESIS_TIMEOUT", "20"))

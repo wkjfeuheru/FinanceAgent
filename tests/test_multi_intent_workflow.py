@@ -127,7 +127,7 @@ def test_supervisor_receives_intent_context_and_pending_fields():
                 "reason": "测试", "evidence": message,
                 "execution_mode": "conversation", "requires_slot_extraction": False,
             }],
-            "finance_related": True, "intent_source": "glm",
+            "finance_related": True, "intent_source": "deepseek",
             "task_plan": ["casual_chat", "compliance"],
         }
 
@@ -233,7 +233,7 @@ def test_followup_receives_pending_state_and_can_correct_candidate_intent():
                 "clarification_id": "market_query:0",
             }],
             "uncertain_intents": [], "finance_related": False,
-            "intent_source": "glm", "task_plan": ["casual_chat", "compliance"],
+            "intent_source": "deepseek", "task_plan": ["casual_chat", "compliance"],
         }
 
     system.supervisor.plan_tasks = clarified_plan
@@ -318,7 +318,7 @@ def test_handle_message_restores_clarification_from_checkpoint():
                 "clarification_id": "market_query:0",
             }],
             "uncertain_intents": [], "finance_related": False,
-            "intent_source": "glm", "task_plan": ["casual_chat", "compliance"],
+            "intent_source": "deepseek", "task_plan": ["casual_chat", "compliance"],
         }
 
     system.supervisor.plan_tasks = plan_tasks

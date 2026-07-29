@@ -154,17 +154,14 @@ export DEEPSEEK_API_KEY="your-deepseek-api-key"
 REDIS_URL=redis://localhost:6379/0
 SQLITE_PATH=finance_agent/finance_agent.db
 
-# 可选：百度千帆智能搜索
-QIANFAN_API_KEY=
-QIANFAN_SEARCH_MODEL=deepseek-v4-flash
-QIANFAN_SEARCH_TIMEOUT=60
+# 板块/行业市场资料：通过东方财富/新浪财经公开接口直接抓取，无需配置 API Key
 
 # GLM 多意图识别（必填 API Key，其余可选）
-ZHIPU_API_KEY=
-ZHIPU_BASE_URL=https://open.bigmodel.cn/api/paas/v4/chat/completions
-ZHIPU_INTENT_MODEL=glm-4.7-flash
-ZHIPU_INTENT_TIMEOUT=30
-ZHIPU_INTENT_MAX_RETRIES=1
+# DEEPSEEK_API_KEY (already configured above)
+# (uses DeepSeek API endpoint)https://open.bigmodel.cn/api/paas/v4/chat/completions
+DEEPSEEK_INTENT_MODEL=deepseek-chat
+DEEPSEEK_INTENT_TIMEOUT=30
+DEEPSEEK_INTENT_MAX_RETRIES=1
 
 # BaoStock 本地缓存
 STOCK_CACHE_DIR=.cache/finance_agent

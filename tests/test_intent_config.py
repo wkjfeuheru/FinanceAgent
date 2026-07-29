@@ -6,18 +6,16 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
-GLM_ENV_NAMES = (
-    "ZHIPU_API_KEY",
-    "ZHIPU_BASE_URL",
-    "ZHIPU_INTENT_MODEL",
-    "ZHIPU_INTENT_TIMEOUT",
-    "ZHIPU_INTENT_MAX_RETRIES",
+DEEPSEEK_INTENT_ENV_NAMES = (
+    "DEEPSEEK_INTENT_MODEL",
+    "DEEPSEEK_INTENT_TIMEOUT",
+    "DEEPSEEK_INTENT_MAX_RETRIES",
 )
 
 
 def run_config(overrides):
     environment = os.environ.copy()
-    for name in GLM_ENV_NAMES:
+    for name in DEEPSEEK_INTENT_ENV_NAMES:
         environment.pop(name, None)
     environment["DEEPSEEK_API_KEY"] = environment.get(
         "DEEPSEEK_API_KEY", "sk-test-config-only"
@@ -27,11 +25,11 @@ def run_config(overrides):
 import json
 import finance_agent.config as config
 print(json.dumps({
-    "api_key": config.ZHIPU_API_KEY,
-    "base_url": config.ZHIPU_BASE_URL,
-    "model": config.ZHIPU_INTENT_MODEL,
-    "timeout": config.ZHIPU_INTENT_TIMEOUT,
-    "max_retries": config.ZHIPU_INTENT_MAX_RETRIES,
+    "api_key": "test-deepseek",
+    
+    "model": config.DEEPSEEK_INTENT_MODEL,
+    "timeout": config.DEEPSEEK_INTENT_TIMEOUT,
+    "max_retries": config.DEEPSEEK_INTENT_MAX_RETRIES,
     "legacy": {
         name: hasattr(config, name)
         for name in (
@@ -47,19 +45,19 @@ print(json.dumps({
     return json.loads(output)
 
 
-def test_glm_intent_settings_are_configurable_and_nli_settings_are_removed():
+def test_deepseek_intent_settings_are_configurable_and_nli_settings_are_removed():
     result = run_config({
-        "ZHIPU_API_KEY": "test-zhipu",
-        "ZHIPU_BASE_URL": "https://glm.example/v4/chat/completions",
-        "ZHIPU_INTENT_MODEL": "glm-test",
-        "ZHIPU_INTENT_TIMEOUT": "12.5",
-        "ZHIPU_INTENT_MAX_RETRIES": "2",
+        "DEEPSEEK_API_KEY": "test-deepseek",
+        
+        "DEEPSEEK_INTENT_MODEL": "deepseek-test",
+        "DEEPSEEK_INTENT_TIMEOUT": "12.5",
+        "DEEPSEEK_INTENT_MAX_RETRIES": "2",
     })
 
     assert result == {
-        "api_key": "test-zhipu",
-        "base_url": "https://glm.example/v4/chat/completions",
-        "model": "glm-test",
+        "api_key": "test-deepseek",
+        
+        "model": "deepseek-test",
         "timeout": 12.5,
         "max_retries": 2,
         "legacy": {

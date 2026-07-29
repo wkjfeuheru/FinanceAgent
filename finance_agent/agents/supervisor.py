@@ -11,7 +11,6 @@ import json
 import logging
 import math
 from typing import Any, Callable, Dict, List
-from urllib.parse import urlparse
 
 import requests
 
@@ -21,16 +20,15 @@ from langchain_core.tools import BaseTool
 
 from finance_agent.agents.base import BaseFinanceAgent
 from finance_agent.config import (
-    ZHIPU_API_KEY,
-    ZHIPU_BASE_URL,
-    ZHIPU_INTENT_MAX_RETRIES,
-    ZHIPU_INTENT_MODEL,
-    ZHIPU_INTENT_TIMEOUT,
+    DEEPSEEK_API_KEY,
+    DEEPSEEK_INTENT_MAX_RETRIES,
+    DEEPSEEK_INTENT_MODEL,
+    DEEPSEEK_INTENT_TIMEOUT,
     get_supervisor_model,
 )
 
 
-_GLM_INTENT_PROMPT = """你是金融工作流的多意图分类器，只分类当前用户消息，不回答问题。
+_INTENT_CLASSIFIER_PROMPT = """你是金融工作流的多意图分类器，只分类当前用户消息，不回答问题。
 近期上下文摘要只能用于解析“它、这些股票、继续配置”等指代，不得从上下文新增当前消息未表达的意图。
 历史中出现预算、风险偏好、期限或配置任务，不代表本轮要求资产配置。
 只有当前消息明确要求资金分配、仓位、权重、组合构建，或者 pending_allocation=true 且当前消息在补充待填字段时，才能输出 asset_allocation。
@@ -61,23 +59,21 @@ _INTENT_CONFIDENCE_THRESHOLD = 0.9
 
 
 class IntentClassificationError(RuntimeError):
-    """GLM 意图识别不可用或返回非法协议。"""
+    """DeepSeek 意图识别不可用或返回非法协议。"""
 
 
-class GLMIntentClassifier:
-    """通过智谱 OpenAI 兼容接口执行多轮上下文意图分类。"""
+class DeepSeekIntentClassifier:
+    """通过 DeepSeek OpenAI 兼容接口执行多轮上下文意图分类。"""
 
     def __init__(
         self,
         api_key: str,
-        base_url: str,
         model: str,
         timeout: float = 30,
         max_retries: int = 1,
         requester: Callable[..., Any] = requests.post,
     ) -> None:
         self.api_key = api_key.strip()
-        self.base_url = base_url.strip()
         self.model = model.strip()
         self.timeout = timeout
         self.max_retries = min(max(0, max_retries), 1)
@@ -86,10 +82,10 @@ class GLMIntentClassifier:
     @staticmethod
     def _validate(payload: Any, message: str) -> dict[str, Any]:
         if not isinstance(payload, dict) or not isinstance(payload.get("intents"), list):
-            raise IntentClassificationError("GLM 意图响应必须包含 intents 列表")
+            raise IntentClassificationError("DeepSeek 意图响应必须包含 intents 列表")
         raw_intents = payload["intents"]
         if not raw_intents:
-            raise IntentClassificationError("GLM 意图响应必须包含至少一个意图")
+            raise IntentClassificationError("DeepSeek 意图响应必须包含至少一个意图")
         valid: list[dict[str, Any]] = []
         for item in raw_intents:
             if not isinstance(item, dict):
@@ -98,19 +94,19 @@ class GLMIntentClassifier:
             mode = str(item.get("execution_mode", "")).strip()
             evidence = str(item.get("evidence", "")).strip()
             if intent not in _CLASSIFIER_MODES:
-                raise IntentClassificationError(f"GLM 返回非法 intent: {intent}")
+                raise IntentClassificationError(f"DeepSeek 返回非法 intent: {intent}")
             if mode not in _CLASSIFIER_MODES[intent]:
                 raise IntentClassificationError(
-                    f"GLM 返回非法 execution_mode: {mode}"
+                    f"DeepSeek 返回非法 execution_mode: {mode}"
                 )
             if not evidence or evidence not in message:
                 continue
             try:
                 confidence = float(item.get("confidence"))
             except (TypeError, ValueError):
-                raise IntentClassificationError("GLM 意图置信度必须是有限数值")
+                raise IntentClassificationError("DeepSeek 意图置信度必须是有限数值")
             if not math.isfinite(confidence) or not 0 <= confidence <= 1:
-                raise IntentClassificationError("GLM 意图置信度必须位于 0 到 1")
+                raise IntentClassificationError("DeepSeek 意图置信度必须位于 0 到 1")
             if (
                 confidence < _INTENT_CONFIDENCE_THRESHOLD
                 and not str(item.get("clarification_question", "")).strip()
@@ -120,7 +116,7 @@ class GLMIntentClassifier:
                 )
             valid.append(dict(item))
         if raw_intents and not valid:
-            raise IntentClassificationError("GLM 意图响应没有可验证的当前轮证据")
+            raise IntentClassificationError("DeepSeek 意图响应没有可验证的当前轮证据")
         return {
             "intents": valid,
             "finance_related": bool(payload.get("finance_related", False)),
@@ -135,12 +131,7 @@ class GLMIntentClassifier:
         pending_clarifications: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not self.api_key:
-            raise IntentClassificationError("缺少 ZHIPU_API_KEY")
-        parsed_url = urlparse(self.base_url)
-        if parsed_url.scheme != "https" or parsed_url.hostname != "open.bigmodel.cn":
-            raise IntentClassificationError(
-                "ZHIPU_BASE_URL 必须使用智谱官方 HTTPS 地址"
-            )
+            raise IntentClassificationError("缺少 DEEPSEEK_API_KEY")
         request_input = {
             "current_message": message.strip(),
             "recent_context_summary": context_summary.strip(),
@@ -151,18 +142,17 @@ class GLMIntentClassifier:
         body = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": _GLM_INTENT_PROMPT},
+                {"role": "system", "content": _INTENT_CLASSIFIER_PROMPT},
                 {"role": "user", "content": json.dumps(request_input, ensure_ascii=False)},
             ],
             "temperature": 0,
-            "thinking": {"type": "disabled"},
             "response_format": {"type": "json_object"},
         }
         error: Exception | None = None
         for _attempt in range(self.max_retries + 1):
             try:
                 response = self.requester(
-                    self.base_url,
+                    "https://api.deepseek.com/v1/chat/completions",
                     headers={
                         "Authorization": f"Bearer {self.api_key}",
                         "Content-Type": "application/json",
@@ -176,7 +166,7 @@ class GLMIntentClassifier:
                 return self._validate(parsed, message)
             except Exception as exc:
                 error = exc
-        raise IntentClassificationError(f"GLM 意图识别失败：{error}") from error
+        raise IntentClassificationError(f"DeepSeek 意图识别失败：{error}") from error
 
 
 _SUPERVISOR_PROMPT = """你是金融投顾系统的监督者，负责根据已识别意图编排工作流。
@@ -269,18 +259,17 @@ class SupervisorAgent(BaseFinanceAgent):
         return _SUPERVISOR_PROMPT
 
     @property
-    def intent_classifier(self) -> GLMIntentClassifier:
+    def intent_classifier(self) -> DeepSeekIntentClassifier:
         if self._intent_classifier is None:
-            self._intent_classifier = GLMIntentClassifier(
-                api_key=ZHIPU_API_KEY,
-                base_url=ZHIPU_BASE_URL,
-                model=ZHIPU_INTENT_MODEL,
-                timeout=ZHIPU_INTENT_TIMEOUT,
-                max_retries=ZHIPU_INTENT_MAX_RETRIES,
+            self._intent_classifier = DeepSeekIntentClassifier(
+                api_key=DEEPSEEK_API_KEY,
+                model=DEEPSEEK_INTENT_MODEL,
+                timeout=DEEPSEEK_INTENT_TIMEOUT,
+                max_retries=DEEPSEEK_INTENT_MAX_RETRIES,
             )
         return self._intent_classifier
 
-    def _classify_with_glm(
+    def _classify_with_deepseek(
         self,
         message: str,
         context_summary: str,
@@ -301,11 +290,11 @@ class SupervisorAgent(BaseFinanceAgent):
         pending_fields: list[str] | None = None,
         pending_clarifications: dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
-        """使用 GLM 结合近期摘要识别并合并本轮全部意图。"""
-        source = "glm"
+        """使用 DeepSeek 结合近期摘要识别并合并本轮全部意图。"""
+        source = "deepseek"
         classification_error = False
         try:
-            parsed = self._classify_with_glm(
+            parsed = self._classify_with_deepseek(
                 message,
                 context_summary,
                 pending_allocation,
@@ -313,7 +302,7 @@ class SupervisorAgent(BaseFinanceAgent):
                 pending_clarifications,
             )
         except Exception as exc:
-            _LOGGER.warning("intent_glm_unavailable error=%s", exc)
+            _LOGGER.warning("intent_deepseek_unavailable error=%s", exc)
             parsed = {}
             classification_error = True
 
