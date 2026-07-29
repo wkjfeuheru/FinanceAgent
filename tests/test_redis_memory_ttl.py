@@ -30,13 +30,6 @@ def make_store(ttl_seconds=3600):
     return store
 
 
-def test_legacy_messages_expire_after_one_hour():
-    store = make_store()
-
-    assert store.append_message("cust1", "user", "hello") is True
-    assert store._client.expirations == [("finance_cs:CUST1:messages", 3600)]
-
-
 def test_window_expiration_is_refreshed_on_each_update():
     store = make_store()
 

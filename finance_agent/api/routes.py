@@ -13,7 +13,6 @@ from finance_agent.api.schemas import (
     ChatResponse,
     ClearRecordsResponse,
     HealthResponse,
-    HistoryResponse,
     LoginRequest,
     LoginResponse,
     ProfileResponse,
@@ -209,17 +208,6 @@ async def get_profile(customer_id: str) -> ProfileResponse:
         raise HTTPException(status_code=500, detail=f"获取画像失败：{exc}")
 
 
-@router.get("/api/history/{customer_id}", response_model=HistoryResponse)
-async def get_history(customer_id: str, limit: int = 50) -> HistoryResponse:
-    """获取对话历史。"""
-    try:
-        system = get_system()
-        messages = system.memory.store.get_messages(customer_id, limit=limit)
-        return HistoryResponse(customer_id=customer_id, messages=messages)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"获取历史失败：{exc}")
-
-
 # ── 对话管理（基于 finance_agent.db）───────────────────────────────────
 
 @router.post("/api/conversations/{customer_id}")
@@ -317,9 +305,8 @@ async def clear_records(
                 ):
                     continue
                 cleared += client.delete(key)
-            # 同时重置共享内存和压缩器缓存
+            # 同时重置共享内存
             system.shared_memory.reset()
-            system.compressor.reset_cache()
             cleared += system.clear_profile()
 
         msg = (

@@ -70,51 +70,7 @@ class RedisMemoryStore:
             self._last_error = str(exc)
             return False
 
-    # ── 消息历史（按 conversation 隔离，保留兼容旧接口）─────────
-
-    def append_message(
-        self,
-        customer_id: str,
-        role: str,
-        content: str,
-        metadata: dict[str, Any] | None = None,
-    ) -> bool:
-        """Deprecated: 旧接口，写入 customer-scoped 消息列表。"""
-        payload = {
-            "role": role,
-            "content": content,
-            "metadata": metadata or {},
-            "timestamp": datetime.now().isoformat(timespec="seconds"),
-        }
-        try:
-            client = self._get_client()
-            key = self._key(customer_id)
-            client.rpush(key, json.dumps(payload, ensure_ascii=False))
-            client.expire(key, self.ttl_seconds)
-            self._last_error = ""
-            return True
-        except redis.RedisError as exc:
-            self._last_error = str(exc)
-            return False
-
-    def get_messages(self, customer_id: str, limit: int = 50) -> list[dict[str, Any]]:
-        try:
-            values = self._get_client().lrange(self._key(customer_id), -limit, -1)
-            self._last_error = ""
-        except redis.RedisError as exc:
-            self._last_error = str(exc)
-            return []
-        return [json.loads(value) for value in values]
-
-    def clear_messages(self, customer_id: str) -> bool:
-        try:
-            self._get_client().delete(self._key(customer_id))
-            self._get_client().delete(self._window_key(customer_id))
-            self._get_client().delete(self._summary_key(customer_id))
-            self._last_error = ""
-            return True
-        except redis.RedisError as exc:
-            self._last_error = str(exc)
+    # ── 消息历史 ─────────────────────────────────────────────────
             return False
 
     # ── 对话级窗口消息 ─────────────────────────────────────────
@@ -221,13 +177,6 @@ class RedisMemoryStore:
             except TypeError:
                 self._client = redis.Redis.from_url(self.redis_url, decode_responses=True)
         return self._client
-
-    def _key(self, customer_id: str) -> str:
-        """Deprecated: 旧版 customer-scoped 消息列表键。"""
-        return f"finance_cs:{customer_id.upper()}:messages"
-
-    def _profile_key(self, customer_id: str) -> str:
-        return f"finance_cs:{customer_id.upper()}:profile"
 
     def _summary_key(self, conversation_id: str) -> str:
         """对话级摘要键。"""

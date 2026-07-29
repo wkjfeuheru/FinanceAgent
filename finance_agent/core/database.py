@@ -17,7 +17,7 @@ from finance_agent.config import SQLITE_PATH
 
 
 class SQLiteStore:
-    """关系型数据库持久化存储。对话、用户画像和旧版认证数据均存储于此。"""
+    """关系型数据库持久化存储。对话、用户画像均存储于此。"""
 
     def __init__(self, path: str = SQLITE_PATH):
         self.path = Path(path)
@@ -39,21 +39,6 @@ class SQLiteStore:
         with self.connect() as db:
             db.executescript(
                 """
-                CREATE TABLE IF NOT EXISTS users (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    customer_id TEXT UNIQUE,
-                    username TEXT NOT NULL COLLATE NOCASE UNIQUE,
-                    display_name TEXT NOT NULL,
-                    password_hash TEXT NOT NULL,
-                    salt TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS sessions (
-                    token TEXT PRIMARY KEY,
-                    customer_id TEXT NOT NULL,
-                    expires_at INTEGER NOT NULL,
-                    FOREIGN KEY (customer_id) REFERENCES users(customer_id) ON DELETE CASCADE
-                );
                 CREATE TABLE IF NOT EXISTS user_profiles (
                     customer_id TEXT PRIMARY KEY,
                     risk_preference TEXT NOT NULL DEFAULT '',
