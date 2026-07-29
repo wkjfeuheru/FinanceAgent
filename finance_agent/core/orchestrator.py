@@ -607,10 +607,24 @@ class AdvisorSystem:
             self._trace_agent(state, "ProfileAgent")
             self._emit_progress("profile", "正在提取投资画像与股票信息")
             state = self.finance_slots_extractor.invoke(state)
-            # 更新 task_plan 反映 profile 执行完成
-            if "profile" not in state.get("task_plan", []):
-                state["task_plan"] = ["profile", *state.get("task_plan", [])]
+            # Share user_profile to shared memory for downstream agents
+            self.shared_memory.publish_fact(
+                "user_profile", state.get("user_profile", {}), source="profile_agent",
+            )
+            # Publish resolved stock basic info to shared memory
+            for s in state.get("resolved_stocks", []) or []:
+                if self.shared_memory and s.get("name"):
+                    self.shared_memory.publish_fact(
+                        f"stock_basic_info_{s['code']}",
+                        {"code": s["code"], "name": s["name"], "industry": s.get("industry", "")},
+                        source="profile",
+                    )
             return state
+
+        def route_after_profile(state: AdvisorState) -> str:
+            if "data_fetch" not in (state.get("task_plan", []) or []):
+                return "compliance"
+            return "data_fetch_batch"
 
         def _resolve_stock_codes(state: AdvisorState) -> List[str]:
             """解析股票代码：优先 resolved_stocks，其次 user_profile，最后正则。"""
@@ -634,14 +648,7 @@ class AdvisorSystem:
             )
             return _unique_codes(codes)
 
-        def route_after_slots(state: AdvisorState) -> str:
-            if "data_fetch" not in (state.get("task_plan", []) or []):
-                return "compliance"
-            return "data_fetch_batch"
-
         def route_after_data_fetch(state: AdvisorState):
-            if state.get("stock_search_error") or state.get("stock_resolution_error"):
-                return "compliance"
             plan = state.get("task_plan", []) or []
             if "fundamental_analysis" in plan:
                 return "fundamental_batch"
@@ -1004,76 +1011,42 @@ class AdvisorSystem:
 
             return state
 
-        def final_snapshot(state: AdvisorState) -> AdvisorState:
-            state["shared_memory_snapshot"] = self.shared_memory.snapshot()
-            return state
-
         # ── 构建图 ─────────────────────────────────────────
-        # START → supervisor → slot_extraction（画像与股票识别）
-        #       → data_fetch_batch（@task × N 并行）
-        #       → stock_analysis_batch（@task × N 并行）
-        #       → route_after_fundamental ─┬─ asset_allocation → compliance
-        #                                └──────────────────→ compliance
-        #       → final_snapshot → END
+        # START → supervisor → profile → data_fetch_batch → fundamental_batch
+        #       → route_after_fundamental ─┬─ asset_allocation → compliance → END
+        #                                 └──────────────────→ compliance → END
 
         graph = StateGraph(AdvisorState)
 
         graph.add_node("supervisor", supervisor_handler)
-        graph.add_node("slot_tool_decision", slot_tool_decision_handler)
-        graph.add_node("slot_tool_executor", slot_tool_executor_handler)
-        graph.add_node("business_state_guard", business_state_guard)
-        graph.add_node("stock_resolution", stock_resolution_handler)
-
+        graph.add_node("profile", profile_handler)
         graph.add_node("data_fetch_batch", data_fetch_batch_handler)
         graph.add_node("fundamental_batch", stock_analysis_batch_handler)
-
         graph.add_node("asset_allocation", asset_allocation_handler)
         graph.add_node("casual_chat", casual_chat_handler)
         graph.add_node("compliance", compliance_handler)
-        graph.add_node("final_snapshot", final_snapshot)
 
-        # 边：顺序段
+        # 边
         graph.add_edge(START, "supervisor")
         graph.add_conditional_edges(
             "supervisor",
             route_after_supervisor,
-            ["slot_tool_decision", "casual_chat", "compliance"],
+            ["profile", "casual_chat", "compliance"],
         )
         graph.add_edge("casual_chat", "compliance")
-        graph.add_conditional_edges(
-            "slot_tool_decision",
-            route_after_slot_tool_decision,
-            ["slot_tool_executor", "business_state_guard"],
-        )
-        graph.add_edge("slot_tool_executor", "business_state_guard")
-        graph.add_conditional_edges(
-            "business_state_guard",
-            route_after_business_guard,
-            ["stock_resolution", "compliance"],
-        )
-        graph.add_conditional_edges(
-            "stock_resolution",
-            route_after_slots,
-            ["data_fetch_batch", "compliance"],
-        )
-
-        # 数据批处理完成后，根据 task_plan 决定是否继续基本面、配置或合规。
+        graph.add_edge("profile", "data_fetch_batch")
         graph.add_conditional_edges(
             "data_fetch_batch",
             route_after_data_fetch,
             ["fundamental_batch", "asset_allocation", "compliance"],
         )
-
-        # 顺序下游段
-        # 条件路由：根据 task_plan 决定是否执行 asset_allocation
         graph.add_conditional_edges(
             "fundamental_batch",
             route_after_fundamental,
             ["asset_allocation", "compliance"],
         )
         graph.add_edge("asset_allocation", "compliance")
-        graph.add_edge("compliance", "final_snapshot")
-        graph.add_edge("final_snapshot", END)
+        graph.add_edge("compliance", END)
 
         return graph.compile(checkpointer=self.checkpointer)
 
