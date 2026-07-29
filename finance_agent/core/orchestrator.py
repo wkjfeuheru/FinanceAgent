@@ -45,10 +45,7 @@ from finance_agent.agents.supervisor import (
     SupervisorAgent,
     requires_slot_extraction,
 )
-from finance_agent.tools.finance_slots import (
-    FinanceSlotsExtractor,
-    create_extract_finance_slots_tool,
-)
+from finance_agent.agents.profile import ProfileAgent
 from finance_agent.agents.data_fetch import DataFetchAgent
 from finance_agent.agents.stock_analysis import StockAnalysisAgent
 from finance_agent.agents.asset_allocation import AssetAllocationAgent
@@ -169,7 +166,9 @@ class AdvisorSystem:
         self.supervisor = SupervisorAgent(
             shared_memory=self.shared_memory,
         )
-        self.finance_slots_extractor = FinanceSlotsExtractor()
+        self.finance_slots_extractor = ProfileAgent(
+            shared_memory=self.shared_memory,
+        )
         self.data_fetch_agent = DataFetchAgent(
             shared_memory=self.shared_memory,
         )
