@@ -10,9 +10,6 @@
 
 每只股票的数据获取有独立的超时保护，不会因为单只股票
 卡住而阻塞整个用户请求。
-
-当 BaoStock 无法返回某些基本面/财务数据时，自动用千帆搜索
-从公开来源获取兜底数据。
 """
 
 from __future__ import annotations
@@ -23,18 +20,16 @@ import time
 from typing import Any, Dict, List
 
 from finance_agent.agents.base import BaseFinanceAgent
-from finance_agent.tools.stock_data import (
+from finance_agent.tools.fundamental import (
     get_stock_basic_info,
     get_financial_indicators,
     get_stock_history,
     get_stock_realtime_quote,
 )
-from finance_agent.tools.qianfan_search import QianfanStockSearch
 
 # 单只股票数据获取的总超时（秒）。BaoStock 的 TCP 超时为 15s，
-# 一个 stock 最多做 4 次远端查询（basic + quote + indicators + history），
-# 加上千帆兜底搜索的额外时间。
-_PER_STOCK_TIMEOUT = 120
+# 一个 stock 最多做 4 次远端查询（basic + quote + indicators + history）。
+_PER_STOCK_TIMEOUT = 90
 
 _DATA_FETCH_PROMPT = """你是金融数据获取专家。
 
@@ -92,14 +87,6 @@ class DataFetchAgent(BaseFinanceAgent):
 
     def __init__(self, shared_memory=None, checkpointer=None):
         super().__init__(shared_memory=shared_memory, checkpointer=checkpointer)
-        self._qianfan: QianfanStockSearch | None = None
-
-    @property
-    def qianfan(self) -> QianfanStockSearch:
-        """懒初始化千帆搜索实例。"""
-        if self._qianfan is None:
-            self._qianfan = QianfanStockSearch()
-        return self._qianfan
 
     def _get_tools(self) -> list:
         return [
@@ -118,75 +105,6 @@ class DataFetchAgent(BaseFinanceAgent):
         if not isinstance(result, dict):
             return True
         return "error" not in result
-
-    @staticmethod
-    def _missing_indicator_fields(data: dict[str, Any]) -> list[str]:
-        """检查财务指标字典中哪些关键字段缺失或为零。"""
-        if not isinstance(data, dict) or "error" in data:
-            # 全部缺失
-            return [
-                "roe", "net_profit_margin", "gross_margin",
-                "net_profit_growth", "total_asset_growth", "debt_ratio",
-                "current_ratio", "quick_ratio", "eps", "net_profit",
-                "pe", "pb",
-            ]
-        missing = []
-        for field in [
-            "roe", "net_profit_margin", "gross_margin",
-            "net_profit_growth", "total_asset_growth", "debt_ratio",
-            "current_ratio", "quick_ratio", "eps", "net_profit",
-        ]:
-            val = data.get(field)
-            if val is None or val == 0:
-                missing.append(field)
-        # PE/PB 来自 quote，检查 quote 中的值
-        return missing
-
-    @staticmethod
-    def _missing_quote_fields(data: dict[str, Any]) -> list[str]:
-        """检查行情数据中哪些关键字段缺失。"""
-        if not isinstance(data, dict) or "error" in data:
-            return ["pe", "pb", "price", "change_pct"]
-        missing = []
-        for field in ["pe", "pb"]:
-            val = data.get(field)
-            if val is None or val == 0:
-                missing.append(field)
-        return missing
-
-    @staticmethod
-    def _merge_fallback(primary: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
-        """将千帆兜底数据合并到主数据中，不覆盖已有的有效值。"""
-        if not isinstance(fallback, dict) or "error" in fallback:
-            return primary
-        merged = dict(primary)
-        for key, val in fallback.items():
-            if key in ("code", "source", "error", "source_urls"):
-                continue
-            existing = merged.get(key)
-            if existing is None or existing == 0 or existing == "":
-                merged[key] = val
-        # 标记使用了兜底数据
-        if fallback.get("source") == "qianfan_fallback":
-            merged["fallback_source"] = "qianfan_fallback"
-            merged.setdefault("fallback_fields", [])
-            if isinstance(merged["fallback_fields"], list):
-                for key in fallback:
-                    if key not in ("code", "source", "error", "source_urls", "date", "name", "industry"):
-                        if key not in merged["fallback_fields"] and fallback.get(key) is not None:
-                            merged["fallback_fields"].append(key)
-            merged["fallback_source_urls"] = fallback.get("source_urls", [])
-        return merged
-
-    def _qianfan_fallback_for_stock(self, code: str, missing_fields: list[str]) -> dict[str, Any]:
-        """为单只股票从千帆搜索获取兜底数据。"""
-        try:
-            from finance_agent.config import QIANFAN_API_KEY
-            if not QIANFAN_API_KEY:
-                return {"error": "未配置 QIANFAN_API_KEY", "source": "qianfan_fallback", "code": code}
-            return self.qianfan.search_financial_fallback(code, missing_fields)
-        except Exception as exc:
-            return {"error": f"千帆兜底查询失败: {exc}", "source": "qianfan_fallback", "code": code}
 
     def handle_single_stock(self, code: str) -> dict[str, Any]:
         """获取单只股票的全部金融数据并写入共享内存。
@@ -208,7 +126,7 @@ class DataFetchAgent(BaseFinanceAgent):
         def _remaining() -> float:
             return max(5.0, deadline - time.monotonic())
 
-        # 基本信息 — 如果 BaoStock 失败，用千帆兜底名称/行业
+        # 基本信息
         try:
             remaining = _remaining()
             raw, err = _invoke_with_timeout(
@@ -217,10 +135,6 @@ class DataFetchAgent(BaseFinanceAgent):
             if err is not None:
                 raise err
             data = json.loads(raw) if isinstance(raw, str) else raw
-            if not self._has_data(data):
-                # BaoStock basic_info 失败，尝试千帆兜底
-                fb = self._qianfan_fallback_for_stock(code, ["name", "industry"])
-                data = self._merge_fallback(data, fb)
             entry["basic_info"] = data
             if self.shared_memory and isinstance(data, dict) and "error" not in data:
                 self.shared_memory.publish_fact(
@@ -231,7 +145,7 @@ class DataFetchAgent(BaseFinanceAgent):
         except Exception as exc:
             entry["basic_info_error"] = str(exc)
 
-        # 实时行情 — BaoStock 失败用千帆兜底 PE/PB
+        # 实时行情
         try:
             remaining = _remaining()
             raw, err = _invoke_with_timeout(
@@ -240,13 +154,6 @@ class DataFetchAgent(BaseFinanceAgent):
             if err is not None:
                 raise err
             data = json.loads(raw) if isinstance(raw, str) else raw
-            if not self._has_data(data):
-                fb = self._qianfan_fallback_for_stock(code, ["pe", "pb", "price"])
-                data = self._merge_fallback(data, fb)
-            elif self._missing_quote_fields(data):
-                missing = self._missing_quote_fields(data)
-                fb = self._qianfan_fallback_for_stock(code, missing)
-                data = self._merge_fallback(data, fb)
             entry["quote"] = data
             if self.shared_memory and isinstance(data, dict) and "error" not in data:
                 self.shared_memory.publish_fact(
@@ -257,7 +164,7 @@ class DataFetchAgent(BaseFinanceAgent):
         except Exception as exc:
             entry["quote_error"] = str(exc)
 
-        # 财务指标 — BaoStock 失败或缺失用千帆兜底
+        # 财务指标
         try:
             remaining = _remaining()
             raw, err = _invoke_with_timeout(
@@ -266,15 +173,6 @@ class DataFetchAgent(BaseFinanceAgent):
             if err is not None:
                 raise err
             data = json.loads(raw) if isinstance(raw, str) else raw
-            if not self._has_data(data):
-                # 全部缺失，搜索所有字段
-                fb = self._qianfan_fallback_for_stock(code, [])
-                data = self._merge_fallback(data, fb)
-            else:
-                missing = self._missing_indicator_fields(data)
-                if missing:
-                    fb = self._qianfan_fallback_for_stock(code, missing)
-                    data = self._merge_fallback(data, fb)
             entry["indicators"] = data
             if self.shared_memory and isinstance(data, dict) and "error" not in data:
                 self.shared_memory.publish_fact(

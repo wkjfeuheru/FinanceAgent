@@ -20,7 +20,7 @@ from langchain_core.tools import tool
 
 from finance_agent.agents.base import BaseFinanceAgent
 from finance_agent.config import get_model_for_agent, safe_parse_json
-from finance_agent.tools.technical_indicators import compute_all_indicators
+from finance_agent.tools.technical import compute_all_indicators
 
 
 def _safe_score(value: Any, default: float = 50.0) -> float:
@@ -30,6 +30,68 @@ def _safe_score(value: Any, default: float = 50.0) -> float:
     except (TypeError, ValueError):
         return default
     return max(0.0, min(100.0, score))
+
+
+# 技术面关键词 → 标准指标名映射（用于确定性兜底，避免 LLM 漏调工具）
+# 英文关键词用 \b 单词边界匹配，避免 "ma" 误匹配 "macd" 等子串问题
+_TECH_KEYWORD_PAIRS: list[tuple[str, str]] = [
+    # 具体指标名
+    ("macd", "MACD"),
+    ("kdj", "KDJ"),
+    ("rsi", "RSI"),
+    ("boll", "BOLL"),
+    ("布林", "BOLL"),
+    ("威廉", "WR"),
+    ("均线", "MA"),
+    # 通用技术面词（无具体指标，应计算全部）
+    ("技术面", ""),
+    ("技术指标", ""),
+    ("走势", ""),
+    ("形态", ""),
+    ("趋势", ""),
+    ("买卖信号", ""),
+    ("超买", ""),
+    ("超卖", ""),
+    ("k线", ""),
+    ("K线", ""),
+]
+
+
+def _detect_technical_intent(user_message: str) -> list[str]:
+    """从用户消息中检测是否包含技术面分析需求，返回请求的指标名列表。
+
+    若仅命中通用技术面词（如"技术面/走势"）而无具体指标名，返回 [""] 表示
+    需要技术面分析但未指定具体指标（应计算全部默认指标）。
+    完全未命中则返回空列表。
+    """
+    import re as _re
+    if not user_message:
+        return []
+    specific: list[str] = []
+    general_hit = False
+
+    for keyword, standard in _TECH_KEYWORD_PAIRS:
+        # 英文关键词用 ASCII 字母边界匹配（避免 "ma" 误匹配 "macd"），
+        # 同时支持中英文混排（如"的MACD指标"）。
+        if keyword.isascii():
+            pattern = (
+                r"(?<![a-zA-Z])" + _re.escape(keyword) + r"(?![a-zA-Z])"
+            )
+            found = bool(_re.search(pattern, user_message, _re.IGNORECASE))
+        else:
+            found = keyword in user_message
+        if found:
+            if standard:
+                if standard not in specific:
+                    specific.append(standard)
+            else:
+                general_hit = True
+
+    if specific:
+        return specific
+    if general_hit:
+        return [""]  # 需要技术面分析但未指定具体指标
+    return []
 
 
 _FUNDAMENTAL_ANALYSIS_PROMPT = """你是金融基本面分析专家。
@@ -414,6 +476,19 @@ class StockAnalysisAgent(BaseFinanceAgent):
                     if isinstance(parsed, dict) and "error" not in parsed:
                         technical_json = parsed
 
+        # 确定性兜底：若用户明确询问技术面指标（如 MACD/KDJ）但 ReAct Agent 未调用
+        # analyze_technicals 工具，则直接调用工具计算，避免 LLM 漏调导致"无法给出分析"。
+        tech_intent = _detect_technical_intent(user_message)
+        if tech_intent and not technical_json:
+            requested = [t for t in tech_intent if t] or None
+            fallback_tech = self._direct_technical_analysis(code, requested)
+            if fallback_tech is not None:
+                technical_json = fallback_tech
+                # 覆盖 ReAct Agent 的"无法分析"文本，改用工具结果解读
+                final_response = self._summarize_technical_result(
+                    fallback_tech, requested, basic_info, code,
+                )
+
         # 构建返回 dict
         entry: Dict[str, Any] = {"code": code}
 
@@ -467,6 +542,112 @@ class StockAnalysisAgent(BaseFinanceAgent):
             )
 
         return entry
+
+    def _direct_technical_analysis(
+        self,
+        code: str,
+        indicators: list[str] | None,
+    ) -> dict[str, Any] | None:
+        """确定性兜底：直接从共享内存取K线数据并计算技术指标。
+
+        当 ReAct Agent 未调用 analyze_technicals 但用户明确询问技术面时使用。
+        返回与 analyze_technicals 工具一致的 dict（含 summary），失败返回 None。
+        """
+        if not self.shared_memory:
+            return None
+        history = self.shared_memory.query(f"stock_history_{code}", {})
+        if not history or "error" in history:
+            return None
+        data_points = history.get("data")
+        if not isinstance(data_points, list) or len(data_points) < 30:
+            return None
+        try:
+            high = [float(d["high"]) for d in data_points]
+            low = [float(d["low"]) for d in data_points]
+            close = [float(d["close"]) for d in data_points]
+        except (KeyError, ValueError, TypeError):
+            return None
+        try:
+            return compute_all_indicators(high, low, close, indicators)
+        except Exception:
+            return None
+
+    def _summarize_technical_result(
+        self,
+        tech_result: dict[str, Any],
+        requested: list[str] | None,
+        basic_info: Dict[str, Any],
+        code: str,
+    ) -> str:
+        """根据技术指标计算结果生成简明文字解读，用于覆盖 ReAct 的"无法分析"回复。"""
+        name = basic_info.get("name", code) if isinstance(basic_info, dict) else code
+        summary_block = tech_result.get("summary", {}) if isinstance(tech_result, dict) else {}
+        trend = summary_block.get("trend", "震荡") if isinstance(summary_block, dict) else "震荡"
+        signals = summary_block.get("signals", []) if isinstance(summary_block, dict) else []
+        risks = summary_block.get("risks", []) if isinstance(summary_block, dict) else []
+
+        parts: list[str] = [f"已基于K线数据计算 {name}（{code}）的技术指标。"]
+        parts.append(f"综合趋势：{trend}。")
+
+        indicator_keys = requested or ["MACD", "KDJ", "RSI", "BOLL", "MA", "WR"]
+        for key in indicator_keys:
+            ind = tech_result.get(key) if isinstance(tech_result, dict) else None
+            if not isinstance(ind, dict):
+                continue
+            if key == "MACD":
+                latest = ind.get("latest", {})
+                parts.append(
+                    f"MACD：DIF {latest.get('DIF', '暂无')}，"
+                    f"DEA {latest.get('DEA', '暂无')}，"
+                    f"柱状线 {latest.get('histogram', '暂无')}；"
+                    f"信号 {ind.get('signal') or '无明确信号'}，"
+                    f"趋势 {ind.get('trend', '震荡')}"
+                    + (f"，{ind.get('divergence')}" if ind.get("divergence") else "")
+                )
+            elif key == "KDJ":
+                latest = ind.get("latest", {})
+                parts.append(
+                    f"KDJ：K {latest.get('K', '暂无')}，"
+                    f"D {latest.get('D', '暂无')}，"
+                    f"J {latest.get('J', '暂无')}；"
+                    f"信号 {ind.get('signal') or '无明确信号'}，"
+                    f"区间 {ind.get('zone', '正常')}"
+                )
+            elif key == "RSI":
+                latest = ind.get("latest", {})
+                zones = ind.get("zones", {}) or {}
+                zone_desc = "、".join(f"{k}{v}" for k, v in zones.items()) or "正常"
+                parts.append(
+                    f"RSI：" + "，".join(f"{k}={v}" for k, v in latest.items()) + f"；区间 {zone_desc}"
+                )
+            elif key == "BOLL":
+                latest = ind.get("latest", {})
+                parts.append(
+                    f"BOLL：MID {latest.get('MID', '暂无')}，"
+                    f"UPPER {latest.get('UPPER', '暂无')}，"
+                    f"LOWER {latest.get('LOWER', '暂无')}；"
+                    f"带宽 {ind.get('bandwidth', '暂无')}，位置 {ind.get('position', '轨内')}"
+                )
+            elif key == "MA":
+                latest = ind.get("latest", {})
+                parts.append(
+                    f"均线：" + "，".join(f"{k}={v}" for k, v in latest.items())
+                    + f"；{ind.get('position', '')}"
+                )
+            elif key == "WR":
+                latest = ind.get("latest", {})
+                zones = ind.get("zones", {}) or {}
+                zone_desc = "、".join(f"{k}{v}" for k, v in zones.items()) or "正常"
+                parts.append(
+                    f"WR：" + "，".join(f"{k}={v}" for k, v in latest.items()) + f"；区间 {zone_desc}"
+                )
+
+        if signals:
+            parts.append("看多信号：" + "、".join(signals))
+        if risks:
+            parts.append("风险信号：" + "、".join(risks))
+
+        return " ".join(parts)
 
     def _fallback_analyze(
         self,
