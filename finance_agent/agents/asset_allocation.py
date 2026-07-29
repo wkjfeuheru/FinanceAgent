@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List
 
-from finance_agent.agents.base import BaseFinanceAgent
+from finance_agent.agents.base import ProceduralAgent
 from finance_agent.tools.allocation import calculate_stock_metrics, optimize_portfolio
 
 
@@ -46,35 +46,23 @@ _ASSET_ALLOCATION_PROMPT = """你是资产配置专家。
 """
 
 
-class AssetAllocationAgent(BaseFinanceAgent):
+class AssetAllocationAgent(ProceduralAgent):
     """资产配置 Agent。"""
 
     agent_name: str = "allocation"
-
-    def _get_tools(self) -> list:
-        return [calculate_stock_metrics, optimize_portfolio]
-
-    def _get_system_prompt(self) -> str:
-        return _ASSET_ALLOCATION_PROMPT
 
     def build_business_state(self, profile: Dict[str, Any]) -> Dict[str, Any]:
         """校验生成个人配置方案所需的画像字段。"""
         required_fields = {
             "stock_codes": {"prompt": "至少提供2只A股股票名称或六位代码"},
             "risk_preference": {"prompt": "说明风险偏好（保守、稳健、平衡或进取）"},
-            "budget_amount": {"prompt": "说明计划投入的金额"},
-            "holding_period": {"prompt": "说明预计持有期限"},
+            "budget_amount": {"prompt": "说明投资预算金额（元）"},
+            "holding_period": {"prompt": "说明预期持有时间"},
         }
-        stocks = list(profile.get("stock_codes", []) or [])
-        missing: list[str] = []
-        if len(stocks) < 2:
-            missing.append("stock_codes")
-        if not profile.get("risk_preference"):
-            missing.append("risk_preference")
-        if float(profile.get("budget_amount", 0) or 0) <= 0:
-            missing.append("budget_amount")
-        if not profile.get("holding_period"):
-            missing.append("holding_period")
+        missing = [
+            field for field in required_fields
+            if not (profile or {}).get(field)
+        ]
         return {
             "agent": self.agent_name,
             "status": "waiting_for_input" if missing else "ready",
@@ -82,26 +70,48 @@ class AssetAllocationAgent(BaseFinanceAgent):
             "missing_fields": missing,
         }
 
-    def handle(
+    def build_missing_fields_response(self, business_state: Dict[str, Any]) -> str:
+        """根据业务状态一次性生成全部缺失字段的引导语。"""
+        required = business_state.get("required_fields", {}) or {}
+        missing = business_state.get("missing_fields", []) or []
+        prompts = [
+            str(required.get(field, {}).get("prompt", "")).strip()
+            for field in missing
+        ]
+        prompts = [p for p in prompts if p]
+        if not prompts:
+            return "继续执行前，请补充必要的业务信息。"
+        return "继续执行前，请补充以下信息：\n" + "\n".join(
+            f"- {prompt}" for prompt in prompts
+        )
+
+    def _get_tools(self) -> list:
+        return [calculate_stock_metrics, optimize_portfolio]
+
+    def _get_system_prompt(self) -> str:
+        return _ASSET_ALLOCATION_PROMPT
+
+    def handle(self, message: str = "", **_: Any) -> str:
+        """生成 MPT 配置报告。保留兼容旧调用点。"""
+        return self._generate_allocation_report({}, message)
+
+    def _generate_allocation_report(
         self,
-        message: str,
-        customer_id: str = "",
-        chat_history: List[Dict[str, str]] | None = None,
-        thread_id: str | None = None,
-        memory_context: str = "",
+        user_profile: Dict[str, Any],
+        message: str = "",
     ) -> str:
         """执行MPT资产配置并生成建议。"""
         if not self.shared_memory:
             return "资产配置需要共享内存支持。"
 
         # 从共享内存读取用户画像
-        user_profile = self.shared_memory.query("user_profile", {})
-        if not isinstance(user_profile, dict):
-            user_profile = {}
+        profile = self.shared_memory.query("user_profile", {})
+        if not isinstance(profile, dict):
+            profile = {}
 
-        stock_codes = user_profile.get("stock_codes", [])
-        risk_preference = user_profile.get("risk_preference", "R3 中风险")
-        budget = float(user_profile.get("budget_amount", 0) or 0)
+        stock_codes = profile.get("stock_codes", [])
+        risk_preference = profile.get("risk_preference", "R3 中风险")
+        budget = float(profile.get("budget_amount", 0) or 0)
 
         stock_names: dict[str, str] = {}
         for code in stock_codes[:5]:
@@ -129,7 +139,6 @@ class AssetAllocationAgent(BaseFinanceAgent):
                 history_list.append(hist)
 
         if len(history_list) < 2:
-            # 收集失败的股票和错误原因
             failures = []
             for code in stock_codes[:5]:
                 hist = self.shared_memory.query(f"stock_history_{code}", {})
@@ -180,35 +189,25 @@ class AssetAllocationAgent(BaseFinanceAgent):
         allocation["stock_names"] = stock_names
         self.shared_memory.publish_fact("allocation_result", allocation, source=self.agent_name)
 
-        # 计算接口继续使用纯代码；展示阶段改为“名称（代码）”。
-        stock_codes_str = "、".join(
-            stock_label(code) for code in stock_codes_str.split(",") if code
-        )
-
         # 生成配置建议报告
         parts = ["## 资产配置建议", ""]
-
-        # 用户画像
         parts.append(f"**风险偏好**：{risk_preference}")
         if budget > 0:
             parts.append(f"**投资预算**：{budget:,.0f} 元")
         parts.append(f"**配置标的**：{stock_codes_str}")
         parts.append("")
 
-        # 配置明细
         parts.append("### 配置权重")
         weights = allocation.get("weights", {})
         amounts = allocation.get("allocation_amounts", {})
         for code, weight in weights.items():
             pct = float(weight) * 100
-            line = f"- **{code}**：{pct:.1f}%"
+            line = f"- {stock_label(code)}：{pct:.1f}%"
             if code in amounts:
                 line += f"（{float(amounts[code]):,.0f} 元）"
-            line = line.replace(f"**{code}**", f"**{stock_label(code)}**")
             parts.append(line)
         parts.append("")
 
-        # 预期指标
         parts.append("### 预期表现")
         exp_ret = allocation.get("expected_return", 0)
         exp_vol = allocation.get("expected_volatility", 0)
@@ -220,7 +219,6 @@ class AssetAllocationAgent(BaseFinanceAgent):
         parts.append(f"- 优化目标：{'最小方差' if target == 'min_variance' else '最大夏普比率'}")
         parts.append("")
 
-        # 各股票指标
         parts.append("### 标的指标")
         ann_returns = metrics.get("annual_returns", {})
         ann_vols = metrics.get("annual_volatilities", {})
@@ -233,7 +231,6 @@ class AssetAllocationAgent(BaseFinanceAgent):
             )
         parts.append("")
 
-        # 免责声明
         parts.append("### 风险提示")
         parts.append("投资有风险，过往业绩不代表未来收益，请谨慎决策。")
         parts.append("以上配置基于历史数据计算，市场环境变化可能影响实际表现。")

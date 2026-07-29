@@ -18,7 +18,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import tool
 
-from finance_agent.agents.base import BaseFinanceAgent
+from finance_agent.agents.base import ReActAgent
 from finance_agent.config import get_model_for_agent, safe_parse_json
 from finance_agent.tools.technical import compute_all_indicators
 
@@ -176,10 +176,12 @@ _STOCK_ANALYSIS_SYSTEM_PROMPT = """你是股票综合分析专家，拥有基本
 - 使用正式、专业的书面中文"""
 
 
-class StockAnalysisAgent(BaseFinanceAgent):
+class StockAnalysisAgent(ReActAgent):
     """股票综合分析 Agent —— 基本面 + 技术面，ReAct 自主决策。"""
 
     agent_name: str = "stock_analysis"
+    max_reasoning_steps: int = 6
+    per_invoke_timeout: float = 60.0
 
     def __init__(self, shared_memory=None, checkpointer=None):
         super().__init__(shared_memory=shared_memory, checkpointer=checkpointer)

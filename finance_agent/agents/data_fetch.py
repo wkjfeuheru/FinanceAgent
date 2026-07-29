@@ -19,7 +19,7 @@ import threading
 import time
 from typing import Any, Dict, List
 
-from finance_agent.agents.base import BaseFinanceAgent
+from finance_agent.agents.base import ProceduralAgent
 from finance_agent.tools.fundamental import (
     get_stock_basic_info,
     get_financial_indicators,
@@ -80,13 +80,14 @@ def _invoke_with_timeout(tool, args: dict, timeout: float) -> tuple[Any, Excepti
     return None, TimeoutError(f"工具 {getattr(tool, 'name', tool)} 超时（{timeout:.0f}s）")
 
 
-class DataFetchAgent(BaseFinanceAgent):
+class DataFetchAgent(ProceduralAgent):
     """金融数据获取 Agent。"""
 
     agent_name: str = "data_fetch"
 
     def __init__(self, shared_memory=None, checkpointer=None):
-        super().__init__(shared_memory=shared_memory, checkpointer=checkpointer)
+        super().__init__(shared_memory=shared_memory)
+        self._checkpointer = checkpointer
 
     def _get_tools(self) -> list:
         return [

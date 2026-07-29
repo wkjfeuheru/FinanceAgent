@@ -18,7 +18,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import BaseTool
 
-from finance_agent.agents.base import BaseFinanceAgent
+from finance_agent.agents.base import ProceduralAgent
 from finance_agent.config import (
     DEEPSEEK_API_KEY,
     DEEPSEEK_INTENT_MAX_RETRIES,
@@ -243,13 +243,14 @@ def requires_slot_extraction(intent_plan: Dict[str, Any]) -> bool:
     )
 
 
-class SupervisorAgent(BaseFinanceAgent):
+class SupervisorAgent(ProceduralAgent):
     """监督者 Agent —— 根据问题生成最小必要任务计划。"""
 
     agent_name: str = "supervisor"
 
     def __init__(self, shared_memory=None, checkpointer=None):
-        super().__init__(shared_memory=shared_memory, checkpointer=checkpointer)
+        super().__init__(shared_memory=shared_memory)
+        self._checkpointer = checkpointer
         self._intent_classifier = None
 
     def _get_tools(self) -> list:

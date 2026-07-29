@@ -167,20 +167,20 @@ class AdvisorSystem:
             checkpointer=self.checkpointer,
         )
         self.supervisor = SupervisorAgent(
-            shared_memory=self.shared_memory, checkpointer=self.checkpointer,
+            shared_memory=self.shared_memory,
         )
         self.finance_slots_extractor = FinanceSlotsExtractor()
         self.data_fetch_agent = DataFetchAgent(
-            shared_memory=self.shared_memory, checkpointer=self.checkpointer,
+            shared_memory=self.shared_memory,
         )
         self.stock_agent = StockAnalysisAgent(
             shared_memory=self.shared_memory, checkpointer=self.checkpointer,
         )
         self.allocation_agent = AssetAllocationAgent(
-            shared_memory=self.shared_memory, checkpointer=self.checkpointer,
+            shared_memory=self.shared_memory,
         )
         self.compliance_agent = ComplianceAgent(
-            shared_memory=self.shared_memory, checkpointer=self.checkpointer,
+            shared_memory=self.shared_memory,
         )
         self.stock_search = MarketSearch()
         self._session_counter: Dict[str, int] = {}

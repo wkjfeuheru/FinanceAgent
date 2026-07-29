@@ -4,20 +4,14 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from finance_agent.agents.base import BaseFinanceAgent
+from finance_agent.agents.base import ProceduralAgent
 from finance_agent.tools.compliance import check_sensitive_words
 
 
-class ComplianceAgent(BaseFinanceAgent):
+class ComplianceAgent(ProceduralAgent):
     """只检查回复中的敏感词和投资表述。"""
 
     agent_name: str = "compliance"
-
-    def _get_tools(self) -> list:
-        return []
-
-    def _get_system_prompt(self) -> str:
-        return "检查投顾回复中的敏感词，并给出需要向用户补充询问的信息。"
 
     def review(
         self,
