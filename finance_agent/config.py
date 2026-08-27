@@ -67,6 +67,11 @@ STOCK_CACHE_DIR = os.getenv("STOCK_CACHE_DIR", ".cache/finance_agent")
 STOCK_CACHE_TTL = int(os.getenv("STOCK_CACHE_TTL", "3600"))
 BAOSTOCK_SOCKET_TIMEOUT = float(os.getenv("BAOSTOCK_SOCKET_TIMEOUT", "15"))
 
+# Tushare MCP 远程数据源（streamable HTTP 协议）
+# 官方托管端点，token 通过 URL 参数携带；未配置时 Tushare 数据源不启用
+TUSHARE_MCP_URL = os.getenv("TUSHARE_MCP_URL", "").strip()
+TUSHARE_MCP_TIMEOUT = float(os.getenv("TUSHARE_MCP_TIMEOUT", "30"))
+
 # DashScope 联网搜索已移除，板块/行业市场资料改用东方财富/新浪财经直接抓取
 DEEPSEEK_INTENT_MODEL = os.getenv("DEEPSEEK_INTENT_MODEL", "deepseek-chat").strip()
 DEEPSEEK_INTENT_TIMEOUT = float(os.getenv("DEEPSEEK_INTENT_TIMEOUT", "30"))
