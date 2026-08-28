@@ -15,6 +15,29 @@ class ChatRequest(BaseModel):
     conversation_id: str = Field(default="", description="当前会话ID")
 
 
+class DebateSummary(BaseModel):
+    """辩论摘要，可按需返回部分字段。"""
+    summary: str | None = None
+    rationale: str | None = None
+    bull_arguments: list[str] = Field(default_factory=list)
+    bear_arguments: list[str] = Field(default_factory=list)
+    disagreements: list[str] = Field(default_factory=list)
+    convergences: list[str] = Field(default_factory=list)
+
+
+class AllocationResult(BaseModel):
+    """资产配置结果，保留未知字段以兼容历史结果。"""
+    weights: dict[str, float] = Field(default_factory=dict)
+    expected_return: float | None = None
+    expected_volatility: float | None = None
+    sharpe_ratio: float | None = None
+    allocation_amounts: dict[str, float] = Field(default_factory=dict)
+    debate: DebateSummary | None = None
+
+    class Config:
+        extra = "allow"
+
+
 class ChatResponse(BaseModel):
     """对话响应。"""
     response: str = Field(..., description="投顾回复")
@@ -22,8 +45,12 @@ class ChatResponse(BaseModel):
     user_profile: dict[str, Any] = Field(default_factory=dict, description="用户画像")
     stock_data: dict[str, Any] = Field(default_factory=dict, description="股票数据")
     fundamental_analysis: dict[str, Any] = Field(default_factory=dict, description="基本面分析")
-    allocation_result: dict[str, Any] = Field(default_factory=dict, description="资产配置结果")
+    stock_analysis: dict[str, Any] = Field(default_factory=dict, description="股票综合分析")
+    technical_analysis: dict[str, Any] = Field(default_factory=dict, description="技术面分析")
+    allocation_result: AllocationResult = Field(default_factory=AllocationResult, description="资产配置结果")
+    debate_result: dict[str, Any] = Field(default_factory=dict, description="辩论结果")
     compliance_result: dict[str, Any] = Field(default_factory=dict, description="合规审查结果")
+    product_analysis: dict[str, Any] | None = Field(default=None, description="产品解读结果")
     conversation_id: str = ""
 
 

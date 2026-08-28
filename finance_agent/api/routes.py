@@ -1,4 +1,4 @@
-"""API 路由定义。"""
+﻿"""API 路由定义。"""
 from __future__ import annotations
 
 import json
@@ -20,8 +20,8 @@ from finance_agent.api.schemas import (
     RegisterResponse,
 )
 from finance_agent.api.sse import sse_stream
-from finance_agent.tools.auth import get_user_store
-from finance_agent.core.orchestrator import AdvisorSystem
+from finance_agent.data.auth import get_user_store
+from finance_agent.orchestrator.orchestrator import AdvisorSystem
 
 
 router = APIRouter()
@@ -213,7 +213,7 @@ async def get_profile(customer_id: str) -> ProfileResponse:
 @router.post("/api/conversations/{customer_id}")
 async def create_conversation(customer_id: str) -> dict[str, Any]:
     """创建一个新对话。"""
-    from finance_agent.core.database import get_database
+    from finance_agent.orchestrator.database import get_database
     return get_database().create_conversation(customer_id)
 
 
@@ -230,7 +230,7 @@ async def get_conversation_messages(
     customer_id: str, conversation_id: str, limit: int = 100,
 ) -> dict[str, Any]:
     """读取指定对话的消息（从 finance_agent.db 查询）。"""
-    from finance_agent.core.database import get_database
+    from finance_agent.orchestrator.database import get_database
     # 确认对话属于该 customer
     conv = get_database().get_conversation(conversation_id, customer_id)
     if not conv:
@@ -305,8 +305,6 @@ async def clear_records(
                 ):
                     continue
                 cleared += client.delete(key)
-            # 同时重置共享内存
-            system.shared_memory.reset()
             cleared += system.clear_profile()
 
         msg = (

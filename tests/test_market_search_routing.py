@@ -1,4 +1,4 @@
-from finance_agent.core.orchestrator import AdvisorSystem
+﻿from finance_agent.orchestrator.orchestrator import AdvisorSystem
 
 
 def make_state(message, thread_id):

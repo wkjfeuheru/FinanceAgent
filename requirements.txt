@@ -14,3 +14,5 @@ numpy
 scipy
 pydantic
 requests
+autogen-agentchat==0.4.9
+pyautogen==0.2.36

@@ -1,7 +1,7 @@
 """
 1. 使用 LangGraph 的 create_react_agent 实现显式多步推理
 2. 每个 Agent 拥有独立的 MemorySaver 支持会话内状态持久化
-3. 集成 SharedWorkingMemory 实现 Agent 间信息共享
+3. 通过 AdvisorState 显式传递 Agent 间信息
 4. 支持流式输出接口（astream_events）
 5. 内置自我反思（Reflection）循环
 """
@@ -17,7 +17,6 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
 
 from finance_agent.config import get_model_for_agent
-from finance_agent.core.shared_state import SharedWorkingMemory
 from finance_agent.middleware import content_filter, model_retry
 
 
@@ -39,8 +38,8 @@ class ProceduralAgent(AgentProtocol):
 
     agent_name: str = "procedural"
 
-    def __init__(self, shared_memory=None):
-        self.shared_memory = shared_memory
+    def __init__(self, **_: Any):
+        pass
 
     def invoke(self, state: Dict[str, Any]) -> Dict[str, Any]:
         return state
@@ -51,17 +50,8 @@ class ProceduralAgent(AgentProtocol):
         customer_id: str = "",
         memory_context: str = "",
     ) -> str:
-        """构建发送给 Agent 的有效消息，自动注入共享工作内存中的发现。"""
+        """构建发送给 Agent 的有效消息。"""
         parts: list[str] = []
-
-        if self.shared_memory and self.shared_memory.facts:
-            facts_text = self.shared_memory.format_facts_for_prompt()
-            if facts_text:
-                parts.append(
-                    f"[共享上下文]\n"
-                    f"以下是当前任务的内部分析材料，请直接回答用户问题，"
-                    f"不要向用户说明材料来源：\n\n{facts_text}"
-                )
 
         if customer_id:
             parts.append(f"当前客户号：{customer_id}")
@@ -87,8 +77,7 @@ class ReActAgent(AgentProtocol):
     tool_call_same_param_limit: int = 3
     tool_call_history_window: int = 6
 
-    def __init__(self, shared_memory=None, checkpointer=None):
-        self.shared_memory = shared_memory
+    def __init__(self, checkpointer=None):
         self._agent: CompiledStateGraph | None = None
         self._memory_saver = checkpointer
 
@@ -228,10 +217,8 @@ class BaseFinanceAgent:
 
     def __init__(
         self,
-        shared_memory: SharedWorkingMemory | None = None,
         checkpointer: BaseCheckpointSaver | None = None,
     ):
-        self.shared_memory = shared_memory
         # 优先使用外部传入的持久化 checkpointer（如 SqliteSaver），
         # 未传入时回退到内存 MemorySaver（开发/测试兼容）。
         self._memory_saver: BaseCheckpointSaver = checkpointer or MemorySaver()
@@ -293,23 +280,10 @@ class BaseFinanceAgent:
         customer_id: str = "",
         memory_context: str = "",
     ) -> str:
-        """构建发送给 Agent 的有效消息，自动注入共享工作内存中的发现。
-
-        核心增强：Agent 在执行时能看到其他 Agent 已确认的事实（通过 SharedWorkingMemory）。
-        产品咨询 Agent 无需自己查询账户——共享内存中已有其他 Agent 放入的持仓/余额数据。
-        """
+        """构建发送给 Agent 的有效消息。"""
         parts = []
 
-        # 1. 注入共享工作内存中的事实（如持仓、余额等）
-        if self.shared_memory and self.shared_memory.facts:
-            facts_text = self.shared_memory.format_facts_for_prompt()
-            if facts_text:
-                parts.append(f"""[共享上下文]
-以下是当前任务的内部分析材料，请直接回答用户问题，不要向用户说明材料来源：
-
-{facts_text}""")
-
-        # 2. 客户号
+        # 1. 客户号
         if customer_id:
             parts.append(f"当前客户号：{customer_id}")
 
@@ -366,9 +340,6 @@ class BaseFinanceAgent:
             result = self.agent.invoke({"messages": messages})
 
         response = result["messages"][-1].content if result.get("messages") else "暂时无法生成回复。"
-
-        # 检查并发布发现到共享工作内存
-        self._maybe_publish_findings(message, response)
 
         return response
 
@@ -427,48 +398,3 @@ class BaseFinanceAgent:
                     "agent": self.agent_name,
                 }
 
-    def _maybe_publish_findings(self, user_message: str, response: str) -> None:
-        """分析 Agent 的回复，将结构化发现发布到共享工作内存。
-
-        这样下游 Agent 可以直接利用已确认的信息，无需重复查询。
-        """
-        if not self.shared_memory:
-            return
-
-        import re
-
-        # 提取 A股代码（6位数字：60xxxx/00xxxx/30xxxx/68xxxx）
-        codes = re.findall(
-            r"(?<!\d)(60\d{4}|00\d{4}|30\d{4}|68\d{4}|8\d{5}|4\d{5})(?!\d)", response
-        )
-        for code in set(codes):
-            self.shared_memory.publish_fact(f"mentioned_stock_{code}", {
-                "code": code,
-                "mentioned_by": self.agent_name,
-            })
-
-        # 提取配置权重（如 30%、0.3）
-        weights = re.findall(r"(\d+(?:\.\d+)?)\s*%", response)
-        for weight in weights:
-            try:
-                value = float(weight) / 100
-                if 0 < value <= 1:
-                    self.shared_memory.publish_fact(
-                        f"mentioned_weight_{self.agent_name}",
-                        {"value": value, "source": self.agent_name},
-                    )
-            except ValueError:
-                pass
-
-        # 提取金额信息
-        amounts = re.findall(r"(\d[\d,]*\.?\d*)\s*(元|万|千)", response)
-        for amount, unit in amounts:
-            try:
-                value = float(amount.replace(",", ""))
-                self.shared_memory.publish_fact(f"mentioned_amount_{self.agent_name}", {
-                    "value": value,
-                    "unit": unit,
-                    "source": self.agent_name,
-                })
-            except ValueError:
-                pass

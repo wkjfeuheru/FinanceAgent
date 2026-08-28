@@ -1,11 +1,11 @@
-"""股票综合分析 Agent。
+﻿"""股票综合分析 Agent。
 
 职责：根据用户输入自主决策，执行基本面分析、技术面分析或两者兼有。
 - 基本面：盈利能力（ROE、净利率、毛利率）、成长性、估值（PE、PB）、财务健康
 - 技术面：MACD、KDJ、RSI、BOLL、MA（均线）、WR（威廉指标）
 
 通过 ReAct Agent 接收近期对话摘要 + 当前问题，自主 tool calling 选择
-分析工具。当无法判断意图时主动追问。分析结果写入共享内存。
+分析工具。当无法判断意图时主动追问。分析结果写入 AdvisorState。
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from langchain_core.tools import tool
 
 from finance_agent.agents.base import ReActAgent
 from finance_agent.config import get_model_for_agent, safe_parse_json
-from finance_agent.tools.technical import compute_all_indicators
+from finance_agent.orchestrator.tools.technical import compute_all_indicators
 
 
 def _safe_score(value: Any, default: float = 50.0) -> float:
@@ -183,10 +183,64 @@ class StockAnalysisAgent(ReActAgent):
     max_reasoning_steps: int = 6
     per_invoke_timeout: float = 60.0
 
-    def __init__(self, shared_memory=None, checkpointer=None):
-        super().__init__(shared_memory=shared_memory, checkpointer=checkpointer)
+    def __init__(self, checkpointer=None):
+        super().__init__(checkpointer=checkpointer)
         # 基本面分析链（保持独立，供 tool 内部复用）
         self._fundamental_chain = None
+        self._current_stock_data: Dict[str, Any] = {}
+
+    # 从 AdvisorState 读取股票数据并执行逐股分析。
+    def invoke(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """从显式状态读取股票并写回综合分析结果。"""
+        import re
+
+        stock_data = state.get("stock_data", {}) or {}
+        user_message = str(state.get("requirement", "") or state.get("user_message", ""))
+        codes = [
+            item.get("code") for item in state.get("resolved_stocks", [])
+            if isinstance(item, dict) and item.get("code")
+        ]
+        if not codes:
+            codes = re.findall(
+                r"(?<!\d)(60\d{4}|00\d{4}|30\d{4}|68\d{4}|8\d{5}|4\d{5})(?!\d)",
+                user_message,
+            )
+        analyses = [
+            self.handle_single_stock(
+                str(code),
+                user_message=user_message,
+                memory_context=str(state.get("memory_context", "")),
+                chat_history=state.get("chat_history"),
+                stock_data=stock_data,
+            )
+            for code in codes[:5]
+        ]
+        state["stock_analysis"] = {item["code"]: item for item in analyses if item.get("code")}
+        state["technical_analysis"] = {
+            item["code"]: item["technical_analysis"]
+            for item in analyses
+            if item.get("code") and item.get("technical_analysis")
+        }
+        content = self._format_analysis_response(analyses)
+        state["agent_response"] = content
+        state.setdefault("intent_results", {})["market_query"] = {
+            "status": "success" if analyses else "degraded",
+            "content": content,
+        }
+        state["intent_results"].setdefault("stock_recommendation", state["intent_results"]["market_query"])
+        return state
+
+    # 将逐股结果整理为总管可合并的文本。
+    def _format_analysis_response(self, analyses: list[Dict[str, Any]]) -> str:
+        if not analyses:
+            return "未识别到需要分析的股票代码。"
+        parts = [f"已完成 {len(analyses)} 只股票的分析："]
+        for item in analyses:
+            parts.append(
+                f"- {item.get('code', '')} 评级：{item.get('rating', '未知')}"
+                f"（{_safe_score(item.get('overall_score'), 0.0):.0f}分）｜{item.get('summary', '')}"
+            )
+        return "\\n".join(parts)
 
     # ── 工具定义（闭包捕获 self，在 _get_tools() 中构造）──
 
@@ -207,18 +261,9 @@ class StockAnalysisAgent(ReActAgent):
             Returns:
                 JSON 格式的结构化分析结果
             """
-            if not agent_self.shared_memory:
-                return json.dumps({
-                    "code": stock_code, "rating": "未知", "overall_score": 50,
-                    "summary": "无共享内存，无法分析",
-                }, ensure_ascii=False)
-
-            indicators = agent_self.shared_memory.query(
-                f"financial_indicator_{stock_code}", {},
-            )
-            basic_info = agent_self.shared_memory.query(
-                f"stock_basic_info_{stock_code}", {},
-            )
+            item = agent_self._current_stock_data.get(stock_code, {})
+            indicators = item.get("indicators", {}) if isinstance(item, dict) else {}
+            basic_info = item.get("basic_info", {}) if isinstance(item, dict) else {}
 
             if not indicators and not basic_info:
                 return json.dumps({
@@ -253,15 +298,8 @@ class StockAnalysisAgent(ReActAgent):
             Returns:
                 JSON 格式的结构化技术面分析结果
             """
-            if not agent_self.shared_memory:
-                return json.dumps({
-                    "error": "无共享内存，无法进行技术面分析",
-                    "code": stock_code,
-                }, ensure_ascii=False)
-
-            history = agent_self.shared_memory.query(
-                f"stock_history_{stock_code}", {},
-            )
+            item = agent_self._current_stock_data.get(stock_code, {})
+            history = item.get("history", {}) if isinstance(item, dict) else {}
             if not history or "error" in history:
                 return json.dumps({
                     "error": "无K线历史数据，无法进行技术面分析",
@@ -417,8 +455,9 @@ class StockAnalysisAgent(ReActAgent):
         user_message: str = "",
         memory_context: str = "",
         chat_history: list[dict] | None = None,
+        stock_data: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
-        """分析单只股票并写入共享内存。
+        """使用显式股票数据分析单只股票。
 
         通过 ReAct Agent 自主决策执行基本面分析、技术面分析或两者。
         结果发布回共享内存。
@@ -428,16 +467,16 @@ class StockAnalysisAgent(ReActAgent):
             user_message: 当前轮用户原始输入（可空，回退为默认提示）
             memory_context: 近期对话摘要等记忆上下文
             chat_history: 原始对话历史（预留）
+            stock_data: 按股票代码索引的 quote/basic_info/indicators/history 数据
 
         Returns:
             结构化分析结果 dict（含可选 technical_analysis 字段）
         """
-        if not self.shared_memory:
-            return {"code": code, "rating": "未知", "summary": "无共享内存"}
-
-        indicators = self.shared_memory.query(f"financial_indicator_{code}", {})
-        basic_info = self.shared_memory.query(f"stock_basic_info_{code}", {})
-        history = self.shared_memory.query(f"stock_history_{code}", {})
+        data_map = stock_data if isinstance(stock_data, dict) else {}
+        item = data_map.get(code, {})
+        indicators = item.get("indicators", {}) if isinstance(item, dict) else {}
+        basic_info = item.get("basic_info", {}) if isinstance(item, dict) else {}
+        history = item.get("history", {}) if isinstance(item, dict) else {}
 
         # 构建上下文
         context = self._build_analysis_context(
@@ -461,7 +500,7 @@ class StockAnalysisAgent(ReActAgent):
             )
         except Exception as exc:
             # 降级：仅基本面分析
-            return self._fallback_analyze(code, indicators, basic_info, str(exc))
+            return self._fallback_analyze(code, indicators, basic_info, item, str(exc))
 
         # 从消息中提取 tool 调用结果
         fundamental_json = None
@@ -483,7 +522,7 @@ class StockAnalysisAgent(ReActAgent):
         tech_intent = _detect_technical_intent(user_message)
         if tech_intent and not technical_json:
             requested = [t for t in tech_intent if t] or None
-            fallback_tech = self._direct_technical_analysis(code, requested)
+            fallback_tech = self._direct_technical_analysis(code, requested, history)
             if fallback_tech is not None:
                 technical_json = fallback_tech
                 # 覆盖 ReAct Agent 的"无法分析"文本，改用工具结果解读
@@ -527,37 +566,25 @@ class StockAnalysisAgent(ReActAgent):
         # 补全展示用字段
         entry["name"] = basic_info.get("name", code) if isinstance(basic_info, dict) else code
         entry["indicators"] = indicators if isinstance(indicators, dict) else {}
-        quote = self.shared_memory.query(f"stock_quote_{code}", {})
+        item = stock_item if isinstance(stock_item, dict) else {}
+        quote = item.get("quote", {}) if isinstance(item, dict) else {}
         entry["quote"] = quote if isinstance(quote, dict) else {}
-        candidate = self.shared_memory.query(f"stock_search_candidate_{code}", {})
+        candidate = item.get("search_candidate", {}) if isinstance(item, dict) else {}
         entry["search_candidate"] = candidate if isinstance(candidate, dict) else {}
-
-        # 写入共享内存
-        self.shared_memory.publish_fact(
-            f"fundamental_analysis_{code}", entry, source=self.agent_name,
-        )
-        if "technical_analysis" in entry:
-            self.shared_memory.publish_fact(
-                f"technical_analysis_{code}",
-                entry["technical_analysis"],
-                source=self.agent_name,
-            )
-
         return entry
 
     def _direct_technical_analysis(
         self,
         code: str,
         indicators: list[str] | None,
+        history: Dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        """确定性兜底：直接从共享内存取K线数据并计算技术指标。
+        """使用显式历史数据计算技术指标，作为确定性兜底。
 
         当 ReAct Agent 未调用 analyze_technicals 但用户明确询问技术面时使用。
         返回与 analyze_technicals 工具一致的 dict（含 summary），失败返回 None。
         """
-        if not self.shared_memory:
-            return None
-        history = self.shared_memory.query(f"stock_history_{code}", {})
+        history = history or {}
         if not history or "error" in history:
             return None
         data_points = history.get("data")
@@ -656,9 +683,10 @@ class StockAnalysisAgent(ReActAgent):
         code: str,
         indicators: Dict[str, Any],
         basic_info: Dict[str, Any],
+        stock_item: Dict[str, Any] | None = None,
         error_msg: str = "",
     ) -> Dict[str, Any]:
-        """ReAct Agent 执行失败时降级为仅基本面分析（兼容旧行为）。"""
+        """ReAct Agent 执行失败时降级为仅基本面分析。"""
         if not indicators and not basic_info:
             result = {
                 "code": code, "rating": "未知", "overall_score": 50,
@@ -681,15 +709,11 @@ class StockAnalysisAgent(ReActAgent):
         result["overall_score"] = _safe_score(result.get("overall_score"))
         result["name"] = basic_info.get("name", code) if isinstance(basic_info, dict) else code
         result["indicators"] = indicators if isinstance(indicators, dict) else {}
-        quote = self.shared_memory.query(f"stock_quote_{code}", {})
+        item = stock_item if isinstance(stock_item, dict) else {}
+        quote = item.get("quote", {}) if isinstance(item, dict) else {}
         result["quote"] = quote if isinstance(quote, dict) else {}
-        candidate = self.shared_memory.query(f"stock_search_candidate_{code}", {})
+        candidate = item.get("search_candidate", {}) if isinstance(item, dict) else {}
         result["search_candidate"] = candidate if isinstance(candidate, dict) else {}
-
-        if self.shared_memory:
-            self.shared_memory.publish_fact(
-                f"fundamental_analysis_{code}", result, source=self.agent_name,
-            )
         return result
 
     def handle(
@@ -701,13 +725,12 @@ class StockAnalysisAgent(ReActAgent):
         memory_context: str = "",
     ) -> str:
         """分析所有关注股票。"""
-        if not self.shared_memory:
-            return "股票分析需要共享内存支持。"
+        import re
 
-        stock_codes: list[str] = []
-        user_profile = self.shared_memory.query("user_profile", {})
-        if isinstance(user_profile, dict):
-            stock_codes = user_profile.get("stock_codes", [])
+        stock_codes = re.findall(
+            r"(?<!\d)(60\d{4}|00\d{4}|30\d{4}|68\d{4}|8\d{5}|4\d{5})(?!\d)",
+            message,
+        )
 
         if not stock_codes:
             return "未识别到需要分析的股票代码。"

@@ -1,9 +1,9 @@
 import pytest
 import uuid
 
-import finance_agent.core.orchestrator as orchestrator_module
-from finance_agent.core.orchestrator import AdvisorSystem
-from finance_agent.tools.finance_slots import FinanceSlotsExtractor
+import finance_agent.orchestrator.orchestrator as orchestrator_module
+from finance_agent.orchestrator.orchestrator import AdvisorSystem
+from finance_agent.orchestrator.tools.finance_slots import FinanceSlotsExtractor
 
 
 def test_advisor_system_exposes_slot_tool_runtime_not_slot_agent():

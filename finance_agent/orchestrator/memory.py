@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import re
@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any
 import redis
 from finance_agent.config import REDIS_MEMORY_TTL_SECONDS, REDIS_URL
-from finance_agent.core.database import get_database
+from finance_agent.orchestrator.database import get_database
 
 
 @dataclass

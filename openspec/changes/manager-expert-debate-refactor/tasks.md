@@ -1,14 +1,14 @@
 ## 1. 基础设施与配置
 
 - [ ] 1.1 在 `requirements.txt` 新增 AutoGen 依赖（`autogen-agentchat`、`pyautogen`），运行 `pip install -r requirements.txt` 验证安装成功且与现有 LangChain/LangGraph 版本不冲突
-- [ ] 1.2 在 `finance_agent/config.py` 新增辩论配置项：`DEBATE_ENABLED`（默认 true）、`DEBATE_MAX_ROUNDS`（默认 2）、`DEBATE_TIMEOUT`（默认 60.0）、`DEBATE_BULL_TEMPERATURE`（0.4）、`DEBATE_BEAR_TEMPERATURE`（0.4）、`DEBATE_SYNTHESIS_TEMPERATURE`（0.1），运行 `python -m compileall -q finance_agent/config.py` 验证编译通过
-- [ ] 1.3 在 `AGENT_TEMPERATURES` 中补充辩论 Agent 温度条目（`debate_bull`、`debate_bear`、`debate_synthesis`），验证 `get_model_for_agent("debate_bull")` 返回正确温度的 DeepSeek 实例
-- [ ] 1.4 在 `finance_agent/config.py` 新增产品库配置项：`PRODUCT_LIBRARY_DB_PATH`（默认 SQLite 路径）、`PRODUCT_ANALYSIS_TEMPERATURE`（0.2），并在 `AGENT_TEMPERATURES` 中补充 `product_analysis` 条目，运行 `python -m compileall -q finance_agent/config.py` 验证通过
+- [x] 1.2 在 `finance_agent/config.py` 新增辩论配置项：`DEBATE_ENABLED`（默认 true）、`DEBATE_MAX_ROUNDS`（默认 2）、`DEBATE_TIMEOUT`（默认 60.0）、`DEBATE_BULL_TEMPERATURE`（0.4）、`DEBATE_BEAR_TEMPERATURE`（0.4）、`DEBATE_SYNTHESIS_TEMPERATURE`（0.1），运行 `python -m compileall -q finance_agent/config.py` 验证编译通过
+- [x] 1.3 在 `AGENT_TEMPERATURES` 中补充辩论 Agent 温度条目（`debate_bull`、`debate_bear`、`debate_synthesis`），验证 `get_model_for_agent("debate_bull")` 返回正确温度的 DeepSeek 实例
+- [x] 1.4 在 `finance_agent/config.py` 新增产品库配置项：`PRODUCT_LIBRARY_DB_PATH`（默认 SQLite 路径）、`PRODUCT_ANALYSIS_TEMPERATURE`（0.2），并在 `AGENT_TEMPERATURES` 中补充 `product_analysis` 条目，运行 `python -m compileall -q finance_agent/config.py` 验证通过
 
 ## 2. 总管（ManagerAgent）演进
 
-- [ ] 2.1 将 `finance_agent/agents/supervisor.py` 中的 `SupervisorAgent` 演进为 `ManagerAgent`（保留类名或新增别名以保证向后兼容），保留 `DeepSeekIntentClassifier`、`classify_intents`，验证 `python -m compileall -q finance_agent/agents/supervisor.py` 通过
-- [ ] 2.2 为 `ManagerAgent` 新增 `dispatch_tasks(state) -> List[Dict]` 方法：在单一节点内先调用 `classify_intents` 完成意图识别，再为每个意图抽取独立需求描述（忠实转述、不加工），产出轻量 `task_dispatch`，每项仅含 `{intent, expert, requirement}`，其中 `expert` 可取值含 `product_analysis`（产品解读）与 `casual_chat`（闲聊），编写单测验证多意图请求在单节点内识别并抽取为多条独立需求描述且映射到正确专家
+- [x] 2.1 将 `finance_agent/agents/supervisor.py` 中的 `SupervisorAgent` 演进为 `ManagerAgent`（保留类名或新增别名以保证向后兼容），保留 `DeepSeekIntentClassifier`、`classify_intents`，验证 `python -m compileall -q finance_agent/agents/supervisor.py` 通过
+- [x] 2.2 为 `ManagerAgent` 新增 `dispatch_tasks(state) -> List[Dict]` 方法：在单一节点内先调用 `classify_intents` 完成意图识别，再为每个意图抽取独立需求描述（忠实转述、不加工），产出轻量 `task_dispatch`，每项仅含 `{intent, expert, requirement}`，其中 `expert` 可取值含 `product_analysis`（产品解读）与 `casual_chat`（闲聊），编写单测验证多意图请求在单节点内识别并抽取为多条独立需求描述且映射到正确专家
 - [ ] 2.3 验证纯闲聊（casual_chat）场景下总管将需求路由到闲聊专家（CasualChatAgent），`dispatch_tasks` 不调度任何数据获取、分析、资产配置或产品解读专家，也不产生合规专家任务，单测覆盖该场景
 - [ ] 2.4 为 `ManagerAgent` 新增 `synthesize_response(state) -> str` 方法：承担原合规专家的"最终响应合成"职责，按用户友好顺序合并各专家结果片段并合成面向用户的回复，回复 MUST 包含风险提示，单测验证多专家结果合并并附加风险提示
 - [ ] 2.5 在 `finance_agent/agents/__init__.py` 导出 `ManagerAgent`（并保留 `SupervisorAgent` 别名），验证 `from finance_agent.agents import ManagerAgent` 可正常导入
@@ -16,7 +16,7 @@
 
 ## 3. 数据获取下沉为 tool calling
 
-- [ ] 3.1 将统一数据源 `finance_agent/data/tushare_mcp.py`（`TushareMcpDataSource`）的获取能力封装为 LangChain `@tool` 函数（如 `get_stock_quote`、`get_stock_history`、`get_financial_indicators`、`get_stock_basic_info`、`get_valuation_indicators`、`get_income_statement`、`search_candidates`），替代原 `data/baostock.py`、`data/market.py` 与 `tools/web_search.py` 的获取能力，验证每个 `@tool` 可独立调用并返回结构化数据
+- [x] 3.1 将统一数据源 `finance_agent/data/tushare_mcp.py`（`TushareMcpDataSource`）的获取能力封装为 LangChain `@tool` 函数（如 `get_stock_quote`、`get_stock_history`、`get_financial_indicators`、`get_stock_basic_info`、`get_valuation_indicators`、`get_income_statement`、`search_candidates`），替代原 `data/baostock.py`、`data/market.py` 与 `tools/web_search.py` 的获取能力，验证每个 `@tool` 可独立调用并返回结构化数据
 - [ ] 3.2 删除 `finance_agent/agents/data_fetch.py` 作为独立专家，并移除 `data_fetch_batch` 编排节点引用，验证 `python -m compileall -q finance_agent/` 无残留 `DataFetchAgent` 导入错误
 - [ ] 3.3 修改 `finance_agent/agents/stock_analysis.py`：移除对 `DataFetchAgent` 与 `ProfileAgent` 的依赖，改为 ReAct `_get_tools()` 返回数据获取 `@tool`，并在内部自行从用户消息中抽取股票名称/代码，由模型自主决定调用哪个工具取数，验证股票分析单测在 mock 工具下能完成"字段抽取 -> 取数 -> 分析"流程
 - [ ] 3.4 修改 `finance_agent/agents/asset_allocation.py`：移除对 `ProfileAgent` 的依赖，改为在内部自行从用户消息中抽取风险偏好/投资金额/投资年限等字段，并通过数据获取 `@tool` 自行读取历史价数据（或直接从 `AdvisorState` 的 `stock_data` 字段查询），验证资产配置在历史数据就绪时能正常计算 MPT
@@ -24,20 +24,20 @@
 
 ## 4. 产品库与产品解读专家
 
-- [ ] 4.1 创建 `finance_agent/data/product_library.py`：实现产品库 SQLite 关系型数据库表（产品基础信息、持仓、业绩、费率等结构化字段）与访问层（按代码/名称查询、写入、列表），验证建表与增删查改通过，不引入 RAG/向量库依赖
-- [ ] 4.2 创建 `finance_agent/tools/product.py`：将产品库查询封装为 LangChain `@tool`（如 `query_product`、`list_products`），验证工具能按产品代码返回结构化产品数据
-- [ ] 4.3 创建 `finance_agent/agents/product_analysis.py`：产品解读专家（ReActAgent，`_get_tools()` 返回产品库查询工具），在内部自行从用户消息中抽取产品名称/代码，实现单产品深度透视、多产品对比评估与产品具体问题问答，验证单测覆盖三类请求
-- [ ] 4.4 产品库数据接入：可选复用现有 MCP `fund_basic_info` 数据源填充基金基础信息，验证产品库可导入一批基金基础数据
-- [ ] 4.5 在 `finance_agent/agents/__init__.py` 导出 `ProductAnalysisAgent`，验证 `from finance_agent.agents import ProductAnalysisAgent` 可正常导入
+- [x] 4.1 创建 `finance_agent/data/product_library.py`：实现产品库 SQLite 关系型数据库表（产品基础信息、持仓、业绩、费率等结构化字段）与访问层（按代码/名称查询、写入、列表），验证建表与增删查改通过，不引入 RAG/向量库依赖
+- [x] 4.2 创建 `finance_agent/tools/product.py`：将产品库查询封装为 LangChain `@tool`（如 `query_product`、`list_products`），验证工具能按产品代码返回结构化产品数据
+- [x] 4.3 创建 `finance_agent/agents/product_analysis.py`：产品解读专家（ReActAgent，`_get_tools()` 返回产品库查询工具），在内部自行从用户消息中抽取产品名称/代码，实现单产品深度透视、多产品对比评估与产品具体问题问答，验证单测覆盖三类请求
+- [x] 4.4 产品库数据接入：可选复用现有 MCP `fund_basic_info` 数据源填充基金基础信息，验证产品库可导入一批基金基础数据
+- [x] 4.5 在 `finance_agent/agents/__init__.py` 导出 `ProductAnalysisAgent`，验证 `from finance_agent.agents import ProductAnalysisAgent` 可正常导入
 
 ## 5. 辩论模块（debate/）
 
-- [ ] 5.1 创建 `finance_agent/debate/__init__.py`，导出 `run_debate`、`DebateResult`、`DebateCoordinator`
-- [ ] 5.2 创建 `finance_agent/debate/coordinator.py` 实现 `DebateCoordinator`：使用 AutoGen `AssistantAgent` + `GroupChat` 编排"看多分析师"与"看空分析师"多轮辩论，LLM 通过 AutoGen `LLMConfig` 指向 DeepSeek OpenAI 兼容端点（复用 `DEEPSEEK_API_KEY`），验证单元测试 mock LLM 后能跑完默认 2 轮
-- [ ] 5.3 实现 `run_debate(context: Dict) -> DebateResult` 入口函数：接收 MPT 结果与基本面/技术面材料，返回结构化 `DebateResult`（含 `bull_arguments`、`bear_arguments`、`disagreements`、`convergences`），单测验证输出字段齐全
-- [ ] 5.4 实现轮次上限强制收敛：辩论达到 `DEBATE_MAX_ROUNDS` 后协调器停止发言并进入结论聚合，单测验证不产生超出轮次的发言
-- [ ] 5.5 实现总超时保护：辩论总耗时超过 `DEBATE_TIMEOUT` 时终止辩论并返回 `DebateResult(status="timeout")`，单测验证超时路径返回降级标记
-- [ ] 5.6 验证辩论模块仅使用 DeepSeek：grep 确认 `debate/` 目录不引入其他 LLM 厂商 import，所有 LLM 调用经 `get_model_for_agent` 或同一 `LLMConfig`
+- [x] 5.1 创建 `finance_agent/debate/__init__.py`，导出 `run_debate`、`DebateResult`、`DebateCoordinator`
+- [x] 5.2 创建 `finance_agent/debate/coordinator.py` 实现 `DebateCoordinator`：使用 AutoGen `AssistantAgent` + `GroupChat` 编排"看多分析师"与"看空分析师"多轮辩论，LLM 通过 AutoGen `LLMConfig` 指向 DeepSeek OpenAI 兼容端点（复用 `DEEPSEEK_API_KEY`），验证单元测试 mock LLM 后能跑完默认 2 轮
+- [x] 5.3 实现 `run_debate(context: Dict) -> DebateResult` 入口函数：接收 MPT 结果与基本面/技术面材料，返回结构化 `DebateResult`（含 `bull_arguments`、`bear_arguments`、`disagreements`、`convergences`），单测验证输出字段齐全
+- [x] 5.4 实现轮次上限强制收敛：辩论达到 `DEBATE_MAX_ROUNDS` 后协调器停止发言并进入结论聚合，单测验证不产生超出轮次的发言
+- [x] 5.5 实现总超时保护：辩论总耗时超过 `DEBATE_TIMEOUT` 时终止辩论并返回 `DebateResult(status="timeout")`，单测验证超时路径返回降级标记
+- [x] 5.6 验证辩论模块仅使用 DeepSeek：grep 确认 `debate/` 目录不引入其他 LLM 厂商 import，所有 LLM 调用经 `get_model_for_agent` 或同一 `LLMConfig`
 
 ## 6. 资产配置专家集成辩论
 
@@ -59,9 +59,9 @@
 
 ## 8. API 与前端
 
-- [ ] 8.1 在 `finance_agent/api/schemas.py` 响应体中将 `allocation_result.debate` 与 `product_analysis` 声明为可选字段，验证 OpenAPI/响应序列化不因缺失该字段报错
-- [ ] 8.2 在 SSE 进度回调中新增 "debate" 与 "product_analysis" 阶段事件，验证流式接口能推送该阶段且不破坏既有阶段事件
-- [ ] 8.3 前端 `AllocationChart.vue` 可选读取 `debate` 字段展示辩论摘要；当字段缺失时正常展示配置结果不报错，验证前端构建通过
+- [x] 8.1 在 `finance_agent/api/schemas.py` 响应体中将 `allocation_result.debate` 与 `product_analysis` 声明为可选字段，验证 OpenAPI/响应序列化不因缺失该字段报错
+- [x] 8.2 在 SSE 进度回调中新增 "debate" 与 "product_analysis" 阶段事件，验证流式接口能推送该阶段且不破坏既有阶段事件
+- [x] 8.3 前端 `AllocationChart.vue` 可选读取 `debate` 字段展示辩论摘要；当字段缺失时正常展示配置结果不报错，验证前端构建通过
 
 ## 9. 测试与验证
 

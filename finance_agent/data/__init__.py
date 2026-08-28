@@ -1,5 +1,7 @@
-"""Data infrastructure layer: BaoStock, EastMoney, Sina, and Tushare MCP data sources."""
+"""Data infrastructure layer: Tushare MCP, product library, and user store."""
 
+from finance_agent.data.auth import UserStore, get_user_store
+from finance_agent.data.product_library import ProductLibrary
 from finance_agent.data.tushare_mcp import (
     TushareMcpClient,
     TushareMcpDataSource,
@@ -9,9 +11,12 @@ from finance_agent.data.tushare_mcp import (
 )
 
 __all__ = [
+    "ProductLibrary",
     "TushareMcpClient",
     "TushareMcpDataSource",
     "TushareMcpError",
     "get_tushare_datasource",
     "is_tushare_available",
+    "UserStore",
+    "get_user_store",
 ]

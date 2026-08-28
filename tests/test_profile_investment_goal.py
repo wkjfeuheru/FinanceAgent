@@ -1,14 +1,14 @@
-import os
+﻿import os
 import unittest
 from unittest.mock import Mock
 
 os.environ.setdefault("DEEPSEEK_API_KEY", "sk-test-placeholder")
 
-from finance_agent.tools.finance_slots import (
+from finance_agent.orchestrator.tools.finance_slots import (
     FinanceSlotsExtractor,
     extract_investment_goal,
 )
-from finance_agent.core.memory import AgentMemoryContext, UserProfileCard
+from finance_agent.orchestrator.memory import AgentMemoryContext, UserProfileCard
 
 
 class InvestmentGoalExtractionTests(unittest.TestCase):

@@ -6,6 +6,10 @@ import json
 from typing import Any, AsyncIterator
 
 
+# 进度阶段保持开放，以下阶段是当前 API 明确支持的扩展阶段。
+SUPPORTED_PROGRESS_STAGES = {"debate", "product_analysis"}
+
+
 def format_sse_event(data: dict[str, Any], event: str = "message") -> str:
     """格式化 SSE 事件。"""
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"

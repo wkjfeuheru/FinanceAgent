@@ -52,6 +52,7 @@ _CLASSIFIER_MODES = {
     "market_query": {"security_analysis", "market_overview"},
     "stock_recommendation": {"candidate_search", "security_comparison"},
     "asset_allocation": {"allocation"},
+    "product_analysis": {"product_analysis"},
     "casual_chat": {"conversation"},
 }
 
@@ -173,11 +174,12 @@ _SUPERVISOR_PROMPT = """你是金融投顾系统的监督者，负责根据已�
 不得重新解释用户原文来增加意图，也不得直接执行金融数据工具。
 """
 
-_INTENTS = ("market_query", "stock_recommendation", "asset_allocation", "casual_chat")
+_INTENTS = ("market_query", "stock_recommendation", "asset_allocation", "product_analysis", "casual_chat")
 _EXECUTION_MODES = {
     "market_query": {"security_analysis": True, "market_overview": False},
     "stock_recommendation": {"candidate_search": False, "security_comparison": True},
     "asset_allocation": {"allocation": True},
+    "product_analysis": {"product_analysis": True},
     "casual_chat": {"conversation": False},
 }
 _LOGGER = logging.getLogger(__name__)
@@ -243,13 +245,13 @@ def requires_slot_extraction(intent_plan: Dict[str, Any]) -> bool:
     )
 
 
-class SupervisorAgent(ProceduralAgent):
-    """监督者 Agent —— 根据问题生成最小必要任务计划。"""
+class ManagerAgent(ProceduralAgent):
+    """总管 Agent —— 负责意图识别、路由和最终响应合成。"""
 
     agent_name: str = "supervisor"
 
-    def __init__(self, shared_memory=None, checkpointer=None):
-        super().__init__(shared_memory=shared_memory)
+    def __init__(self, checkpointer=None):
+        super().__init__()
         self._checkpointer = checkpointer
         self._intent_classifier = None
 
@@ -374,6 +376,59 @@ class SupervisorAgent(ProceduralAgent):
             "intent_source": source,
         }
 
+    def dispatch_tasks(self, state: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """在单一总管节点内识别意图并生成轻量专家路由。"""
+        message = str(state.get("user_message", ""))
+        classified = self.classify_intents(
+            message,
+            str(state.get("memory_context", "")),
+            bool(state.get("pending_allocation", False)),
+            list(state.get("pending_fields", []) or []),
+            state.get("pending_clarifications"),
+        )
+        expert_map = {
+            "market_query": "stock_analysis",
+            "stock_recommendation": "stock_analysis",
+            "asset_allocation": "asset_allocation",
+            "product_analysis": "product_analysis",
+            "casual_chat": "casual_chat",
+        }
+        dispatch = [
+            {
+                "intent": item["intent"],
+                "expert": expert_map[item["intent"]],
+                "requirement": item.get("query", "").strip() or message,
+            }
+            for item in classified.get("intents", [])
+            if item["intent"] in expert_map
+        ]
+        state["detected_intents"] = classified.get("intents", [])
+        state["finance_related"] = classified.get("finance_related", False)
+        state["task_dispatch"] = dispatch
+        state["task_plan"] = list(dict.fromkeys(item["expert"] for item in dispatch))
+        return dispatch
+
+    def synthesize_response(self, state: Dict[str, Any]) -> str:
+        """按用户友好顺序合并专家结果，并附加风险提示。"""
+        results = state.get("intent_results", {}) or {}
+        sections = []
+        for intent in ("casual_chat", "market_query", "stock_recommendation", "product_analysis", "asset_allocation"):
+            result = results.get(intent, {})
+            if not isinstance(result, dict):
+                continue
+            content = str(result.get("content", "")).strip()
+            if content:
+                sections.append(content)
+            elif result.get("status") in {"error", "degraded"}:
+                sections.append(f"{intent}：暂无可用数据。")
+        response = "\n\n".join(sections).strip()
+        if not response:
+            response = str(state.get("agent_response", "")).strip() or "暂时无法生成回复。"
+        if "风险提示" not in response:
+            response += "\n\n### 风险提示\n以上内容仅供参考，不构成投资建议。投资有风险，决策需谨慎。"
+        state["agent_response"] = response
+        return response
+
     def plan_tasks(
         self,
         message: str,
@@ -382,34 +437,22 @@ class SupervisorAgent(ProceduralAgent):
         pending_fields: list[str] | None = None,
         pending_clarifications: dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
-        """把多意图确定性映射为共享数据工作流。"""
-        classified = self.classify_intents(
-            message, context_summary, pending_allocation, pending_fields,
-            pending_clarifications,
-        )
-        modes = {
-            str(item.get("execution_mode", ""))
-            for item in classified["intents"]
+        """兼容旧调用方，并返回基于总管委托的新专家计划。"""
+        state = {
+            "user_message": message,
+            "memory_context": context_summary,
+            "pending_allocation": pending_allocation,
+            "pending_fields": pending_fields or [],
+            "pending_clarifications": pending_clarifications or {},
         }
-        requested: set[str] = set()
-        if "security_analysis" in modes:
-            requested.update({"data_fetch", "fundamental_analysis"})
-        if modes & {"candidate_search", "security_comparison"}:
-            requested.update({"data_fetch", "fundamental_analysis"})
-        if "allocation" in modes:
-            requested.update({
-                "data_fetch", "fundamental_analysis", "asset_allocation",
-            })
-        if "conversation" in modes:
-            requested.add("casual_chat")
-        requested.add("compliance")
-        allowed = [
-            "slot_extraction", "data_fetch", "fundamental_analysis",
-            "asset_allocation", "casual_chat", "compliance",
-        ]
-        classified["task_plan"] = [step for step in allowed if step in requested]
-        classified["reason"] = "识别并编排全部有效意图"
-        return classified
+        dispatch = self.dispatch_tasks(state)
+        return {
+            "intents": state.get("detected_intents", []),
+            "finance_related": state.get("finance_related", False),
+            "task_dispatch": dispatch,
+            "task_plan": state.get("task_plan", []),
+            "reason": "识别并委托全部有效意图",
+        }
 
     def chat(self, query: str, context: str = "", finance_related: bool = True) -> str:
         """仅处理拆分后的理财闲聊子请求。"""
@@ -473,3 +516,7 @@ class SupervisorAgent(ProceduralAgent):
         """监督者不直接回复用户，返回任务计划。"""
         result = self.plan_tasks(message, memory_context)
         return f"任务计划：{' → '.join(result['task_plan'])}\n原因：{result.get('reason', '')}"
+
+
+# 保留旧名称，兼容现有编排器和外部调用方。
+SupervisorAgent = ManagerAgent

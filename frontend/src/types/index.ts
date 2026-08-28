@@ -41,13 +41,24 @@ export interface ProfileResponse {
   updated_at: string
 }
 
+/** 辩论摘要 */
+export interface DebateSummary {
+  summary?: string
+  rationale?: string
+  bull_arguments?: string[]
+  bear_arguments?: string[]
+  disagreements?: string[]
+  convergences?: string[]
+}
+
 /** 资产配置结果 */
 export interface AllocationResult {
   weights: Record<string, number>
-  expected_return: number
-  expected_volatility: number
-  sharpe_ratio: number
+  expected_return?: number
+  expected_volatility?: number
+  sharpe_ratio?: number
   allocation_amounts: Record<string, number>
+  debate?: DebateSummary
 }
 
 /** 对话响应（与后端 ChatResponse 对齐） */
@@ -57,7 +68,11 @@ export interface ChatResponse {
   user_profile: UserProfile
   stock_data: Record<string, any>
   fundamental_analysis: Record<string, any>
+  stock_analysis: Record<string, any>
+  technical_analysis: Record<string, any>
   allocation_result: AllocationResult
+  debate_result: Record<string, any>
+  product_analysis?: Record<string, any>
   compliance_result: Record<string, any>
   conversation_id: string
 }
@@ -107,7 +122,7 @@ export interface HealthResponse {
 /** SSE 阶段事件 */
 export interface SSEStageEvent {
   type: 'stage'
-  stage: string
+  stage: 'debate' | 'product_analysis' | (string & {})
   message: string
 }
 

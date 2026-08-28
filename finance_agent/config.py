@@ -80,6 +80,21 @@ LLM_REQUEST_TIMEOUT = float(os.getenv("LLM_REQUEST_TIMEOUT", "45"))
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "1"))
 FINAL_SYNTHESIS_TIMEOUT = float(os.getenv("FINAL_SYNTHESIS_TIMEOUT", "20"))
 
+# 辩论流程配置：默认启用，并限制轮次与总耗时。
+DEBATE_ENABLED = os.getenv("DEBATE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+DEBATE_MAX_ROUNDS = int(os.getenv("DEBATE_MAX_ROUNDS", "2"))
+DEBATE_TIMEOUT = float(os.getenv("DEBATE_TIMEOUT", "60.0"))
+DEBATE_BULL_TEMPERATURE = float(os.getenv("DEBATE_BULL_TEMPERATURE", "0.4"))
+DEBATE_BEAR_TEMPERATURE = float(os.getenv("DEBATE_BEAR_TEMPERATURE", "0.4"))
+DEBATE_SYNTHESIS_TEMPERATURE = float(os.getenv("DEBATE_SYNTHESIS_TEMPERATURE", "0.1"))
+
+# 产品库使用独立 SQLite 文件，避免与业务数据库混用。
+PRODUCT_LIBRARY_DB_PATH = os.getenv(
+    "PRODUCT_LIBRARY_DB_PATH",
+    str(Path(__file__).resolve().parent / "product_library.db"),
+)
+PRODUCT_ANALYSIS_TEMPERATURE = float(os.getenv("PRODUCT_ANALYSIS_TEMPERATURE", "0.2"))
+
 if not DEEPSEEK_API_KEY or DEEPSEEK_API_KEY == "sk-your-api-key-here":
     raise ValueError("请在操作系统环境变量中设置真实的 DEEPSEEK_API_KEY")
 
@@ -92,14 +107,15 @@ model = init_chat_model(
 
 # Agent 温度策略：不同任务使用不同温度
 AGENT_TEMPERATURES = {
-    "supervisor": 0.2,        # 监督者：低温保证分类稳定
-    "profile": 0.1,          # 画像抽取：低温保证抽取准确
-    "slot_extraction": 0.1, # 画像与股票槽位：低温保证抽取准确
-    "data_fetch": 0.0,        # 数据获取：零温度保证工具调用准确
+    "supervisor": 0.2,        # 总管：低温保证分类稳定
+    "slot_extraction": 0.1, # 需求字段抽取：低温保证抽取准确
     "fundamental": 0.3,      # 基本面分析：适度温度保证分析深度
     "stock_analysis": 0.3,   # 股票综合分析：适度温度保证分析深度与决策灵活性
     "allocation": 0.2,        # 资产配置：低温保证计算严谨
-    "compliance": 0.0,        # 合规审查：零温度保证一致性
+    "debate_bull": DEBATE_BULL_TEMPERATURE,       # 看多分析
+    "debate_bear": DEBATE_BEAR_TEMPERATURE,      # 看空分析
+    "debate_synthesis": DEBATE_SYNTHESIS_TEMPERATURE,  # 辩论聚合
+    "product_analysis": PRODUCT_ANALYSIS_TEMPERATURE,  # 产品解读
 }
 
 

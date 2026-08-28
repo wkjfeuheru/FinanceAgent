@@ -11,6 +11,7 @@ use([CanvasRenderer, PieChart, TitleComponent, TooltipComponent, LegendComponent
 
 const props = defineProps<{
   weights: Record<string, number>
+  debate?: DebateSummary
 }>()
 
 const palette = [
@@ -37,6 +38,13 @@ const chartData = computed(() => {
 })
 
 const hasData = computed(() => chartData.value.length > 0)
+const debateSummary = computed(() => {
+  const debate = props.debate
+  if (!debate) return ''
+  if (debate.summary || debate.rationale) return debate.summary || debate.rationale || ''
+  const points = [...(debate.convergences || []), ...(debate.disagreements || [])]
+  return points.join('；')
+})
 
 const option = computed<EChartsOption>(() => ({
   tooltip: {
@@ -98,6 +106,10 @@ const option = computed<EChartsOption>(() => ({
         </template>
       </el-empty>
     </div>
+    <div v-if="debateSummary" class="debate-summary">
+      <span class="debate-label">辩论摘要</span>
+      <span>{{ debateSummary }}</span>
+    </div>
   </div>
 </template>
 
@@ -145,5 +157,21 @@ const option = computed<EChartsOption>(() => ({
   margin: 4px 0 0;
   font-size: 11px;
   color: var(--color-text-muted);
+}
+
+.debate-summary {
+  display: flex;
+  gap: 8px;
+  padding: 10px 16px 14px;
+  border-top: 1px solid var(--color-border);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+}
+
+.debate-label {
+  flex: 0 0 auto;
+  font-weight: 700;
+  color: var(--color-text);
 }
 </style>
