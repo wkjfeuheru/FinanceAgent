@@ -1,7 +1,7 @@
-﻿"""LangChain 工具 —— 按 Agent 边界划分，每个文件服务一个 Agent。"""
+"""LangChain 工具 —— 按 Agent 边界划分，每个文件服务一个 Agent。"""
 
-# 行情与基本面工具
-from finance_agent.orchestrator.tools.fundamental import (
+# Tushare MCP 行情与基本面工具
+from finance_agent.orchestrator.tools.tushare import (
     get_stock_basic_info,
     get_stock_quote,
     get_stock_realtime_quote,
@@ -10,6 +10,13 @@ from finance_agent.orchestrator.tools.fundamental import (
     get_valuation_indicators,
     get_income_statement,
     search_candidates,
+)
+
+# 业务数据库只读工具
+from finance_agent.orchestrator.tools.database import (
+    query_user_profile,
+    list_user_conversations,
+    get_user_conversation_messages,
 )
 
 # StockAnalysisAgent 工具
@@ -39,6 +46,9 @@ __all__ = [
     "get_valuation_indicators",
     "get_income_statement",
     "search_candidates",
+    "query_user_profile",
+    "list_user_conversations",
+    "get_user_conversation_messages",
     "calculate_stock_metrics",
     "optimize_portfolio",
     "query_product",

@@ -1,6 +1,5 @@
 import json
 import os
-from pathlib import Path
 from typing import Any
 from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
@@ -39,36 +38,45 @@ load_dotenv()
 DEEPSEEK_API_KEY = _SYSTEM_DEEPSEEK_API_KEY
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 REDIS_MEMORY_TTL_SECONDS = int(os.getenv("REDIS_MEMORY_TTL_SECONDS", "3600"))
-SQLITE_PATH = os.getenv(
-    "SQLITE_PATH",
-    str(Path(__file__).resolve().parent / "finance_agent.db"),
-)
+# 已关闭匿名模式，所有业务请求必须携带有效 Bearer token。
+AUTH_REQUIRED = True
 
-# ── 用户认证数据库（auth.db）────────────────────────────────────
-# 独立于 checkpoint / 业务数据库，仅存储 users + sessions。
-# 认证与图计算无关，保留传统 SQL 模型。
-AUTH_DB_PATH = os.getenv(
-    "AUTH_DB_PATH",
-    str(Path(__file__).resolve().parent / "auth.db"),
-)
+# 管理员 customer_id 白名单（逗号分隔）；用于限制管理接口（如清空全库记录）。
+ADMIN_CUSTOMER_IDS = {
+    cid.strip().upper()
+    for cid in os.getenv("ADMIN_CUSTOMER_IDS", "").split(",")
+    if cid.strip()
+}
 
-# ── LangGraph Checkpoint（SqliteSaver）──────────────────────────
-# 独立的 checkpoint 数据库，存储所有长期记忆：
-#   - 对话状态（conversation_id 为 thread_id）
-#   - 用户画像（profile:{customer_id} 为 thread_id）
-#   - Agent 子图 checkpoint
-CHECKPOINT_DB_PATH = os.getenv(
-    "CHECKPOINT_DB_PATH",
-    str(Path(__file__).resolve().parent / "checkpoint.db"),
-)
+# ── PostgreSQL 存储（必需）─────────────────────────────────────
+# 所有关系型数据、认证和 checkpoint 均使用 PostgreSQL。
+POSTGRES_DSN = os.getenv("POSTGRES_DSN", "").strip()
+POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost").strip()
+POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432").strip()
+POSTGRES_USER = os.getenv("POSTGRES_USER", "postgres").strip()
+POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "").strip()
+POSTGRES_DB = os.getenv("POSTGRES_DB", "advisor").strip()
 
-# BaoStock 数据缓存；请求失败时可回退到最近一次成功缓存
-STOCK_CACHE_DIR = os.getenv("STOCK_CACHE_DIR", ".cache/finance_agent")
-STOCK_CACHE_TTL = int(os.getenv("STOCK_CACHE_TTL", "3600"))
-BAOSTOCK_SOCKET_TIMEOUT = float(os.getenv("BAOSTOCK_SOCKET_TIMEOUT", "15"))
 
-# Tushare MCP 远程数据源（streamable HTTP 协议）
-# 官方托管端点，token 通过 URL 参数携带；未配置时 Tushare 数据源不启用
+def _postgres_dsn() -> str:
+    """构建 PostgreSQL DSN；优先使用 POSTGRES_DSN。"""
+    if POSTGRES_DSN:
+        return POSTGRES_DSN
+    if not POSTGRES_PASSWORD:
+        raise RuntimeError("POSTGRES_PASSWORD 或 POSTGRES_DSN 必须配置")
+    return f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
+
+
+def get_postgres_connection_factory():
+    """返回 PostgreSQL 连接工厂；驱动缺失时显式失败。"""
+    try:
+        import psycopg  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError("缺少 PostgreSQL 驱动，请安装 psycopg[binary]") from exc
+    dsn = _postgres_dsn()
+    return lambda: psycopg.connect(dsn)
+
+# Tushare MCP 数据缓存；请求失败时可回退到最近一次成功缓存
 TUSHARE_MCP_URL = os.getenv("TUSHARE_MCP_URL", "").strip()
 TUSHARE_MCP_TIMEOUT = float(os.getenv("TUSHARE_MCP_TIMEOUT", "30"))
 
@@ -88,11 +96,6 @@ DEBATE_BULL_TEMPERATURE = float(os.getenv("DEBATE_BULL_TEMPERATURE", "0.4"))
 DEBATE_BEAR_TEMPERATURE = float(os.getenv("DEBATE_BEAR_TEMPERATURE", "0.4"))
 DEBATE_SYNTHESIS_TEMPERATURE = float(os.getenv("DEBATE_SYNTHESIS_TEMPERATURE", "0.1"))
 
-# 产品库使用独立 SQLite 文件，避免与业务数据库混用。
-PRODUCT_LIBRARY_DB_PATH = os.getenv(
-    "PRODUCT_LIBRARY_DB_PATH",
-    str(Path(__file__).resolve().parent / "product_library.db"),
-)
 PRODUCT_ANALYSIS_TEMPERATURE = float(os.getenv("PRODUCT_ANALYSIS_TEMPERATURE", "0.2"))
 
 if not DEEPSEEK_API_KEY or DEEPSEEK_API_KEY == "sk-your-api-key-here":
@@ -147,36 +150,30 @@ def get_supervisor_model():
     )
 
 
-# ── Checkpoint Saver ────────────────────────────────────────────
+# ── PostgreSQL Checkpoint Saver ─────────────────────────────────
 
-import sqlite3
-from langgraph.checkpoint.sqlite import SqliteSaver
-
-_checkpoint_saver: "SqliteSaver | None" = None
-_checkpoint_conn: "sqlite3.Connection | None" = None
+_checkpoint_saver: Any | None = None
+_checkpoint_pool: Any | None = None
 _checkpoint_lock = __import__("threading").Lock()
 
 
-def get_checkpoint_saver() -> "SqliteSaver":
-    """返回共享的 SqliteSaver 单例（线程安全，懒加载）。
-
-    所有 Agent 子图和主编排图共享同一个 SqliteSaver 实例，
-    以 conversation_id 作为 thread_id 实现对话级别的 checkpoint 隔离。
-
-    SqliteSaver 内部连接使用 ``check_same_thread=False``，
-    支持多线程并发访问。
-    """
-    global _checkpoint_saver, _checkpoint_conn
+def get_checkpoint_saver():
+    """返回共享的 PostgreSQL checkpoint saver，初始化失败时显式报错。"""
+    global _checkpoint_saver, _checkpoint_pool
     if _checkpoint_saver is not None:
         return _checkpoint_saver
     with _checkpoint_lock:
         if _checkpoint_saver is not None:
             return _checkpoint_saver
+        try:
+            from langgraph.checkpoint.postgres import PostgresSaver
+            from psycopg_pool import ConnectionPool
+        except ImportError as exc:
+            raise RuntimeError(
+                "缺少 PostgreSQL checkpoint 依赖，请安装 langgraph-checkpoint-postgres 和 psycopg-pool"
+            ) from exc
 
-        _checkpoint_conn = sqlite3.connect(
-            CHECKPOINT_DB_PATH,
-            check_same_thread=False,
-        )
-        _checkpoint_saver = SqliteSaver(_checkpoint_conn)
+        _checkpoint_pool = ConnectionPool(conninfo=_postgres_dsn(), open=True)
+        _checkpoint_saver = PostgresSaver(_checkpoint_pool)
         _checkpoint_saver.setup()
         return _checkpoint_saver

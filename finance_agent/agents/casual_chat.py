@@ -59,21 +59,3 @@ class CasualChatAgent(ProceduralAgent):
         state["intent_results"] = intent_results
         state["agent_response"] = response
         return state
-
-    # 兼容过程式 Agent 的直接消息调用方式。
-    def handle(
-        self,
-        message: str,
-        customer_id: str = "",
-        chat_history: list[Dict[str, str]] | None = None,
-        thread_id: str | None = None,
-        memory_context: str = "",
-    ) -> str:
-        state: Dict[str, Any] = {
-            "user_message": message,
-            "requirement": message,
-            "finance_related": True,
-            "chat_history": chat_history or [],
-            "memory_context": memory_context,
-        }
-        return self.invoke(state)["agent_response"]

@@ -1,7 +1,7 @@
 """Tushare MCP 远程数据源适配器。
 
 通过 MCP 客户端协议（streamable HTTP）连接 Tushare 官方托管的 MCP Server，
-获取 A 股行情、财务报表、指数等金融数据，作为 BaoStock 的补充/替代数据源。
+获取 A 股行情、财务报表、指数等金融数据。
 
 设计原则：
 1. 底层 TushareMcpClient 封装 MCP 协议细节，对外暴露 list_tools / call_tool

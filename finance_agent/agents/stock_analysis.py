@@ -1,4 +1,4 @@
-﻿"""股票综合分析 Agent。
+"""股票综合分析 Agent。
 
 职责：根据用户输入自主决策，执行基本面分析、技术面分析或两者兼有。
 - 基本面：盈利能力（ROE、净利率、毛利率）、成长性、估值（PE、PB）、财务健康
@@ -20,6 +20,15 @@ from langchain_core.tools import tool
 
 from finance_agent.agents.base import ReActAgent
 from finance_agent.config import get_model_for_agent, safe_parse_json
+from finance_agent.orchestrator.tools.fundamental import fetch_stock_data
+from finance_agent.orchestrator.tools.tushare import (
+    get_financial_indicators,
+    get_stock_basic_info,
+    get_stock_history,
+    get_stock_quote,
+    get_valuation_indicators,
+    search_candidates,
+)
 from finance_agent.orchestrator.tools.technical import compute_all_indicators
 
 
@@ -189,6 +198,25 @@ class StockAnalysisAgent(ReActAgent):
         self._fundamental_chain = None
         self._current_stock_data: Dict[str, Any] = {}
 
+    # 通过 search_candidates 按名称/行业/主题搜索候选股票代码。
+    def _resolve_candidate_codes(self, user_message: str) -> list[str]:
+        """当消息无六位代码时，按名称/行业/主题搜索候选股票。"""
+        if not (user_message or "").strip():
+            return []
+        try:
+            raw = search_candidates.invoke({"user_query": user_message, "max_results": 5})
+            candidates = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception:
+            return []
+        if not isinstance(candidates, list):
+            return []
+        codes = [
+            str(item.get("code", "")).strip()
+            for item in candidates
+            if isinstance(item, dict) and item.get("code")
+        ]
+        return [code for code in dict.fromkeys(codes) if code][:5]
+
     # 从 AdvisorState 读取股票数据并执行逐股分析。
     def invoke(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """从显式状态读取股票并写回综合分析结果。"""
@@ -205,6 +233,11 @@ class StockAnalysisAgent(ReActAgent):
                 r"(?<!\d)(60\d{4}|00\d{4}|30\d{4}|68\d{4}|8\d{5}|4\d{5})(?!\d)",
                 user_message,
             )
+        if not codes:
+            codes = self._resolve_candidate_codes(user_message)
+        if codes and not stock_data:
+            stock_data = fetch_stock_data([str(code) for code in codes[:5]])
+            state["stock_data"] = stock_data
         analyses = [
             self.handle_single_stock(
                 str(code),
@@ -240,7 +273,7 @@ class StockAnalysisAgent(ReActAgent):
                 f"- {item.get('code', '')} 评级：{item.get('rating', '未知')}"
                 f"（{_safe_score(item.get('overall_score'), 0.0):.0f}分）｜{item.get('summary', '')}"
             )
-        return "\\n".join(parts)
+        return "\n".join(parts)
 
     # ── 工具定义（闭包捕获 self，在 _get_tools() 中构造）──
 
@@ -333,7 +366,16 @@ class StockAnalysisAgent(ReActAgent):
 
             return json.dumps(result, ensure_ascii=False)
 
-        return [analyze_fundamentals, analyze_technicals]
+        return [
+            analyze_fundamentals,
+            analyze_technicals,
+            get_stock_basic_info,
+            get_stock_quote,
+            get_stock_history,
+            get_financial_indicators,
+            get_valuation_indicators,
+            search_candidates,
+        ]
 
     def _get_system_prompt(self) -> str:
         return _STOCK_ANALYSIS_SYSTEM_PROMPT
@@ -473,6 +515,7 @@ class StockAnalysisAgent(ReActAgent):
             结构化分析结果 dict（含可选 technical_analysis 字段）
         """
         data_map = stock_data if isinstance(stock_data, dict) else {}
+        self._current_stock_data = data_map
         item = data_map.get(code, {})
         indicators = item.get("indicators", {}) if isinstance(item, dict) else {}
         basic_info = item.get("basic_info", {}) if isinstance(item, dict) else {}
@@ -566,7 +609,6 @@ class StockAnalysisAgent(ReActAgent):
         # 补全展示用字段
         entry["name"] = basic_info.get("name", code) if isinstance(basic_info, dict) else code
         entry["indicators"] = indicators if isinstance(indicators, dict) else {}
-        item = stock_item if isinstance(stock_item, dict) else {}
         quote = item.get("quote", {}) if isinstance(item, dict) else {}
         entry["quote"] = quote if isinstance(quote, dict) else {}
         candidate = item.get("search_candidate", {}) if isinstance(item, dict) else {}
@@ -715,54 +757,3 @@ class StockAnalysisAgent(ReActAgent):
         candidate = item.get("search_candidate", {}) if isinstance(item, dict) else {}
         result["search_candidate"] = candidate if isinstance(candidate, dict) else {}
         return result
-
-    def handle(
-        self,
-        message: str,
-        customer_id: str = "",
-        chat_history: List[Dict[str, str]] | None = None,
-        thread_id: str | None = None,
-        memory_context: str = "",
-    ) -> str:
-        """分析所有关注股票。"""
-        import re
-
-        stock_codes = re.findall(
-            r"(?<!\d)(60\d{4}|00\d{4}|30\d{4}|68\d{4}|8\d{5}|4\d{5})(?!\d)",
-            message,
-        )
-
-        if not stock_codes:
-            return "未识别到需要分析的股票代码。"
-
-        analyses: list[Dict[str, Any]] = [
-            self.handle_single_stock(
-                code,
-                user_message=message,
-                memory_context=memory_context,
-                chat_history=chat_history,
-            )
-            for code in stock_codes[:5]
-        ]
-
-        parts = [f"已完成 {len(analyses)} 只股票的分析："]
-        for a in analyses:
-            code = a.get("code", "")
-            rating = a.get("rating", "未知")
-            score = _safe_score(a.get("overall_score"), 0.0)
-            summary = a.get("summary", "")
-            tech = a.get("technical_analysis")
-            tech_hint = ""
-            if isinstance(tech, dict):
-                tech_trend = tech.get("trend", "")
-                tech_signals = tech.get("signals", [])
-                if tech_trend:
-                    tech_hint = f" 技术面：{tech_trend}"
-                if tech_signals:
-                    tech_hint += f" 信号：{'、'.join(tech_signals[:3])}"
-            parts.append(
-                f"  - {code} 评级：{rating}（{score:.0f}分）"
-                f"{tech_hint} | {summary}"
-            )
-
-        return "\n".join(parts)

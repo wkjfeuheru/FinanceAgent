@@ -33,8 +33,6 @@ class AdvisorState(TypedDict, total=False):
     # ── 用户画像与股票 ──
     user_profile: Dict[str, Any]
     resolved_stocks: List[Dict[str, Any]]
-    candidate_stocks: List[Dict[str, Any]]
-    sector_keywords: List[str]
     explicit_user_stock_codes: List[str]
 
     # ── 数据与分析 ──
@@ -48,13 +46,11 @@ class AdvisorState(TypedDict, total=False):
 
     # ── 输出 ──
     agent_response: str
-
-    # ── 澄清与交互 ──
-    intent_clarification_state: Dict[str, Any]
-    intent_clarification_response: str
+    clarification_question: str
 
     # ── 运行时 ──
     memory_context: str
-    intent_context: str
     thread_id: str
     run_id: str
+    trace_id: str
+    message_id: str

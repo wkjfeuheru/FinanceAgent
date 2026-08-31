@@ -1,4 +1,4 @@
-﻿"""API 路由定义。"""
+"""API 路由定义。"""
 from __future__ import annotations
 
 import json
@@ -13,6 +13,7 @@ from finance_agent.api.schemas import (
     ChatResponse,
     ClearRecordsResponse,
     HealthResponse,
+    HistoryResponse,
     LoginRequest,
     LoginResponse,
     ProfileResponse,
@@ -20,6 +21,7 @@ from finance_agent.api.schemas import (
     RegisterResponse,
 )
 from finance_agent.api.sse import sse_stream
+from finance_agent.config import ADMIN_CUSTOMER_IDS
 from finance_agent.data.auth import get_user_store
 from finance_agent.orchestrator.orchestrator import AdvisorSystem
 
@@ -176,22 +178,48 @@ async def chat_stream(
     )
 
 
+@router.post("/api/chat/stop")
+async def chat_stop(
+    http_request: Request,
+    conversation_id: str = "",
+    run_id: str = "",
+) -> dict[str, Any]:
+    """请求停止指定会话/运行的生成；已完成的专家结果保留。"""
+    _require_customer_id(http_request)
+    if not conversation_id and not run_id:
+        raise HTTPException(status_code=400, detail="需提供 conversation_id 或 run_id")
+    stopped = get_system().request_stop(conversation_id=conversation_id, run_id=run_id)
+    return {"status": "ok", "stopped": stopped, "conversation_id": conversation_id, "run_id": run_id}
+
+
+def _require_customer_id(request: Request) -> str:
+    """从 Authorization: Bearer 解析并校验 token，返回 customer_id；失败抛 401。"""
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="未登录")
+    customer_id = get_user_store().verify_token(auth_header[7:].strip())
+    if not customer_id:
+        raise HTTPException(status_code=401, detail="令牌无效或已过期")
+    return customer_id
+
+
+def _authorize_customer(request: Request, path_customer_id: str) -> str:
+    """要求已登录，且路径中的 customer_id 必须等于登录用户，否则 403。"""
+    current = _require_customer_id(request)
+    if str(current).upper() != str(path_customer_id).upper():
+        raise HTTPException(status_code=403, detail="无权访问该客户资源")
+    return current
+
+
 def _resolve_customer_id(http_request: Request, request: ChatRequest, x_customer_id: str | None) -> str:
-    """优先从 Authorization token 解析 customer_id，回退到 X-Customer-ID 头，最后回退到请求体。"""
-    auth_header = http_request.headers.get("Authorization", "")
-    if auth_header.startswith("Bearer "):
-        token = auth_header[7:].strip()
-        customer_id = get_user_store().verify_token(token)
-        if customer_id:
-            return customer_id
-    if x_customer_id:
-        return x_customer_id
-    return request.customer_id
+    """从有效 Bearer token 解析 customer_id；未登录请求统一拒绝。"""
+    return _require_customer_id(http_request)
 
 
 @router.get("/api/profile/{customer_id}", response_model=ProfileResponse)
-async def get_profile(customer_id: str) -> ProfileResponse:
+async def get_profile(http_request: Request, customer_id: str) -> ProfileResponse:
     """获取用户画像（从 checkpoint 读取）。"""
+    _authorize_customer(http_request, customer_id)
     try:
         system = get_system()
         profile = system.get_user_profile(customer_id)
@@ -208,18 +236,29 @@ async def get_profile(customer_id: str) -> ProfileResponse:
         raise HTTPException(status_code=500, detail=f"获取画像失败：{exc}")
 
 
+@router.get("/api/history/{customer_id}", response_model=HistoryResponse)
+async def get_history(http_request: Request, customer_id: str, limit: int = 100) -> HistoryResponse:
+    """获取用户对话历史（跨会话，最近 limit 条，按时间正序）。"""
+    _authorize_customer(http_request, customer_id)
+    from finance_agent.orchestrator.database import get_database
+    messages = get_database().get_customer_messages(customer_id, limit)
+    return HistoryResponse(customer_id=customer_id.upper(), messages=messages)
+
+
 # ── 对话管理（基于 finance_agent.db）───────────────────────────────────
 
 @router.post("/api/conversations/{customer_id}")
-async def create_conversation(customer_id: str) -> dict[str, Any]:
+async def create_conversation(http_request: Request, customer_id: str) -> dict[str, Any]:
     """创建一个新对话。"""
+    _authorize_customer(http_request, customer_id)
     from finance_agent.orchestrator.database import get_database
     return get_database().create_conversation(customer_id)
 
 
 @router.get("/api/conversations/{customer_id}")
-async def list_conversations(customer_id: str) -> dict[str, Any]:
+async def list_conversations(http_request: Request, customer_id: str) -> dict[str, Any]:
     """获取用户的历史对话列表（从 finance_agent.db 查询）。"""
+    _authorize_customer(http_request, customer_id)
     system = get_system()
     items = system.list_checkpoint_conversations(customer_id)
     return {"customer_id": customer_id.upper(), "conversations": items}
@@ -227,9 +266,10 @@ async def list_conversations(customer_id: str) -> dict[str, Any]:
 
 @router.get("/api/conversations/{customer_id}/{conversation_id}/messages")
 async def get_conversation_messages(
-    customer_id: str, conversation_id: str, limit: int = 100,
+    http_request: Request, customer_id: str, conversation_id: str, limit: int = 100,
 ) -> dict[str, Any]:
     """读取指定对话的消息（从 finance_agent.db 查询）。"""
+    _authorize_customer(http_request, customer_id)
     from finance_agent.orchestrator.database import get_database
     # 确认对话属于该 customer
     conv = get_database().get_conversation(conversation_id, customer_id)
@@ -243,8 +283,9 @@ async def get_conversation_messages(
 
 
 @router.delete("/api/conversations/{customer_id}/{conversation_id}")
-async def delete_conversation(customer_id: str, conversation_id: str) -> dict[str, Any]:
+async def delete_conversation(http_request: Request, customer_id: str, conversation_id: str) -> dict[str, Any]:
     """删除指定历史对话及其全部数据。"""
+    _authorize_customer(http_request, customer_id)
     deleted = get_system().delete_checkpoint_conversation(conversation_id, customer_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="对话不存在")
@@ -252,12 +293,13 @@ async def delete_conversation(customer_id: str, conversation_id: str) -> dict[st
 
 
 @router.post("/api/reset/{customer_id}")
-async def reset_session(customer_id: str) -> dict[str, Any]:
-    """重置会话。"""
+async def reset_session(http_request: Request, customer_id: str) -> dict[str, Any]:
+    """重置会话：清除该客户所有会话的短期记忆（窗口 + 摘要）。"""
+    _authorize_customer(http_request, customer_id)
     try:
         system = get_system()
-        system.reset_session(customer_id)
-        return {"status": "ok", "message": f"会话 {customer_id} 已重置"}
+        cleared = system.reset_session(customer_id)
+        return {"status": "ok", "message": f"会话 {customer_id} 已重置", "cleared_conversations": cleared}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"重置失败：{exc}")
 
@@ -266,6 +308,7 @@ async def reset_session(customer_id: str) -> dict[str, Any]:
 
 @router.post("/api/admin/clear-records", response_model=ClearRecordsResponse)
 async def clear_records(
+    http_request: Request,
     customer_id: str | None = None,
     keep_users: bool = True,
 ) -> ClearRecordsResponse:
@@ -277,6 +320,11 @@ async def clear_records(
     - customer_id: 指定客户则只清该客户；不传则清除所有 finance_cs:* 对话数据
     - keep_users: 是否保留用户账号（finance_cs:user:* / finance_cs:token:* / finance_cs:user_index:*）
     """
+    current = _require_customer_id(http_request)
+    if customer_id and str(customer_id).upper() != str(current).upper():
+        raise HTTPException(status_code=403, detail="无权清除其他客户记录")
+    if customer_id is None and str(current).upper() not in ADMIN_CUSTOMER_IDS:
+        raise HTTPException(status_code=403, detail="仅管理员可清除全部记录")
     try:
         system = get_system()
         client = system.memory.store._get_client()
@@ -285,13 +333,13 @@ async def clear_records(
         if customer_id:
             # 仅清除指定客户的记录
             cid_upper = customer_id.upper()
-            keys_to_delete = [
-                f"finance_cs:{cid_upper}:messages",
-                f"finance_cs:{cid_upper}:recent_summary",
-                f"finance_cs:{cid_upper}:window",
-            ]
-            for key in keys_to_delete:
-                cleared += client.delete(key)
+            # 旧格式残留键（历史版本）
+            for suffix in ("messages", "recent_summary", "window"):
+                cleared += client.delete(f"finance_cs:{cid_upper}:{suffix}")
+            # 当前格式：按会话清除窗口/摘要
+            from finance_agent.orchestrator.database import get_database
+            for conv in get_database().list_conversations(customer_id):
+                cleared += int(system.memory.store.clear_conversation(conv["conversation_id"]))
             cleared += system.clear_profile(customer_id)
         else:
             # 扫描所有 finance_cs:* 键，按需保留用户数据
@@ -320,13 +368,7 @@ async def clear_records(
 @router.delete("/api/account")
 async def delete_account(request: Request) -> dict[str, Any]:
     """注销当前登录账号：删除用户记录与该客户所有对话/画像数据。"""
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="未登录")
-    token = auth_header[7:].strip()
-    customer_id = get_user_store().verify_token(token)
-    if not customer_id:
-        raise HTTPException(status_code=401, detail="令牌无效或已过期")
+    customer_id = _require_customer_id(request)
 
     user = get_user_store().get_user_by_customer_id(customer_id)
     if not user:
@@ -334,30 +376,18 @@ async def delete_account(request: Request) -> dict[str, Any]:
 
     try:
         system = get_system()
+        from finance_agent.orchestrator.database import get_database
         client = system.memory.store._get_client()
         cleared = 0
-        # 清除该用户 Redis 对话数据
+        # 旧格式残留键
         for suffix in ("messages", "recent_summary", "window"):
             cleared += client.delete(f"finance_cs:{customer_id.upper()}:{suffix}")
-        # 清除 checkpoint 画像
+        # 逐会话删除：业务库会话/消息 + checkpoint + 记忆窗口/摘要
+        for conv in get_database().list_conversations(customer_id):
+            if system.delete_checkpoint_conversation(conv["conversation_id"], customer_id):
+                cleared += 1
+        # 清除画像
         cleared += system.clear_profile(customer_id)
-        # 清除 checkpoint 中该用户的所有对话
-        conn = system.checkpointer.conn
-        thread_rows = conn.execute(
-            """SELECT thread_id FROM checkpoints
-               WHERE json_extract(metadata, '$.customer_id') = ?
-               UNION SELECT thread_id FROM writes
-               WHERE thread_id IN (
-                 SELECT thread_id FROM checkpoints
-                 WHERE json_extract(metadata, '$.customer_id') = ?
-               )""",
-            (customer_id.upper(), customer_id.upper()),
-        ).fetchall()
-        for row in thread_rows:
-            conn.execute("DELETE FROM writes WHERE thread_id = ?", (row[0],))
-            conn.execute("DELETE FROM checkpoints WHERE thread_id = ?", (row[0],))
-        conn.commit()
-        cleared += len(thread_rows)
         # 删除用户认证记录
         if get_user_store().delete_user(customer_id):
             cleared += 1

@@ -198,3 +198,64 @@ def search_candidates(user_query: str, max_results: int = 5) -> str:
             break
     candidates.sort(key=lambda item: float(item.get("change_pct") or 0), reverse=True)
     return _json(candidates[:limit])
+
+
+def _parse_json_dict(raw: str) -> dict[str, Any]:
+    """将工具返回的 JSON 字符串解析为 dict，失败返回空 dict。"""
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def fetch_stock_data(codes: list[str]) -> dict[str, Any]:
+    """为给定股票代码拉取基本信息、财务/估值指标、K 线与行情。
+
+    单个数据源不可用时按字段降级，不阻断整体流程；最终由调用方专家
+    基于缺失数据给出降级说明。返回结构：
+        {code: {"basic_info": ..., "indicators": ..., "history": ..., "quote": ...}}
+    """
+    stock_data: dict[str, Any] = {}
+    for code in codes:
+        entry: dict[str, Any] = {}
+
+        try:
+            basic = _parse_json_dict(get_stock_basic_info.invoke({"stock_code": code}))
+            if basic and "error" not in basic:
+                entry["basic_info"] = basic
+        except Exception:
+            pass
+
+        indicators: dict[str, Any] = {}
+        try:
+            fina = _parse_json_dict(get_financial_indicators.invoke({"stock_code": code}))
+            if fina and "error" not in fina:
+                indicators.update(fina)
+        except Exception:
+            pass
+        try:
+            valuation = _parse_json_dict(get_valuation_indicators.invoke({"stock_code": code}))
+            if valuation and "error" not in valuation:
+                indicators.update(valuation)
+        except Exception:
+            pass
+        if indicators:
+            entry["indicators"] = indicators
+
+        try:
+            history = _parse_json_dict(get_stock_history.invoke({"stock_code": code}))
+            if history and "error" not in history:
+                entry["history"] = history
+        except Exception:
+            pass
+
+        try:
+            quote = _parse_json_dict(get_stock_quote.invoke({"stock_code": code}))
+            if quote and "error" not in quote:
+                entry["quote"] = quote
+        except Exception:
+            pass
+
+        stock_data[code] = entry
+    return stock_data

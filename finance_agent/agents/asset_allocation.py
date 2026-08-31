@@ -1,4 +1,4 @@
-﻿"""资产配置 Agent。
+"""资产配置 Agent。
 
 职责：基于MPT计算量化指标，生成资产配置建议
 - 年化收益率、年化波动率、夏普比率
@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
 import threading
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterable, List, Optional
@@ -25,8 +27,11 @@ except ImportError:  # pragma: no cover - 由未安装 AutoGen 的环境触发
     GroupChatManager = None  # type: ignore[assignment,misc]
     LLMConfig = None  # type: ignore[assignment,misc]
 
+logger = logging.getLogger(__name__)
+
 from finance_agent.agents.base import ProceduralAgent
 from finance_agent.orchestrator.tools.allocation import calculate_stock_metrics, optimize_portfolio
+from finance_agent.orchestrator.tools.fundamental import fetch_stock_data
 
 
 # ── 多空辩论模块（内联，原 finance_agent/debate/coordinator.py）──
@@ -72,9 +77,12 @@ class DebateCoordinator:
         self.enabled = config.DEBATE_ENABLED if enabled is None else bool(enabled)
 
     # 构建仅指向 DeepSeek OpenAI 兼容端点的 AutoGen 配置。
-    def _build_llm_config(self) -> Any:
-        """返回 AutoGen LLMConfig 或兼容旧版 AutoGen 的字典。"""
+    def _build_llm_config(self, temperature: Optional[float] = None) -> Any:
+        """返回指向 DeepSeek 的 AutoGen LLMConfig 或兼容旧版 AutoGen 的字典。"""
         from finance_agent import config
+
+        if temperature is None:
+            temperature = config.DEBATE_BULL_TEMPERATURE
 
         llm_config = {
             "config_list": [{
@@ -82,7 +90,7 @@ class DebateCoordinator:
                 "api_key": config.DEEPSEEK_API_KEY,
                 "base_url": "https://api.deepseek.com/v1",
             }],
-            "temperature": config.DEBATE_BULL_TEMPERATURE,
+            "temperature": temperature,
         }
         if LLMConfig is None:
             return llm_config
@@ -144,12 +152,15 @@ class DebateCoordinator:
         """在 AutoGen 不同版本 API 间保持最小兼容。"""
         if AssistantAgent is None or GroupChat is None:
             return DebateResult(status="unavailable")
-        llm_config = self._build_llm_config()
-        bull = AssistantAgent("debate_bull", system_message="你是看多分析师，先提出配置方案并回应质疑。", llm_config=llm_config)
-        bear = AssistantAgent("debate_bear", system_message="你是看空分析师，审查方案并列出未解决风险。", llm_config=llm_config)
+        from finance_agent import config
+
+        bull_config = self._build_llm_config(config.DEBATE_BULL_TEMPERATURE)
+        bear_config = self._build_llm_config(config.DEBATE_BEAR_TEMPERATURE)
+        synthesis_config = self._build_llm_config(config.DEBATE_SYNTHESIS_TEMPERATURE)
+        bull = AssistantAgent("debate_bull", system_message="你是看多分析师，先提出配置方案并回应质疑。", llm_config=bull_config)
+        bear = AssistantAgent("debate_bear", system_message="你是看空分析师，审查方案并列出未解决风险。", llm_config=bear_config)
         group = GroupChat(agents=[bull, bear], messages=[], max_round=self.max_rounds * 2)
-        manager_kwargs = {"groupchat": group, "llm_config": llm_config}
-        manager = GroupChatManager(**manager_kwargs) if GroupChatManager is not None else None
+        manager = GroupChatManager(groupchat=group, llm_config=synthesis_config) if GroupChatManager is not None else None
         if manager is None:
             return DebateResult(status="unavailable")
         bull.initiate_chat(manager, message=self._build_prompt(context), max_turns=self.max_rounds * 2)
@@ -176,8 +187,10 @@ class DebateCoordinator:
         thread.start()
         thread.join(self.timeout)
         if thread.is_alive():
+            logger.warning("debate_timeout after=%.1fs", self.timeout)
             return DebateResult(status="timeout")
         if error or not result:
+            logger.warning("debate_error error=%s", error[0] if error else "no result")
             return DebateResult(status="error")
         return result[0]
 
@@ -187,39 +200,12 @@ def run_debate(context: Dict[str, Any]) -> DebateResult:
     """使用默认配置执行一场 DeepSeek-only 多空辩论。"""
     try:
         return DebateCoordinator().run(context)
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("debate_failed error=%s", exc)
         return DebateResult(status="error")
 
 
 # ── 资产配置 Agent ──
-
-
-_ASSET_ALLOCATION_PROMPT = """你是资产配置专家。
-
-## 身份
-你负责基于现代投资组合理论(MPT)为用户生成资产配置建议。
-
-## 工作流程
-1. 使用传入的用户画像、历史行情和基本面分析数据
-2. 调用 calculate_stock_metrics 计算收益率、波动率、相关性
-3. 调用 optimize_portfolio 进行MPT优化，获取最优权重
-4. 生成配置建议报告
-
-## 配置原则
-- 低风险用户(R1/R2)：偏向最小方差组合，波动率优先
-- 高风险用户(R3-R5)：偏向最大夏普比率，收益风险比优先
-- 单只股票权重不超过60%
-- 必须包含风险提示
-
-## 输出要求
-- 列出各股票配置权重和金额
-- 说明预期收益、波动率、夏普比率
-- 结合基本面分析结果给出配置理由
-- 必须包含免责声明："投资有风险，过往业绩不代表未来收益，请谨慎决策"
-- 语言要求：使用正式、专业的书面中文。不得使用口语化的表述。
-  配置理由应基于指标数值与风险收益特征进行严谨阐述，如"标的A的夏普比率
-  显著高于标的B，且历史波动率较低，因此配置权重偏向标的A"。
-"""
 
 
 class AssetAllocationAgent(ProceduralAgent):
@@ -227,50 +213,55 @@ class AssetAllocationAgent(ProceduralAgent):
 
     agent_name: str = "allocation"
 
-    def build_business_state(self, profile: Dict[str, Any]) -> Dict[str, Any]:
-        """校验生成个人配置方案所需的画像字段。"""
-        required_fields = {
-            "stock_codes": {"prompt": "至少提供2只A股股票名称或六位代码"},
-            "risk_preference": {"prompt": "说明风险偏好（保守、稳健、平衡或进取）"},
-            "budget_amount": {"prompt": "说明投资预算金额（元）"},
-            "holding_period": {"prompt": "说明预期持有时间"},
-        }
-        missing = [
-            field for field in required_fields
-            if not (profile or {}).get(field)
-        ]
-        return {
-            "agent": self.agent_name,
-            "status": "waiting_for_input" if missing else "ready",
-            "required_fields": required_fields,
-            "missing_fields": missing,
-        }
+    def _extract_allocation_profile(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """从画像与用户原话确定性补齐配置字段，不覆盖已确认画像。"""
+        profile: Dict[str, Any] = dict(state.get("user_profile", {}) or {})
+        message = str(state.get("user_message", "") or state.get("requirement", ""))
 
-    def build_missing_fields_response(self, business_state: Dict[str, Any]) -> str:
-        """根据业务状态一次性生成全部缺失字段的引导语。"""
-        required = business_state.get("required_fields", {}) or {}
-        missing = business_state.get("missing_fields", []) or []
-        prompts = [
-            str(required.get(field, {}).get("prompt", "")).strip()
-            for field in missing
-        ]
-        prompts = [p for p in prompts if p]
-        if not prompts:
-            return "继续执行前，请补充必要的业务信息。"
-        return "继续执行前，请补充以下信息：\n" + "\n".join(
-            f"- {prompt}" for prompt in prompts
+        codes = re.findall(
+            r"(?<!\d)(60\d{4}|00\d{4}|30\d{4}|68\d{4}|8\d{5}|4\d{5})(?!\d)",
+            message,
         )
+        if not profile.get("stock_codes") and codes:
+            profile["stock_codes"] = list(dict.fromkeys(codes))[:5]
 
-    def _get_tools(self) -> list:
-        return [calculate_stock_metrics, optimize_portfolio]
+        if not profile.get("budget_amount"):
+            amount = re.search(r"(\d+(?:\.\d+)?)\s*万", message)
+            if amount:
+                profile["budget_amount"] = float(amount.group(1)) * 10000
+            else:
+                amount = re.search(r"(\d+(?:\.\d+)?)\s*元", message)
+                if amount and float(amount.group(1)) >= 100:
+                    profile["budget_amount"] = float(amount.group(1))
 
-    def _get_system_prompt(self) -> str:
-        return _ASSET_ALLOCATION_PROMPT
+        if not profile.get("risk_preference"):
+            for level, keywords in (
+                ("R5 高风险", ("高风险", "进取", "激进")),
+                ("R4 中高风险", ("中高风险", "积极")),
+                ("R3 中风险", ("中风险", "平衡")),
+                ("R2 中低风险", ("中低风险", "稳健")),
+                ("R1 低风险", ("低风险", "保守")),
+            ):
+                if any(keyword in message for keyword in keywords):
+                    profile["risk_preference"] = level
+                    break
+
+        if not profile.get("holding_period"):
+            horizon = re.search(r"(\d+)\s*(天|周|个月|月|年)", message)
+            if horizon:
+                profile["holding_period"] = "".join(horizon.groups())
+
+        return profile
 
     def invoke(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """从 AdvisorState 读取画像和历史数据，执行资产配置并写回结果。"""
-        profile = state.get("user_profile", {}) or {}
+        profile = self._extract_allocation_profile(state)
+        stock_codes = profile.get("stock_codes", [])
         stock_data = state.get("stock_data", {}) or {}
+        if stock_codes and not stock_data:
+            stock_data = fetch_stock_data([str(code) for code in stock_codes[:5]])
+            state["stock_data"] = stock_data
+        state["user_profile"] = profile
 
         stock_analysis = state.get("stock_analysis", {}) or {}
         response = self._generate_allocation_report(
@@ -284,19 +275,6 @@ class AssetAllocationAgent(ProceduralAgent):
             "content": response,
         }
         return state
-
-    def handle(
-        self,
-        message: str = "",
-        user_profile: Dict[str, Any] | None = None,
-        stock_data: Dict[str, Any] | None = None,
-        stock_analysis: Dict[str, Any] | None = None,
-        **_: Any,
-    ) -> str:
-        """使用显式状态数据生成 MPT 配置报告。"""
-        return self._generate_allocation_report(
-            user_profile or {}, message, stock_data, stock_analysis,
-        )
 
     def _arbitrate_allocation(
         self,
@@ -408,11 +386,13 @@ class AssetAllocationAgent(ProceduralAgent):
         if "error" in metrics:
             return f"指标计算失败：{metrics['error']}"
 
-        # 调用MPT优化
+        # 调用 MPT 优化，并透传投资期限，确保短期/长期目标选择正确。
+        holding_period = str(profile.get("holding_period", "") or "")
         optimization_raw = optimize_portfolio.invoke({
             "stock_codes": stock_codes_str,
             "history_data": history_json,
             "risk_level": risk_preference,
+            "holding_period": holding_period,
             "budget": budget,
         })
 

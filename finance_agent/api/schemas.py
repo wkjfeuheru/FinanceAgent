@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+from finance_agent.contracts.models import ResponseEnvelope
 
 
 class ChatRequest(BaseModel):
@@ -27,15 +30,14 @@ class DebateSummary(BaseModel):
 
 class AllocationResult(BaseModel):
     """资产配置结果，保留未知字段以兼容历史结果。"""
+    model_config = ConfigDict(extra="allow")
+
     weights: dict[str, float] = Field(default_factory=dict)
     expected_return: float | None = None
     expected_volatility: float | None = None
     sharpe_ratio: float | None = None
     allocation_amounts: dict[str, float] = Field(default_factory=dict)
     debate: DebateSummary | None = None
-
-    class Config:
-        extra = "allow"
 
 
 class ChatResponse(BaseModel):
@@ -52,6 +54,32 @@ class ChatResponse(BaseModel):
     compliance_result: dict[str, Any] = Field(default_factory=dict, description="合规审查结果")
     product_analysis: dict[str, Any] | None = Field(default=None, description="产品解读结果")
     conversation_id: str = ""
+
+
+def to_chat_response(result: ResponseEnvelope | Mapping[str, Any] | ChatResponse) -> ChatResponse:
+    """将新响应包或历史结果字典转换为旧 ChatResponse 契约。"""
+    if isinstance(result, ChatResponse):
+        return result
+    if isinstance(result, ResponseEnvelope):
+        payload: dict[str, Any] = {
+            "response": result.response,
+            "task_plan": [item.expert_name for item in result.results],
+            "conversation_id": result.conversation_id,
+        }
+        for expert_result in result.results:
+            data = dict(expert_result.result_data)
+            if expert_result.expert_name == "stock_analysis":
+                payload.update({key: data[key] for key in (
+                    "stock_data", "fundamental_analysis", "stock_analysis", "technical_analysis",
+                ) if key in data})
+            elif expert_result.expert_name == "asset_allocation":
+                payload["allocation_result"] = data
+                if "debate" in data:
+                    payload["debate_result"] = data["debate"]
+            elif expert_result.expert_name == "product_analysis":
+                payload["product_analysis"] = data
+        return ChatResponse.model_validate(payload)
+    return ChatResponse.model_validate(dict(result))
 
 
 class ProfileResponse(BaseModel):

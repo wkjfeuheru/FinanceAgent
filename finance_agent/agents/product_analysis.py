@@ -1,4 +1,4 @@
-﻿"""金融产品解读专家。"""
+"""金融产品解读专家。"""
 
 from __future__ import annotations
 
@@ -42,6 +42,11 @@ class ProductAnalysisAgent(ReActAgent):
         """执行产品解读，并将文本结果和结构化产品数据写回状态。"""
         result = super().invoke(state)
         state["product_analysis"] = self._build_result(state)
+        response = str(state.get("agent_response", "")).strip()
+        state.setdefault("intent_results", {})["product_analysis"] = {
+            "status": "success" if response else "degraded",
+            "content": response,
+        }
         return result
 
     def _build_result(self, state: Dict[str, Any]) -> Dict[str, Any]:

@@ -36,6 +36,16 @@ function formatTime(ts?: string): string {
   return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
 }
 
+function formatPercent(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) return '—'
+  return `${(value * 100).toFixed(2)}%`
+}
+
+function formatNumber(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) return '—'
+  return value.toFixed(2)
+}
+
 const isEmpty = computed(
   () => props.messages.length === 0 && !props.loading,
 )
@@ -110,13 +120,13 @@ const isEmpty = computed(
               class="alloc-summary"
             >
               <span class="alloc-item">
-                预期收益：<b>{{ (msg.data.allocation_result.expected_return * 100).toFixed(2) }}%</b>
+                预期收益：<b>{{ formatPercent(msg.data.allocation_result.expected_return) }}</b>
               </span>
               <span class="alloc-item">
-                预期波动：<b>{{ (msg.data.allocation_result.expected_volatility * 100).toFixed(2) }}%</b>
+                预期波动：<b>{{ formatPercent(msg.data.allocation_result.expected_volatility) }}</b>
               </span>
               <span class="alloc-item">
-                夏普比率：<b>{{ msg.data.allocation_result.sharpe_ratio.toFixed(2) }}</b>
+                夏普比率：<b>{{ formatNumber(msg.data.allocation_result.sharpe_ratio) }}</b>
               </span>
             </div>
           </div>
@@ -290,29 +300,6 @@ const isEmpty = computed(
 }
 .message-item.user .extra-data {
   display: none;
-}
-
-.extra-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 6px;
-}
-
-.task-plan {
-  margin-top: 6px;
-}
-.plan-title {
-  font-weight: 600;
-  margin-bottom: 2px;
-  color: var(--color-text);
-}
-.task-plan ol {
-  margin: 0;
-  padding-left: 18px;
-}
-.task-plan li {
-  margin: 2px 0;
 }
 
 .alloc-summary {

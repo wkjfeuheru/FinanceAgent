@@ -14,18 +14,14 @@ from typing import Any, Callable, Dict, List
 
 import requests
 
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.tools import BaseTool
-
 from finance_agent.agents.base import ProceduralAgent
 from finance_agent.config import (
     DEEPSEEK_API_KEY,
     DEEPSEEK_INTENT_MAX_RETRIES,
     DEEPSEEK_INTENT_MODEL,
     DEEPSEEK_INTENT_TIMEOUT,
-    get_supervisor_model,
 )
+from finance_agent.middleware import OUTPUT_BLOCKED_RESPONSE, check_sensitive_words
 
 
 _INTENT_CLASSIFIER_PROMPT = """你是金融工作流的多意图分类器，只分类当前用户消息，不回答问题。
@@ -38,6 +34,7 @@ _INTENT_CLASSIFIER_PROMPT = """你是金融工作流的多意图分类器，只�
 - market_query: security_analysis | market_overview
 - stock_recommendation: candidate_search | security_comparison
 - asset_allocation: allocation
+- product_analysis: product_analysis
 - casual_chat: conversation
 
 每个意图必须包含 intent、query、confidence、reason、evidence、execution_mode、requires_slot_extraction。
@@ -170,10 +167,6 @@ class DeepSeekIntentClassifier:
         raise IntentClassificationError(f"DeepSeek 意图识别失败：{error}") from error
 
 
-_SUPERVISOR_PROMPT = """你是金融投顾系统的监督者，负责根据已识别意图编排工作流。
-不得重新解释用户原文来增加意图，也不得直接执行金融数据工具。
-"""
-
 _INTENTS = ("market_query", "stock_recommendation", "asset_allocation", "product_analysis", "casual_chat")
 _EXECUTION_MODES = {
     "market_query": {"security_analysis": True, "market_overview": False},
@@ -235,16 +228,6 @@ def normalize_intent_item(
     }
 
 
-def requires_slot_extraction(intent_plan: Dict[str, Any]) -> bool:
-    """Authorize slot extraction only from a validated supervisor plan."""
-    intent = str(intent_plan.get("intent", ""))
-    mode = str(intent_plan.get("execution_mode", ""))
-    return bool(
-        intent_plan.get("requires_slot_extraction")
-        and _EXECUTION_MODES.get(intent, {}).get(mode) is True
-    )
-
-
 class ManagerAgent(ProceduralAgent):
     """总管 Agent —— 负责意图识别、路由和最终响应合成。"""
 
@@ -254,12 +237,6 @@ class ManagerAgent(ProceduralAgent):
         super().__init__()
         self._checkpointer = checkpointer
         self._intent_classifier = None
-
-    def _get_tools(self) -> list:
-        return []
-
-    def _get_system_prompt(self) -> str:
-        return _SUPERVISOR_PROMPT
 
     @property
     def intent_classifier(self) -> DeepSeekIntentClassifier:
@@ -363,11 +340,10 @@ class ManagerAgent(ProceduralAgent):
             source = "clarification"
         order = {name: index for index, name in enumerate(_INTENTS)}
         intents = sorted(merged.values(), key=lambda item: order[item["intent"]])
-        print(
-            "[Intent Classification] "
-            + ", ".join(f"{item['intent']}={item['confidence']:.2f}" for item in intents)
-            + f" | source={source}",
-            flush=True,
+        _LOGGER.info(
+            "[Intent Classification] %s | source=%s",
+            ", ".join(f"{item['intent']}={item['confidence']:.2f}" for item in intents),
+            source,
         )
         return {
             "intents": intents,
@@ -403,6 +379,7 @@ class ManagerAgent(ProceduralAgent):
             if item["intent"] in expert_map
         ]
         state["detected_intents"] = classified.get("intents", [])
+        state["uncertain_intents"] = classified.get("uncertain_intents", [])
         state["finance_related"] = classified.get("finance_related", False)
         state["task_dispatch"] = dispatch
         state["task_plan"] = list(dict.fromkeys(item["expert"] for item in dispatch))
@@ -424,99 +401,12 @@ class ManagerAgent(ProceduralAgent):
         response = "\n\n".join(sections).strip()
         if not response:
             response = str(state.get("agent_response", "")).strip() or "暂时无法生成回复。"
-        if "风险提示" not in response:
+        # 输出侧合规校验：命中敏感词则整体拦截
+        if check_sensitive_words(response):
+            response = OUTPUT_BLOCKED_RESPONSE
+        elif "风险提示" not in response:
             response += "\n\n### 风险提示\n以上内容仅供参考，不构成投资建议。投资有风险，决策需谨慎。"
         state["agent_response"] = response
         return response
 
-    def plan_tasks(
-        self,
-        message: str,
-        context_summary: str = "",
-        pending_allocation: bool = False,
-        pending_fields: list[str] | None = None,
-        pending_clarifications: dict[str, Any] | None = None,
-    ) -> Dict[str, Any]:
-        """兼容旧调用方，并返回基于总管委托的新专家计划。"""
-        state = {
-            "user_message": message,
-            "memory_context": context_summary,
-            "pending_allocation": pending_allocation,
-            "pending_fields": pending_fields or [],
-            "pending_clarifications": pending_clarifications or {},
-        }
-        dispatch = self.dispatch_tasks(state)
-        return {
-            "intents": state.get("detected_intents", []),
-            "finance_related": state.get("finance_related", False),
-            "task_dispatch": dispatch,
-            "task_plan": state.get("task_plan", []),
-            "reason": "识别并委托全部有效意图",
-        }
 
-    def chat(self, query: str, context: str = "", finance_related: bool = True) -> str:
-        """仅处理拆分后的理财闲聊子请求。"""
-        if not finance_related:
-            return "我主要协助处理投资理财、证券行情、选股研究和资产配置问题。你可以从这些方面继续问我。"
-        prompt = ChatPromptTemplate.from_messages([
-            (
-                "system",
-                "你是有同理心且审慎的理财交流助手。只回应给定的闲聊子请求，"
-                "可以讨论投资情绪、经验、心态和一般金融知识；不要查询或编造行情数据，"
-                "不要推荐具体证券，不要生成个人资产配置方案。回答简洁自然。",
-            ),
-            ("human", "近期对话：\n{context}\n\n闲聊子请求：{query}"),
-        ])
-        return (prompt | get_supervisor_model() | StrOutputParser()).invoke({
-            "context": context or "无上下文",
-            "query": query,
-        }).strip()
-
-    def decide_slot_tool_calls(
-        self,
-        detected_intents: List[Dict[str, Any]],
-        slot_tool: BaseTool,
-        context: str = "",
-        pending_allocation: bool = False,
-    ) -> List[Dict[str, Any]]:
-        """使用轻量模型原生 tool_calls 决定哪些子意图需要槽位提取。"""
-        prompt = ChatPromptTemplate.from_messages([
-            (
-                "system",
-                "你是金融工作流的工具调用决策器，不回答问题，也不重新分类。"
-                "只允许调用 extract_finance_slots。资产配置必须调用；具体个股行情、"
-                "财务、基本面和明确股票比较需要调用；板块/行业/概念行情、主题选股、"
-                "泛化候选搜索和闲聊不得调用。同一意图最多调用一次。工具参数query"
-                "必须原样使用该意图提供的子请求。无需工具时不得产生tool_calls。",
-            ),
-            (
-                "human",
-                "近期上下文：\n{context}\n\n等待资产配置补充：{pending}\n\n"
-                "本轮意图：\n{intents}\n\n请决定是否调用工具。",
-            ),
-        ])
-        response = (prompt | get_supervisor_model().bind_tools([slot_tool])).invoke({
-            "context": context or "无上下文",
-            "pending": "是" if pending_allocation else "否",
-            "intents": json.dumps(detected_intents, ensure_ascii=False),
-        })
-        return [
-            call for call in (getattr(response, "tool_calls", []) or [])
-            if isinstance(call, dict)
-        ]
-
-    def handle(
-        self,
-        message: str,
-        customer_id: str = "",
-        chat_history: List[Dict[str, str]] | None = None,
-        thread_id: str | None = None,
-        memory_context: str = "",
-    ) -> str:
-        """监督者不直接回复用户，返回任务计划。"""
-        result = self.plan_tasks(message, memory_context)
-        return f"任务计划：{' → '.join(result['task_plan'])}\n原因：{result.get('reason', '')}"
-
-
-# 保留旧名称，兼容现有编排器和外部调用方。
-SupervisorAgent = ManagerAgent

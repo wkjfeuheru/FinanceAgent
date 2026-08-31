@@ -16,6 +16,7 @@ from langgraph.runtime import Runtime
 
 
 BLOCKED_RESPONSE = "抱歉，您的输入包含不适宜的内容，暂时无法回答您的问题。"
+OUTPUT_BLOCKED_RESPONSE = "抱歉，本次回复未能通过合规校验，已为您拦截。请换一种方式提问。"
 
 # 完整的敏感词表，合并了原 compliance.py 的输出检查词表。
 # 可通过环境变量 SENSITIVE_WORDS="word1,word2" 覆盖。
