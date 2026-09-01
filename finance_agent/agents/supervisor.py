@@ -374,6 +374,7 @@ class ManagerAgent(ProceduralAgent):
                 "intent": item["intent"],
                 "expert": expert_map[item["intent"]],
                 "requirement": item.get("query", "").strip() or message,
+                "execution_mode": item.get("execution_mode", "").strip(),
             }
             for item in classified.get("intents", [])
             if item["intent"] in expert_map

@@ -27,6 +27,8 @@ class AdvisorState(TypedDict, total=False):
     detected_intents: List[Dict[str, Any]]
     uncertain_intents: List[Dict[str, Any]]
     intent_results: Dict[str, Dict[str, Any]]
+    # 意图后槽位提取层产出的结构化入参（按意图 key 组织，跨轮合并）
+    intent_slots: Dict[str, Dict[str, Any]]
     finance_related: bool
     business_state: Dict[str, Any]
 

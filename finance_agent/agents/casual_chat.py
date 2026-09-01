@@ -11,7 +11,7 @@ from finance_agent.agents.base import ProceduralAgent
 from finance_agent.config import get_supervisor_model
 
 
-_FINANCE_GUIDANCE = "我主要协助处理投资理财、证券行情、选股研究和资产配置问题。你可以从这些方面继续问我。"
+_FINANCE_GUIDANCE = "你好,我是你的智能投顾助手,主要协助处理投资理财、证券行情、选股研究和资产配置问题。你可以从这些方面继续问我。"
 
 
 class CasualChatAgent(ProceduralAgent):

@@ -26,6 +26,7 @@ from finance_agent.contracts import (
 from finance_agent.data.postgres_repository import PostgresAuditStore
 from finance_agent.orchestrator.database import get_database
 from finance_agent.orchestrator.memory import AgentMemoryContext, RedisMemoryStore
+from finance_agent.orchestrator.slots import SlotExtractor
 from finance_agent.orchestrator.state import AdvisorState
 from finance_agent.middleware import BLOCKED_RESPONSE, find_sensitive_word
 
@@ -46,6 +47,7 @@ class AdvisorSystem:
         self.allocation_agent = AssetAllocationAgent()
         self.product_agent = ProductAnalysisAgent(checkpointer=self.checkpointer)
         self.casual_chat_agent = CasualChatAgent()
+        self.slot_extractor = SlotExtractor()
         self._progress_context = threading.local()
         self._progress_callbacks: Dict[str, Callable[[str, str], None]] = {}
         self._progress_lock = threading.Lock()
@@ -158,6 +160,12 @@ class AdvisorSystem:
                     state["clarification_question"] = "；".join(dict.fromkeys(questions))
             return state
 
+        # 意图后置槽位提取：为每个意图抽取专家所需的结构化入参（名称→代码、否定、歧义、多轮合并）。
+        def slot_handler(state: AdvisorState) -> AdvisorState:
+            self._trace_agent(state, "SlotExtractor")
+            self._emit_progress("slots", "正在提取专家所需的结构化参数")
+            return self.slot_extractor.extract(state)
+
         # 从委托列表中选择尚未执行的专家。
         def route_expert(state: AdvisorState) -> str:
             if self._is_stopped(str(state.get("thread_id", ""))):
@@ -212,12 +220,14 @@ class AdvisorSystem:
             return state
 
         graph.add_node("manager", manager_handler)
+        graph.add_node("slot_extraction", slot_handler)
         for expert in experts:
             graph.add_node(expert, expert_handler(expert))
         graph.add_node("manager_synthesis", synthesis_handler)
         graph.add_edge(START, "manager")
+        graph.add_edge("manager", "slot_extraction")
         targets = list(experts) + ["manager_synthesis"]
-        graph.add_conditional_edges("manager", route_expert, targets)
+        graph.add_conditional_edges("slot_extraction", route_expert, targets)
         for expert in experts:
             graph.add_conditional_edges(expert, route_expert, targets)
         graph.add_edge("manager_synthesis", END)
@@ -294,6 +304,9 @@ class AdvisorSystem:
                 "trace_id": trace_id, "message_id": message_id,
                 "explicit_user_stock_codes": [], "uncertain_intents": [],
             }
+            # 跨轮槽位合并/更新：不必在此显式回填 intent_slots——
+            # LangGraph 会按 thread_id 保留上一轮的 channel 值（新输入的
+            # 字段覆盖、未提供的字段沿用 checkpoint），因此槽位层能读到上一轮的槽位。
             if progress_callback:
                 with self._progress_lock:
                     self._progress_callbacks[conversation_id] = progress_callback

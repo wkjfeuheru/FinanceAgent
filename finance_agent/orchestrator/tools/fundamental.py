@@ -154,7 +154,9 @@ def _candidate_keyword(user_query: str) -> str:
     noise_phrases = (
         "帮我推荐", "给我推荐", "请推荐", "值得投资", "值得关注", "投资机会",
         "有哪些", "有什么", "哪些", "什么", "股票", "个股", "行业", "板块",
-        "概念", "推荐", "关注", "投资", "的", "吗", "？", "?", "，", ",",
+        "概念", "推荐", "关注", "投资", "分析", "分析一下", "看看", "走势",
+        "行情", "基本面", "技术面", "怎么样", "如何", "最近", "近期",
+        "的", "吗", "？", "?", "，", ",", "、", "和", "与",
     )
     keyword = str(user_query or "").strip()
     for phrase in sorted(noise_phrases, key=len, reverse=True):
@@ -165,23 +167,24 @@ def _candidate_keyword(user_query: str) -> str:
 @tool
 # 按行业或名称关键词搜索候选股票并按近期涨跌幅排序。
 def search_candidates(user_query: str, max_results: int = 5) -> str:
-    """搜索候选股票，返回代码、名称、行业和筛选理由。"""
+    """搜索候选股票，返回代码、名称、行业和筛选理由。
+
+    优先做**名称子串**强匹配（用户问题中出现官方股票名称，如"贵州茅台"），
+    无名称命中时再回退到行业/关键词匹配。
+    """
     limit = min(max(int(max_results), 1), 10)
     source = get_datasource()
     basics = _records(source.get_stock_basic())
+    query_lower = str(user_query or "").lower()
     keyword = _candidate_keyword(user_query)
     keywords = [part for part in keyword.split() if part]
     candidates = []
-    for item in basics:
-        name = str(_first_value(item, "name", "名称", default=""))
-        industry = str(_first_value(item, "industry", "行业", default=""))
-        searchable = f"{name} {industry}".lower()
-        if keywords and not any(keyword in searchable for keyword in keywords):
-            continue
-        code = str(_first_value(item, "ts_code", "code", default="")).split(".")[0]
-        if not code:
-            continue
-        daily = _latest_daily_record(source.get_daily(code, (datetime.now() - timedelta(days=15)).strftime("%Y-%m-%d")))
+    seen_codes = set()
+
+    def _append(code, name, industry, daily, reason):
+        if code in seen_codes:
+            return
+        seen_codes.add(code)
         change_pct = _first_value(daily or {}, "pct_chg", "change_pct", default=0)
         try:
             sort_value = float(change_pct or 0)
@@ -191,11 +194,44 @@ def search_candidates(user_query: str, max_results: int = 5) -> str:
             "code": code,
             "name": name,
             "industry": industry,
-            "reason": f"匹配行业/名称关键词，近期涨跌幅 {sort_value:+.2f}%",
+            "reason": reason.format(sort_value) if "{}" in reason else reason,
             "change_pct": change_pct,
         })
+
+    # 强信号：官方名称直接出现在用户问题中（如"贵州茅台"）
+    for item in basics:
+        name = str(_first_value(item, "name", "名称", default="")).strip()
+        industry = str(_first_value(item, "industry", "行业", default="")).strip()
+        code = str(_first_value(item, "ts_code", "code", default="")).split(".")[0].strip()
+        if not code or not name:
+            continue
+        if name.lower() in query_lower:
+            daily = _latest_daily_record(source.get_daily(code, (datetime.now() - timedelta(days=15)).strftime("%Y-%m-%d")))
+            _append(code, name, industry, daily, "按股票名称匹配，近期涨跌幅 {:+.2f}%")
         if len(candidates) >= limit * 5:
             break
+
+    # 兜底：行业/名称关键词匹配
+    if len(candidates) < limit:
+        for item in basics:
+            name = str(_first_value(item, "name", "名称", default="")).strip()
+            industry = str(_first_value(item, "industry", "行业", default="")).strip()
+            searchable = f"{name} {industry}".lower()
+            if keywords and not any(kw in searchable for kw in keywords):
+                continue
+            code = str(_first_value(item, "ts_code", "code", default="")).split(".")[0].strip()
+            if not code:
+                continue
+            daily = _latest_daily_record(source.get_daily(code, (datetime.now() - timedelta(days=15)).strftime("%Y-%m-%d")))
+            change_pct = _first_value(daily or {}, "pct_chg", "change_pct", default=0)
+            try:
+                sort_value = float(change_pct or 0)
+            except (TypeError, ValueError):
+                sort_value = 0.0
+            _append(code, name, industry, daily, f"匹配行业/名称关键词，近期涨跌幅 {sort_value:+.2f}%")
+            if len(candidates) >= limit * 5:
+                break
+
     candidates.sort(key=lambda item: float(item.get("change_pct") or 0), reverse=True)
     return _json(candidates[:limit])
 

@@ -72,6 +72,7 @@ def test_manager_dispatch_preserves_requirement(monkeypatch):
         "intent": "asset_allocation",
         "expert": "asset_allocation",
         "requirement": "用600519和000001配置10万元，持有1年，稳健",
+        "execution_mode": "allocation",
     }]
     assert state["task_plan"] == ["asset_allocation"]
 
@@ -224,6 +225,10 @@ def test_langgraph_routes_expert_result_into_manager_synthesis(monkeypatch):
             }
 
     system.casual_chat_agent = FakeCasualAgent()
+    class FakeSlotExtractor:
+        def extract(self, state):
+            return state
+    system.slot_extractor = FakeSlotExtractor()
     system._progress_context = type("Context", (), {})()
     system._progress_callbacks = {}
     system._progress_lock = __import__("threading").Lock()
@@ -252,7 +257,7 @@ def test_langgraph_routes_expert_result_into_manager_synthesis(monkeypatch):
     graph = system._build_graph()
     result = graph.invoke({"user_message": "你好", "completed_experts": [], "intent_results": {}}, config={"configurable": {"thread_id": "chain-test"}})
 
-    assert events == ["ManagerAgent", "casual_chat", "ManagerAgent.synthesis"]
+    assert events == ["ManagerAgent", "SlotExtractor", "casual_chat", "ManagerAgent.synthesis"]
     assert result["agent_response"].startswith("你好")
 
 

@@ -163,6 +163,7 @@ POSTGRES_DSN=postgresql://postgres:password@localhost:5432/advisor
 # POSTGRES_USER=postgres
 # POSTGRES_PASSWORD=your-password
 # POSTGRES_DB=advisor
+POSTGRES_CONNECT_TIMEOUT=10
 
 # 管理员 customer_id，多个值用逗号分隔
 # ADMIN_CUSTOMER_IDS=CUST000001,CUST000002

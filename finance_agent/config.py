@@ -48,7 +48,7 @@ ADMIN_CUSTOMER_IDS = {
     if cid.strip()
 }
 
-# ── PostgreSQL 存储（必需）─────────────────────────────────────
+# ── PostgreSQL 存储 ─────────────────────────────────────
 # 所有关系型数据、认证和 checkpoint 均使用 PostgreSQL。
 POSTGRES_DSN = os.getenv("POSTGRES_DSN", "").strip()
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost").strip()
@@ -56,6 +56,7 @@ POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432").strip()
 POSTGRES_USER = os.getenv("POSTGRES_USER", "postgres").strip()
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "").strip()
 POSTGRES_DB = os.getenv("POSTGRES_DB", "advisor").strip()
+POSTGRES_CONNECT_TIMEOUT = float(os.getenv("POSTGRES_CONNECT_TIMEOUT", "10"))
 
 
 def _postgres_dsn() -> str:
@@ -74,7 +75,7 @@ def get_postgres_connection_factory():
     except ImportError as exc:
         raise RuntimeError("缺少 PostgreSQL 驱动，请安装 psycopg[binary]") from exc
     dsn = _postgres_dsn()
-    return lambda: psycopg.connect(dsn)
+    return lambda: psycopg.connect(dsn, connect_timeout=POSTGRES_CONNECT_TIMEOUT)
 
 # Tushare MCP 数据缓存；请求失败时可回退到最近一次成功缓存
 TUSHARE_MCP_URL = os.getenv("TUSHARE_MCP_URL", "").strip()
@@ -173,7 +174,16 @@ def get_checkpoint_saver():
                 "缺少 PostgreSQL checkpoint 依赖，请安装 langgraph-checkpoint-postgres 和 psycopg-pool"
             ) from exc
 
-        _checkpoint_pool = ConnectionPool(conninfo=_postgres_dsn(), open=True)
-        _checkpoint_saver = PostgresSaver(_checkpoint_pool)
-        _checkpoint_saver.setup()
+        _checkpoint_pool = ConnectionPool(
+            conninfo=_postgres_dsn(),
+            kwargs={"autocommit": True, "connect_timeout": POSTGRES_CONNECT_TIMEOUT},
+            open=True,
+        )
+        try:
+            _checkpoint_saver = PostgresSaver(_checkpoint_pool)
+            _checkpoint_saver.setup()
+        except Exception:
+            _checkpoint_pool.close()
+            _checkpoint_pool = None
+            raise
         return _checkpoint_saver
