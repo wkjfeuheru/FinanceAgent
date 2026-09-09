@@ -2,7 +2,7 @@
 
 在总管（ManagerAgent）完成意图识别并生成 ``task_dispatch`` 之后、路由到具体
 专家之前运行。职责：为每个意图抽取该意图对应的专家所需的**结构化入参槽位**，
-并处理四类踩坑点：
+并处理四类边界：
 
 - **否定表达**：识别"不要/别/除了…以外/排除/避免/不想"等，把被否定对象
   单独提取为 ``excluded``，不混入正向 ``stock_codes``。
@@ -28,8 +28,8 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
 from finance_agent.config import get_model_for_agent, safe_parse_json
-from finance_agent.data.tushare_mcp import get_datasource
-from finance_agent.orchestrator.tools.fundamental import _first_value, _records
+from finance_agent.data.provider_manager import get_provider_manager
+from finance_agent.orchestrator.tools.stockdata import _first_value, _records
 
 logger = logging.getLogger(__name__)
 
@@ -205,8 +205,7 @@ class _StockIndex:
         if self._loaded:
             return
         try:
-            source = get_datasource()
-            records = _records(source.get_stock_basic())
+            records = _records(get_provider_manager().get_stock_basic())
         except Exception as exc:  # noqa: BLE001
             # 失败不置 loaded，允许下次重试
             logger.warning("股票名称表加载失败：%s", exc)

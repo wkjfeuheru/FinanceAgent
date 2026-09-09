@@ -1,4 +1,8 @@
-"""业务数据库只读 LangChain 工具。"""
+"""业务数据库只读 LangChain 工具。
+
+涵盖用户画像/会话记录（orchestrator.database）与产品库查询（data.product_library），
+合并原 database.py 与 product.py 的所有业务库查询工具。
+"""
 
 from __future__ import annotations
 
@@ -7,6 +11,7 @@ from typing import Any
 
 from langchain_core.tools import tool
 
+from finance_agent.data.product_library import get_product_library
 from finance_agent.orchestrator.database import get_database
 
 
@@ -64,8 +69,32 @@ def get_user_conversation_messages(
         return _json({"error": "会话消息暂时不可用"})
 
 
+@tool
+def query_product(product_code: str = "", product_name: str = "") -> str:
+    """按产品代码或名称查询产品库中的结构化数据。"""
+    try:
+        library = get_product_library()
+        product = library.query_by_code(product_code) if product_code.strip() else library.query_by_name(product_name)
+        if product is None:
+            return _json({"error": "产品库暂无该产品数据", "product_code": product_code, "product_name": product_name})
+        return _json(product)
+    except Exception:
+        return _json({"error": "产品库暂时不可用，请稍后重试"})
+
+
+@tool
+def list_products(product_type: str = "fund") -> str:
+    """列出产品库中指定类型的产品。"""
+    try:
+        return _json(get_product_library().list_products(product_type))
+    except Exception:
+        return _json({"error": "产品库暂时不可用，请稍后重试"})
+
+
 __all__ = [
     "query_user_profile",
     "list_user_conversations",
     "get_user_conversation_messages",
+    "query_product",
+    "list_products",
 ]

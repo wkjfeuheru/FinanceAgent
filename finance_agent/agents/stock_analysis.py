@@ -20,8 +20,8 @@ from langchain_core.tools import tool
 
 from finance_agent.agents.base import ReActAgent
 from finance_agent.config import get_model_for_agent, safe_parse_json
-from finance_agent.orchestrator.tools.fundamental import fetch_stock_data
-from finance_agent.orchestrator.tools.tushare import (
+from finance_agent.orchestrator.tools.stockdata import (
+    fetch_stock_data,
     get_financial_indicators,
     get_stock_basic_info,
     get_stock_history,

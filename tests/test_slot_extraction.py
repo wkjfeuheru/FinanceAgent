@@ -9,7 +9,7 @@ import json
 import pytest
 
 from finance_agent.orchestrator import slots
-from finance_agent.orchestrator.tools import fundamental
+from finance_agent.orchestrator.tools import stockdata
 
 BASICS = [
     {"ts_code": "600519.SH", "name": "贵州茅台", "industry": "白酒"},
@@ -27,9 +27,22 @@ class FakeSource:
         return []
 
 
+class FakeManager:
+    """模拟统一 Provider Manager；委托给 FakeSource 避免真实网络调用。"""
+
+    def __init__(self):
+        self._source = FakeSource()
+
+    def get_stock_basic(self, stock_code=""):
+        return self._source.get_stock_basic(stock_code)
+
+    def get_daily(self, stock_code, start_date="", end_date=""):
+        return self._source.get_daily(stock_code, start_date, end_date)
+
+
 @pytest.fixture
 def stock_index(monkeypatch):
-    monkeypatch.setattr(slots, "get_datasource", lambda: FakeSource())
+    monkeypatch.setattr(slots, "get_provider_manager", lambda: FakeManager())
     slots.reset_stock_index()
     yield
     slots.reset_stock_index()
@@ -206,8 +219,8 @@ def test_llm_failure_falls_back_to_deterministic(monkeypatch):
 
 
 def test_search_candidates_name_substring_match(monkeypatch):
-    monkeypatch.setattr(fundamental, "get_datasource", lambda: FakeSource())
-    raw = fundamental.search_candidates.invoke({
+    monkeypatch.setattr(stockdata, "get_provider_manager", lambda: FakeManager())
+    raw = stockdata.search_candidates.invoke({
         "user_query": "我分析一下贵州茅台最近的行情和基本面", "max_results": 5,
     })
     result = json.loads(raw)
@@ -222,7 +235,7 @@ def test_graph_wires_slots_to_stock_agent(monkeypatch):
     from finance_agent.agents.supervisor import ManagerAgent
     from finance_agent.orchestrator.orchestrator import AdvisorSystem
 
-    monkeypatch.setattr(slots, "get_datasource", lambda: FakeSource())
+    monkeypatch.setattr(slots, "get_provider_manager", lambda: FakeManager())
     slots.reset_stock_index()
 
     system = object.__new__(AdvisorSystem)

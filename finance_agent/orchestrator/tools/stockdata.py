@@ -1,4 +1,8 @@
-"""基于 Tushare MCP 的股票数据获取工具。"""
+"""统一数据 Provider 的 LangChain 股票数据工具。
+
+工具层只负责参数校验、调用统一数据接口（ProviderManager）与输出统一 JSON；
+具体使用 AKShare / Tushare MCP / BaoStock 中的哪个数据源，由数据层自动路由与降级。
+"""
 
 from __future__ import annotations
 
@@ -8,7 +12,7 @@ from typing import Any
 
 from langchain_core.tools import tool
 
-from finance_agent.data.tushare_mcp import get_datasource
+from finance_agent.data.provider_manager import get_provider_manager
 
 
 # 将数据源结果转换为工具可返回的 JSON 字符串。
@@ -16,7 +20,7 @@ def _json(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2, default=str)
 
 
-# 从 Tushare 返回结果中提取记录列表，兼容常见的 data/list/results 包装。
+# 从 Provider 返回结果中提取记录列表，兼容常见的 data/list/results 包装。
 def _records(data: Any) -> list[dict[str, Any]]:
     if isinstance(data, list):
         return [item for item in data if isinstance(item, dict)]
@@ -29,7 +33,7 @@ def _records(data: Any) -> list[dict[str, Any]]:
     return []
 
 
-# 将单条 Tushare 日线记录转换为统一行情字段。
+# 将单条日线记录（或记录列表）转换为统一行情字段。
 def _latest_daily_record(data: Any) -> dict[str, Any] | None:
     rows = _records(data)
     if not rows:
@@ -46,13 +50,29 @@ def _first_value(record: dict[str, Any], *keys: str, default: Any = None) -> Any
     return default
 
 
+# 返回最近一次数据请求的来源元数据，供工具层标记数据来源与降级状态。
+def _meta() -> dict[str, Any]:
+    meta = get_provider_manager().last_metadata
+    source = meta.get("source")
+    if not source:
+        return {"source": "unavailable"}
+    result: dict[str, Any] = {
+        "source": source,
+        "fetched_at": meta.get("fetched_at"),
+    }
+    if meta.get("degraded"):
+        result["degraded"] = True
+        result["attempted"] = meta.get("attempted") or []
+    return result
+
+
 @tool
-# 获取最近交易日行情，并合并 Tushare 的估值字段。
+# 获取最近交易日行情，并合并估值字段。
 def get_stock_quote(stock_code: str) -> str:
     """获取 A 股最近交易日行情与估值概览。"""
-    source = get_datasource()
-    daily = _latest_daily_record(source.get_daily(stock_code))
-    valuation = _latest_daily_record(source.get_daily_basic(stock_code))
+    manager = get_provider_manager()
+    daily = _latest_daily_record(manager.get_daily(stock_code))
+    valuation = _latest_daily_record(manager.get_daily_basic(stock_code))
     if daily is None:
         return _json({"code": stock_code, "error": "未获取到最近交易日行情"})
     valuation = valuation or {}
@@ -72,7 +92,7 @@ def get_stock_quote(stock_code: str) -> str:
         "ps": _first_value(valuation, "ps", "ps_ttm"),
         "total_market_cap": _first_value(valuation, "total_mv", "total_market_cap"),
         "circ_market_cap": _first_value(valuation, "circ_mv", "circ_market_cap"),
-        "source": "tushare_mcp",
+        **_meta(),
     }
     return _json(result)
 
@@ -94,9 +114,9 @@ def get_stock_history(
 ) -> str:
     """获取 A 股历史 K 线数据。"""
     if period != "daily":
-        return _json({"code": stock_code, "error": "Tushare MCP 当前仅支持 daily 周期"})
-    source = get_datasource()
-    result = source.get_daily(stock_code, start_date, end_date)
+        return _json({"code": stock_code, "error": "当前仅支持 daily 周期"})
+    manager = get_provider_manager()
+    result = manager.get_daily(stock_code, start_date, end_date)
     rows = _records(result)
     normalized = []
     for row in rows:
@@ -110,43 +130,43 @@ def get_stock_history(
             "amount": row.get("amount"),
             "change_pct": _first_value(row, "pct_chg", "change_pct"),
         })
-    return _json({"code": stock_code, "count": len(normalized), "data": normalized})
+    return _json({"code": stock_code, "count": len(normalized), "data": normalized, **_meta()})
 
 
 @tool
-# 获取 Tushare 财务指标数据。
+# 获取财务指标数据。
 def get_financial_indicators(stock_code: str) -> str:
     """获取 A 股财务分析指标。"""
-    data = get_datasource().get_financial_indicator(stock_code)
+    data = get_provider_manager().get_financial_indicator(stock_code)
     row = _latest_daily_record(data) or {}
-    return _json({"code": stock_code, **row, "source": "tushare_mcp"})
+    return _json({"code": stock_code, **row, **_meta()})
 
 
 @tool
 # 获取 A 股基础信息。
 def get_stock_basic_info(stock_code: str) -> str:
     """获取 A 股基本信息，包括名称、行业和上市日期。"""
-    data = get_datasource().get_stock_basic(stock_code)
+    data = get_provider_manager().get_stock_basic(stock_code)
     row = _latest_daily_record(data) or {}
-    return _json({"code": stock_code, **row, "source": "tushare_mcp"})
+    return _json({"code": stock_code, **row, **_meta()})
 
 
 @tool
 # 获取每日估值指标。
 def get_valuation_indicators(stock_code: str) -> str:
     """获取 PE、PB、PS 和市值等估值指标。"""
-    data = get_datasource().get_daily_basic(stock_code)
+    data = get_provider_manager().get_daily_basic(stock_code)
     row = _latest_daily_record(data) or {}
-    return _json({"code": stock_code, **row, "source": "tushare_mcp"})
+    return _json({"code": stock_code, **row, **_meta()})
 
 
 @tool
 # 获取利润表数据。
 def get_income_statement(stock_code: str) -> str:
     """获取 A 股利润表数据。"""
-    data = get_datasource().get_income(stock_code)
+    data = get_provider_manager().get_income(stock_code)
     row = _latest_daily_record(data) or {}
-    return _json({"code": stock_code, **row, "source": "tushare_mcp"})
+    return _json({"code": stock_code, **row, **_meta()})
 
 
 # 从用户问题中提取可用于行业或名称匹配的关键词。
@@ -173,8 +193,8 @@ def search_candidates(user_query: str, max_results: int = 5) -> str:
     无名称命中时再回退到行业/关键词匹配。
     """
     limit = min(max(int(max_results), 1), 10)
-    source = get_datasource()
-    basics = _records(source.get_stock_basic())
+    manager = get_provider_manager()
+    basics = _records(manager.get_stock_basic())
     query_lower = str(user_query or "").lower()
     keyword = _candidate_keyword(user_query)
     keywords = [part for part in keyword.split() if part]
@@ -206,7 +226,7 @@ def search_candidates(user_query: str, max_results: int = 5) -> str:
         if not code or not name:
             continue
         if name.lower() in query_lower:
-            daily = _latest_daily_record(source.get_daily(code, (datetime.now() - timedelta(days=15)).strftime("%Y-%m-%d")))
+            daily = _latest_daily_record(manager.get_daily(code, (datetime.now() - timedelta(days=15)).strftime("%Y-%m-%d")))
             _append(code, name, industry, daily, "按股票名称匹配，近期涨跌幅 {:+.2f}%")
         if len(candidates) >= limit * 5:
             break
@@ -222,7 +242,7 @@ def search_candidates(user_query: str, max_results: int = 5) -> str:
             code = str(_first_value(item, "ts_code", "code", default="")).split(".")[0].strip()
             if not code:
                 continue
-            daily = _latest_daily_record(source.get_daily(code, (datetime.now() - timedelta(days=15)).strftime("%Y-%m-%d")))
+            daily = _latest_daily_record(manager.get_daily(code, (datetime.now() - timedelta(days=15)).strftime("%Y-%m-%d")))
             change_pct = _first_value(daily or {}, "pct_chg", "change_pct", default=0)
             try:
                 sort_value = float(change_pct or 0)

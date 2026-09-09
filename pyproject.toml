@@ -49,6 +49,11 @@ dev = [
     "pytest-asyncio",
     "httpx",
 ]
+# 本地股票数据源（AKShare / BaoStock）；Tushare 走 MCP，无需额外安装。
+providers = [
+    "akshare>=1.10.0",
+    "baostock>=0.8.8",
+]
 [tool.setuptools.packages.find]
 include = ["finance_agent*"]
 

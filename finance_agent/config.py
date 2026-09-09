@@ -77,9 +77,22 @@ def get_postgres_connection_factory():
     dsn = _postgres_dsn()
     return lambda: psycopg.connect(dsn, connect_timeout=POSTGRES_CONNECT_TIMEOUT)
 
-# Tushare MCP 数据缓存；请求失败时可回退到最近一次成功缓存
+# 统一股票数据源配置；Provider Manager 按顺序自动降级。
 TUSHARE_MCP_URL = os.getenv("TUSHARE_MCP_URL", "").strip()
 TUSHARE_MCP_TIMEOUT = float(os.getenv("TUSHARE_MCP_TIMEOUT", "30"))
+DEFAULT_DATA_PROVIDER = os.getenv("DEFAULT_DATA_PROVIDER", "akshare").strip().lower()
+DATA_PROVIDER_ORDER = [
+    item.strip().lower()
+    for item in os.getenv(
+        "DATA_PROVIDER_ORDER", "akshare,tushare_mcp,baostock"
+    ).split(",")
+    if item.strip()
+]
+AKSHARE_ENABLED = os.getenv("AKSHARE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+TUSHARE_ENABLED = bool(TUSHARE_MCP_URL) and os.getenv("TUSHARE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+BAOSTOCK_ENABLED = os.getenv("BAOSTOCK_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+BAOSTOCK_USERNAME = os.getenv("BAOSTOCK_USERNAME", "").strip()
+BAOSTOCK_PASSWORD = os.getenv("BAOSTOCK_PASSWORD", "").strip()
 
 # DashScope 联网搜索已移除，板块/行业市场资料改用东方财富/新浪财经直接抓取
 DEEPSEEK_INTENT_MODEL = os.getenv("DEEPSEEK_INTENT_MODEL", "deepseek-chat").strip()

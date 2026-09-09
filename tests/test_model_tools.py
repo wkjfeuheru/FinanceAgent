@@ -1,4 +1,4 @@
-"""模型数据库与 Tushare 工具契约测试。"""
+"""模型数据库与股票数据工具契约测试。"""
 
 import json
 
@@ -39,8 +39,8 @@ def test_database_tools_are_langchain_tools_and_scope_conversation(monkeypatch):
     assert denied["error"] == "会话不存在或无权访问"
 
 
-def test_tushare_tool_facade_exports_existing_model_tools():
-    from finance_agent.orchestrator.tools.tushare import (
+def test_unified_stock_tool_facade_exports_existing_model_tools():
+    from finance_agent.orchestrator.tools.stockdata import (
         get_stock_history,
         get_stock_quote,
         search_candidates,

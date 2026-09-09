@@ -10,7 +10,7 @@ from langchain_core.messages import ToolMessage
 
 from finance_agent.agents.base import ReActAgent
 from finance_agent.config import safe_parse_json
-from finance_agent.orchestrator.tools.product import list_products, query_product
+from finance_agent.orchestrator.tools.database import list_products, query_product
 
 
 _PRODUCT_ANALYSIS_PROMPT = """你是金融产品解读专家，专注于基金、ETF等金融产品的事实性分析。

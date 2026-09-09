@@ -31,10 +31,10 @@ logger = logging.getLogger(__name__)
 
 from finance_agent.agents.base import ProceduralAgent
 from finance_agent.orchestrator.tools.allocation import calculate_stock_metrics, optimize_portfolio
-from finance_agent.orchestrator.tools.fundamental import fetch_stock_data
+from finance_agent.orchestrator.tools.stockdata import fetch_stock_data
 
 
-# ── 多空辩论模块（内联，原 finance_agent/debate/coordinator.py）──
+# ── 多空辩论模块（内联）──
 
 
 @dataclass

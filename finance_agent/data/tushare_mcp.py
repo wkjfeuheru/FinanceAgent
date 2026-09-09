@@ -169,12 +169,18 @@ def _to_date(date_str: str) -> str:
 class TushareMcpDataSource:
     """Tushare MCP 高层数据源适配器。
 
-    提供与 BaostockDataSource 对齐的业务接口，
+    提供统一股票数据接口（与 AKShare / BaoStock 适配器对齐），
     内部通过 TushareMcpClient 调用远程 MCP 工具获取数据。
 
     若不确定 Tushare MCP Server 暴露的工具名称，
     可先调用 discover_tools() 查看完整工具列表。
     """
+
+    provider_name = "tushare_mcp"
+
+    def is_available(self) -> bool:
+        """返回 Tushare MCP 是否已配置。"""
+        return bool(self.client.url)
 
     def __init__(self, url: str = TUSHARE_MCP_URL, timeout: float = TUSHARE_MCP_TIMEOUT):
         self.client = TushareMcpClient(url, timeout)
@@ -290,29 +296,3 @@ class TushareMcpDataSource:
             end_date=_to_date(end),
         )
 
-
-# ── 单例管理 ──────────────────────────────────────────────────
-
-_datasource_instance: TushareMcpDataSource | None = None
-_datasource_lock = threading.Lock()
-
-
-def get_datasource() -> TushareMcpDataSource:
-    """返回 Tushare MCP 数据源单例（线程安全，懒加载）。
-
-    若 TUSHARE_MCP_URL 未配置则抛出 TushareMcpError，
-    调用方可据此判断是否启用 Tushare 数据源。
-    """
-    global _datasource_instance
-    if _datasource_instance is not None:
-        return _datasource_instance
-    with _datasource_lock:
-        if _datasource_instance is not None:
-            return _datasource_instance
-        _datasource_instance = TushareMcpDataSource()
-        return _datasource_instance
-
-
-def is_available() -> bool:
-    """检查 Tushare MCP 数据源是否已配置（URL 非空）。"""
-    return bool(TUSHARE_MCP_URL)
