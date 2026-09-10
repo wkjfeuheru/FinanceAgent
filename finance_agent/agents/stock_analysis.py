@@ -256,11 +256,17 @@ class StockAnalysisAgent(ReActAgent):
         }
         content = self._format_analysis_response(analyses)
         state["agent_response"] = content
-        state.setdefault("intent_results", {})["market_query"] = {
+        task_intent = str(state.get("current_task_intent", "")).strip()
+        result_payload = {
             "status": "success" if analyses else "degraded",
             "content": content,
         }
-        state["intent_results"].setdefault("stock_recommendation", state["intent_results"]["market_query"])
+        if task_intent in {"market_query", "stock_recommendation"}:
+            state.setdefault("intent_results", {})[task_intent] = result_payload
+        else:
+            # 兼容旧的直接调用方：没有任务上下文时保留历史双键投影。
+            state.setdefault("intent_results", {})["market_query"] = result_payload
+            state["intent_results"].setdefault("stock_recommendation", result_payload)
         return state
 
     # 将逐股结果整理为总管可合并的文本。

@@ -646,6 +646,31 @@ class SlotExtractor:
             state["task_dispatch"] = [
                 item for item in dispatch if str(item.get("intent", "")).strip() not in pruned_intents
             ]
+            kept_ids = {
+                str(item.get("task_id", ""))
+                for item in state["task_dispatch"]
+                if item.get("task_id")
+            }
+            if state.get("tasks"):
+                state["tasks"] = [
+                    task for task in state["tasks"]
+                    if (
+                        task.task_id in kept_ids
+                        if kept_ids
+                        else task.intent.value not in pruned_intents
+                    )
+                ]
+                kept_task_ids = {task.task_id for task in state["tasks"]}
+                for task in state["tasks"]:
+                    task.depends_on = [
+                        dependency for dependency in task.depends_on
+                        if dependency in kept_task_ids
+                    ]
+            state["task_plan"] = list(dict.fromkeys(
+                str(item.get("expert", ""))
+                for item in state["task_dispatch"]
+                if item.get("expert")
+            ))
 
         return state
 

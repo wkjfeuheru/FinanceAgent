@@ -10,9 +10,15 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from finance_agent.contracts.schema.enums import ExpertStatus, TaskKind
+from finance_agent.contracts.schema.enums import (
+    ExpertStatus,
+    IntentKind,
+    RunStatus,
+    TaskKind,
+    TaskStatus,
+)
 
 
 def _utcnow() -> datetime:
@@ -43,7 +49,30 @@ class Task(_ContractModel):
     """总管分派的单个任务。"""
 
     task_id: str
-    kind: TaskKind
+    # kind 保留给旧审计/调用方；新代码应使用 intent + expert_name。
+    kind: TaskKind | None = None
+    intent: IntentKind | None = None
+    expert_name: str = ""
+    requirement: str = ""
+    execution_mode: str = ""
+    depends_on: list[str] = Field(default_factory=list)
+    status: TaskStatus = TaskStatus.PENDING
+    retry_count: int = Field(default=0, ge=0)
+    error_code: str | None = None
+
+    @model_validator(mode="after")
+    def normalize_legacy_fields(self) -> "Task":
+        """让旧 kind-only 任务仍可读取，同时保证新任务信息完整。"""
+        if self.intent is None and self.kind is not None:
+            try:
+                self.intent = IntentKind(self.kind.value)
+            except ValueError:
+                pass
+        if self.kind is None and self.expert_name in {
+            item.value for item in TaskKind
+        }:
+            self.kind = TaskKind(self.expert_name)
+        return self
 
 
 class DispatchPlan(_ContractModel):
@@ -72,6 +101,8 @@ class PreparedContext(_ContractModel):
 class ExpertResult(_ContractModel):
     """专家结果包；未知或无效结构化输出不得进入最终合成。"""
 
+    task_id: str = ""
+    intent: IntentKind | None = None
     expert_name: str
     status: ExpertStatus
     schema_version: str = "1.0"
@@ -79,6 +110,22 @@ class ExpertResult(_ContractModel):
     result_data: dict[str, Any] = Field(default_factory=dict)
     fact_ids: list[str] = Field(default_factory=list)
     degradation_reason: str | None = None
+    error_code: str | None = None
+
+    @model_validator(mode="after")
+    def normalize_legacy_intent(self) -> "ExpertResult":
+        """为旧结果补充可推导的意图，避免历史调用方立即失效。"""
+        if self.intent is None:
+            mapping = {
+                "stock_analysis": IntentKind.MARKET_QUERY,
+                "asset_allocation": IntentKind.ASSET_ALLOCATION,
+                "product_analysis": IntentKind.PRODUCT_ANALYSIS,
+                "casual_chat": IntentKind.CASUAL_CHAT,
+            }
+            self.intent = mapping.get(self.expert_name)
+        if not self.task_id:
+            self.task_id = self.expert_name
+        return self
 
 
 class ResponseEnvelope(_ContractModel):
@@ -89,4 +136,7 @@ class ResponseEnvelope(_ContractModel):
     conversation_id: str
     message_id: UUID
     response: str
+    run_status: RunStatus = RunStatus.COMPLETED
+    tasks: list[Task] = Field(default_factory=list)
     results: list[ExpertResult] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)

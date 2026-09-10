@@ -54,6 +54,10 @@ class ChatResponse(BaseModel):
     compliance_result: dict[str, Any] = Field(default_factory=dict, description="合规审查结果")
     product_analysis: dict[str, Any] | None = Field(default=None, description="产品解读结果")
     conversation_id: str = ""
+    tasks: list[dict[str, Any]] = Field(default_factory=list)
+    task_results: dict[str, Any] = Field(default_factory=dict)
+    run_status: str = "completed"
+    warnings: list[str] = Field(default_factory=list)
 
 
 def to_chat_response(result: ResponseEnvelope | Mapping[str, Any] | ChatResponse) -> ChatResponse:
@@ -63,7 +67,15 @@ def to_chat_response(result: ResponseEnvelope | Mapping[str, Any] | ChatResponse
     if isinstance(result, ResponseEnvelope):
         payload: dict[str, Any] = {
             "response": result.response,
-            "task_plan": [item.expert_name for item in result.results],
+            "task_plan": list(dict.fromkeys(
+                item.expert_name for item in (result.tasks or result.results)
+            )),
+            "tasks": [item.model_dump(mode="json") for item in result.tasks],
+            "task_results": {
+                item.task_id: item.model_dump(mode="json") for item in result.results
+            },
+            "run_status": result.run_status.value,
+            "warnings": list(result.warnings),
             "conversation_id": result.conversation_id,
         }
         for expert_result in result.results:

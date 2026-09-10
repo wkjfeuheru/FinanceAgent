@@ -95,9 +95,25 @@ BAOSTOCK_USERNAME = os.getenv("BAOSTOCK_USERNAME", "").strip()
 BAOSTOCK_PASSWORD = os.getenv("BAOSTOCK_PASSWORD", "").strip()
 
 # DashScope 联网搜索已移除，板块/行业市场资料改用东方财富/新浪财经直接抓取
-DEEPSEEK_INTENT_MODEL = os.getenv("DEEPSEEK_INTENT_MODEL", "deepseek-chat").strip()
-DEEPSEEK_INTENT_TIMEOUT = float(os.getenv("DEEPSEEK_INTENT_TIMEOUT", "30"))
-DEEPSEEK_INTENT_MAX_RETRIES = int(os.getenv("DEEPSEEK_INTENT_MAX_RETRIES", "1"))
+# 意图分类使用独立的轻量 Qwen 兼容接口；保留旧变量作为迁移期回退。
+INTENT_MODEL_PROVIDER = os.getenv("INTENT_MODEL_PROVIDER", "qwen").strip().lower()
+INTENT_MODEL = os.getenv("INTENT_MODEL", os.getenv("DEEPSEEK_INTENT_MODEL", "qwen-turbo")).strip()
+INTENT_MODEL_BASE_URL = os.getenv(
+    "INTENT_MODEL_BASE_URL",
+    "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+).strip()
+INTENT_MODEL_API_KEY = os.getenv(
+    "INTENT_MODEL_API_KEY",
+    os.getenv("QWEN_API_KEY", os.getenv("DASHSCOPE_API_KEY", "")),
+).strip()
+INTENT_MODEL_TIMEOUT = float(os.getenv("INTENT_MODEL_TIMEOUT", os.getenv("DEEPSEEK_INTENT_TIMEOUT", "5")))
+INTENT_MODEL_MAX_RETRIES = int(os.getenv("INTENT_MODEL_MAX_RETRIES", os.getenv("DEEPSEEK_INTENT_MAX_RETRIES", "2")))
+INTENT_MODEL_MAX_TOKENS = int(os.getenv("INTENT_MODEL_MAX_TOKENS", "512"))
+INTENT_MODEL_DEADLINE = float(os.getenv("INTENT_MODEL_DEADLINE", "15"))
+# 旧名称保留，避免未迁移调用方导入失败。
+DEEPSEEK_INTENT_MODEL = INTENT_MODEL
+DEEPSEEK_INTENT_TIMEOUT = INTENT_MODEL_TIMEOUT
+DEEPSEEK_INTENT_MAX_RETRIES = INTENT_MODEL_MAX_RETRIES
 LLM_REQUEST_TIMEOUT = float(os.getenv("LLM_REQUEST_TIMEOUT", "45"))
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "1"))
 FINAL_SYNTHESIS_TIMEOUT = float(os.getenv("FINAL_SYNTHESIS_TIMEOUT", "20"))

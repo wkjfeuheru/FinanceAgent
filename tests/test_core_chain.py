@@ -275,3 +275,69 @@ def test_manager_synthesis_combines_expert_outputs():
     assert "股票分析结果" in response
     assert "配置结果" in response
     assert "风险提示" in response
+
+
+def test_task_batch_executes_same_expert_for_distinct_intents(monkeypatch):
+    from langgraph.checkpoint.memory import MemorySaver
+    from finance_agent.contracts import IntentKind, Task
+    from finance_agent.orchestrator.orchestrator import AdvisorSystem
+
+    system = object.__new__(AdvisorSystem)
+    system.checkpointer = MemorySaver()
+    system.manager = ManagerAgent()
+    system.manager._intent_classifier = FakeClassifier({
+        "finance_related": True,
+        "intents": [
+            {"intent": "market_query", "query": "分析600519", "confidence": 0.99,
+             "execution_mode": "security_analysis", "evidence": "分析600519"},
+            {"intent": "stock_recommendation", "query": "推荐AI股票", "confidence": 0.99,
+             "execution_mode": "candidate_search", "evidence": "推荐AI股票"},
+        ],
+    })
+    calls = []
+
+    class FakeAgent:
+        agent_name = "stock_analysis"
+
+        def invoke(self, state):
+            calls.append(state["current_task_intent"])
+            intent = state["current_task_intent"]
+            state.setdefault("intent_results", {})[intent] = {
+                "status": "success", "content": f"{intent}完成",
+            }
+            state["stock_analysis"] = {"600519": {"code": "600519"}}
+            return state
+
+    class FakeOther:
+        def invoke(self, state):
+            return state
+
+    system.stock_agent = FakeAgent()
+    system.allocation_agent = FakeOther()
+    system.product_agent = FakeOther()
+    system.casual_chat_agent = FakeOther()
+    system.slot_extractor = type("Slots", (), {"extract": lambda self, state: state})()
+    import threading
+    system._progress_context = type("Context", (), {})()
+    system._progress_callbacks = {}
+    system._progress_lock = threading.Lock()
+    system._trace_lock = threading.Lock()
+    system._trace_sequences = {}
+    system._workflow_lock = threading.RLock()
+    system._stop_requests = {}
+    system._active_runs = {}
+    system._stop_lock = threading.Lock()
+    system.audit = type("_NoopAudit", (), {"is_available": lambda self: False})()
+    system._trace_agent = lambda *args, **kwargs: None
+    system._emit_progress = lambda *args, **kwargs: None
+
+    graph = system._build_graph()
+    result = graph.invoke(
+        {"user_message": "分析600519并推荐AI股票", "completed_experts": [], "intent_results": {}},
+        config={"configurable": {"thread_id": "task-batch-test"}},
+    )
+
+    assert sorted(calls) == ["market_query", "stock_recommendation"]
+    assert set(result["task_results"]) == {"task-1", "task-2"}
+    assert result["task_results"]["task-1"].intent is IntentKind.MARKET_QUERY
+    assert result["task_results"]["task-2"].intent is IntentKind.STOCK_RECOMMENDATION

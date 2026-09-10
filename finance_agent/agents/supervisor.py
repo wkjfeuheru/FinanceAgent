@@ -10,16 +10,25 @@ from __future__ import annotations
 import json
 import logging
 import math
+import time
 from typing import Any, Callable, Dict, List
 
 import requests
 
 from finance_agent.agents.base import ProceduralAgent
+from finance_agent.contracts.adapters import (
+    dispatch_plan_to_legacy,
+    normalize_dispatch_plan,
+    task_plan_to_legacy,
+)
 from finance_agent.config import (
-    DEEPSEEK_API_KEY,
-    DEEPSEEK_INTENT_MAX_RETRIES,
-    DEEPSEEK_INTENT_MODEL,
-    DEEPSEEK_INTENT_TIMEOUT,
+    INTENT_MODEL_API_KEY,
+    INTENT_MODEL_BASE_URL,
+    INTENT_MODEL_DEADLINE,
+    INTENT_MODEL_MAX_RETRIES,
+    INTENT_MODEL_MAX_TOKENS,
+    INTENT_MODEL,
+    INTENT_MODEL_TIMEOUT,
 )
 from finance_agent.middleware import OUTPUT_BLOCKED_RESPONSE, check_sensitive_words
 
@@ -59,9 +68,14 @@ _INTENT_CONFIDENCE_THRESHOLD = 0.9
 class IntentClassificationError(RuntimeError):
     """DeepSeek 意图识别不可用或返回非法协议。"""
 
+    def __init__(self, message: str, *, error_code: str, cause: str) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.cause = cause
+
 
 class DeepSeekIntentClassifier:
-    """通过 DeepSeek OpenAI 兼容接口执行多轮上下文意图分类。"""
+    """通过 Qwen OpenAI 兼容接口执行多轮上下文意图分类。"""
 
     def __init__(
         self,
@@ -69,21 +83,33 @@ class DeepSeekIntentClassifier:
         model: str,
         timeout: float = 30,
         max_retries: int = 1,
+        max_tokens: int = 512,
+        deadline: float = 15,
+        base_url: str = INTENT_MODEL_BASE_URL,
         requester: Callable[..., Any] = requests.post,
     ) -> None:
         self.api_key = api_key.strip()
         self.model = model.strip()
         self.timeout = timeout
-        self.max_retries = min(max(0, max_retries), 1)
+        self.max_retries = max(0, int(max_retries))
+        self.max_tokens = max(1, int(max_tokens))
+        self.deadline = max(0.0, float(deadline))
+        self.base_url = base_url.strip()
         self.requester = requester
 
     @staticmethod
     def _validate(payload: Any, message: str) -> dict[str, Any]:
         if not isinstance(payload, dict) or not isinstance(payload.get("intents"), list):
-            raise IntentClassificationError("DeepSeek 意图响应必须包含 intents 列表")
+            raise IntentClassificationError(
+                "意图响应必须包含 intents 列表",
+                error_code="intent_protocol_error", cause="invalid_schema",
+            )
         raw_intents = payload["intents"]
         if not raw_intents:
-            raise IntentClassificationError("DeepSeek 意图响应必须包含至少一个意图")
+            raise IntentClassificationError(
+                "意图响应必须包含至少一个意图",
+                error_code="intent_protocol_error", cause="empty_intents",
+            )
         valid: list[dict[str, Any]] = []
         for item in raw_intents:
             if not isinstance(item, dict):
@@ -92,29 +118,43 @@ class DeepSeekIntentClassifier:
             mode = str(item.get("execution_mode", "")).strip()
             evidence = str(item.get("evidence", "")).strip()
             if intent not in _CLASSIFIER_MODES:
-                raise IntentClassificationError(f"DeepSeek 返回非法 intent: {intent}")
+                raise IntentClassificationError(
+                    f"返回非法 intent: {intent}",
+                    error_code="intent_protocol_error", cause="invalid_intent",
+                )
             if mode not in _CLASSIFIER_MODES[intent]:
                 raise IntentClassificationError(
-                    f"DeepSeek 返回非法 execution_mode: {mode}"
+                    f"返回非法 execution_mode: {mode}",
+                    error_code="intent_protocol_error", cause="invalid_execution_mode",
                 )
             if not evidence or evidence not in message:
                 continue
             try:
                 confidence = float(item.get("confidence"))
             except (TypeError, ValueError):
-                raise IntentClassificationError("DeepSeek 意图置信度必须是有限数值")
+                raise IntentClassificationError(
+                    "意图置信度必须是有限数值",
+                    error_code="intent_protocol_error", cause="invalid_confidence",
+                )
             if not math.isfinite(confidence) or not 0 <= confidence <= 1:
-                raise IntentClassificationError("DeepSeek 意图置信度必须位于 0 到 1")
+                raise IntentClassificationError(
+                    "意图置信度必须位于 0 到 1",
+                    error_code="intent_protocol_error", cause="invalid_confidence",
+                )
             if (
                 confidence < _INTENT_CONFIDENCE_THRESHOLD
                 and not str(item.get("clarification_question", "")).strip()
             ):
                 raise IntentClassificationError(
-                    "低置信度意图必须包含 clarification_question"
+                    "低置信度意图必须包含 clarification_question",
+                    error_code="intent_protocol_error", cause="missing_clarification",
                 )
             valid.append(dict(item))
         if raw_intents and not valid:
-            raise IntentClassificationError("DeepSeek 意图响应没有可验证的当前轮证据")
+            raise IntentClassificationError(
+                "意图响应没有可验证的当前轮证据",
+                error_code="intent_protocol_error", cause="missing_evidence",
+            )
         return {
             "intents": valid,
             "finance_related": bool(payload.get("finance_related", False)),
@@ -129,7 +169,10 @@ class DeepSeekIntentClassifier:
         pending_clarifications: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not self.api_key:
-            raise IntentClassificationError("缺少 DEEPSEEK_API_KEY")
+            raise IntentClassificationError(
+                "缺少意图模型 API key",
+                error_code="intent_unavailable", cause="missing_api_key",
+            )
         request_input = {
             "current_message": message.strip(),
             "recent_context_summary": context_summary.strip(),
@@ -144,27 +187,58 @@ class DeepSeekIntentClassifier:
                 {"role": "user", "content": json.dumps(request_input, ensure_ascii=False)},
             ],
             "temperature": 0,
+            "max_tokens": self.max_tokens,
             "response_format": {"type": "json_object"},
         }
-        error: Exception | None = None
+        started = time.monotonic()
+        error: IntentClassificationError | None = None
         for _attempt in range(self.max_retries + 1):
+            remaining = self.deadline - (time.monotonic() - started)
+            if remaining <= 0:
+                raise IntentClassificationError(
+                    "意图分类超过总 deadline",
+                    error_code="intent_unavailable", cause="deadline",
+                ) from error
             try:
                 response = self.requester(
-                    "https://api.deepseek.com/v1/chat/completions",
+                    self.base_url,
                     headers={
                         "Authorization": f"Bearer {self.api_key}",
                         "Content-Type": "application/json",
                     },
                     json=body,
-                    timeout=self.timeout,
+                    timeout=min(self.timeout, remaining),
                 )
                 response.raise_for_status()
                 content = response.json()["choices"][0]["message"]["content"]
-                parsed = json.loads(content)
+                try:
+                    parsed = json.loads(content)
+                except (TypeError, json.JSONDecodeError) as exc:
+                    raise IntentClassificationError(
+                        "意图响应不是合法 JSON",
+                        error_code="intent_protocol_error", cause="invalid_json",
+                    ) from exc
                 return self._validate(parsed, message)
-            except Exception as exc:
+            except IntentClassificationError as exc:
                 error = exc
-        raise IntentClassificationError(f"DeepSeek 意图识别失败：{error}") from error
+            except requests.Timeout as exc:
+                error = IntentClassificationError(
+                    str(exc), error_code="intent_unavailable", cause="timeout",
+                )
+            except requests.HTTPError as exc:
+                error = IntentClassificationError(
+                    str(exc), error_code="intent_unavailable", cause="http",
+                )
+            except requests.RequestException as exc:
+                error = IntentClassificationError(
+                    str(exc), error_code="intent_unavailable", cause="transport",
+                )
+            except Exception as exc:
+                error = IntentClassificationError(
+                    str(exc), error_code="intent_unavailable", cause="transport",
+                )
+        assert error is not None
+        raise error
 
 
 _INTENTS = ("market_query", "stock_recommendation", "asset_allocation", "product_analysis", "casual_chat")
@@ -242,10 +316,13 @@ class ManagerAgent(ProceduralAgent):
     def intent_classifier(self) -> DeepSeekIntentClassifier:
         if self._intent_classifier is None:
             self._intent_classifier = DeepSeekIntentClassifier(
-                api_key=DEEPSEEK_API_KEY,
-                model=DEEPSEEK_INTENT_MODEL,
-                timeout=DEEPSEEK_INTENT_TIMEOUT,
-                max_retries=DEEPSEEK_INTENT_MAX_RETRIES,
+                api_key=INTENT_MODEL_API_KEY,
+                model=INTENT_MODEL,
+                timeout=INTENT_MODEL_TIMEOUT,
+                max_retries=INTENT_MODEL_MAX_RETRIES,
+                max_tokens=INTENT_MODEL_MAX_TOKENS,
+                deadline=INTENT_MODEL_DEADLINE,
+                base_url=INTENT_MODEL_BASE_URL,
             )
         return self._intent_classifier
 
@@ -273,6 +350,7 @@ class ManagerAgent(ProceduralAgent):
         """使用 DeepSeek 结合近期摘要识别并合并本轮全部意图。"""
         source = "deepseek"
         classification_error = False
+        classification_error_details: dict[str, str] = {}
         try:
             parsed = self._classify_with_deepseek(
                 message,
@@ -285,6 +363,10 @@ class ManagerAgent(ProceduralAgent):
             _LOGGER.warning("intent_deepseek_unavailable error=%s", exc)
             parsed = {}
             classification_error = True
+            classification_error_details = {
+                "error_code": getattr(exc, "error_code", "intent_unavailable"),
+                "cause": getattr(exc, "cause", "unknown"),
+            }
 
         uncertain: list[dict[str, Any]] = []
 
@@ -350,6 +432,7 @@ class ManagerAgent(ProceduralAgent):
             "uncertain_intents": uncertain,
             "finance_related": finance_related,
             "intent_source": source,
+            "classification_error": classification_error_details,
         }
 
     def dispatch_tasks(self, state: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -362,32 +445,45 @@ class ManagerAgent(ProceduralAgent):
             list(state.get("pending_fields", []) or []),
             state.get("pending_clarifications"),
         )
-        expert_map = {
-            "market_query": "stock_analysis",
-            "stock_recommendation": "stock_analysis",
-            "asset_allocation": "asset_allocation",
-            "product_analysis": "product_analysis",
-            "casual_chat": "casual_chat",
-        }
-        dispatch = [
-            {
-                "intent": item["intent"],
-                "expert": expert_map[item["intent"]],
-                "requirement": item.get("query", "").strip() or message,
-                "execution_mode": item.get("execution_mode", "").strip(),
-            }
-            for item in classified.get("intents", [])
-            if item["intent"] in expert_map
-        ]
+        plan = normalize_dispatch_plan(classified.get("intents", []), message)
+        state["tasks"] = plan.tasks
+        dispatch = dispatch_plan_to_legacy(plan)
         state["detected_intents"] = classified.get("intents", [])
         state["uncertain_intents"] = classified.get("uncertain_intents", [])
         state["finance_related"] = classified.get("finance_related", False)
+        state["classification_error"] = classified.get("classification_error", {})
         state["task_dispatch"] = dispatch
-        state["task_plan"] = list(dict.fromkeys(item["expert"] for item in dispatch))
+        state["task_plan"] = task_plan_to_legacy(plan)
         return dispatch
 
     def synthesize_response(self, state: Dict[str, Any]) -> str:
         """按用户友好顺序合并专家结果，并附加风险提示。"""
+        task_results = state.get("task_results", {}) or {}
+        tasks = state.get("tasks", []) or []
+        if task_results and tasks:
+            sections = []
+            for task in tasks:
+                result = task_results.get(task.task_id)
+                if not result:
+                    continue
+                if hasattr(result, "summary"):
+                    content = result.summary
+                    status = result.status.value
+                else:
+                    content = str(result.get("summary", result.get("content", ""))).strip()
+                    status = str(result.get("status", "success"))
+                if content:
+                    sections.append(content)
+                elif status in {"failed", "degraded", "timeout", "blocked"}:
+                    sections.append(f"{task.intent.value if task.intent else task.task_id}：暂无可用数据。")
+            response = "\n\n".join(sections).strip()
+            if response:
+                if check_sensitive_words(response):
+                    response = OUTPUT_BLOCKED_RESPONSE
+                elif "风险提示" not in response:
+                    response += "\n\n### 风险提示\n以上内容仅供参考，不构成投资建议。投资有风险，决策需谨慎。"
+                state["agent_response"] = response
+                return response
         results = state.get("intent_results", {}) or {}
         sections = []
         for intent in ("casual_chat", "market_query", "stock_recommendation", "product_analysis", "asset_allocation"):

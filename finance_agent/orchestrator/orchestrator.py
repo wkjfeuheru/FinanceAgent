@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import threading
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List
 
 from langgraph.graph import END, START, StateGraph
@@ -20,13 +22,19 @@ from finance_agent.config import get_checkpoint_saver
 from finance_agent.contracts import (
     ExpertResult,
     ExpertStatus,
+    FactSnapshot,
+    FactSnapshot,
     RequestEnvelope,
+    RunStatus,
+    TaskStatus,
     generate_identifiers,
 )
 from finance_agent.data.postgres_repository import PostgresAuditStore
 from finance_agent.orchestrator.database import get_database
 from finance_agent.orchestrator.memory import AgentMemoryContext, RedisMemoryStore
 from finance_agent.orchestrator.slots import SlotExtractor
+from finance_agent.orchestrator.context_builder import build_task_context
+from finance_agent.orchestrator.scheduler import TaskContext, run_task_dag
 from finance_agent.orchestrator.state import AdvisorState
 from finance_agent.middleware import BLOCKED_RESPONSE, find_sensitive_word
 
@@ -96,7 +104,7 @@ class AdvisorSystem:
             return bool(self._stop_requests.get(conversation_id))
 
     # 将单个专家结果写入 PostgreSQL 运行审计（可选，失败静默）。
-    def _audit_expert_result(self, state: Dict[str, Any], expert: str) -> None:
+    def _audit_expert_result(self, state: Dict[str, Any], expert: str, task: Any = None) -> None:
         if not self.audit.is_available():
             return
         run_id = str(state.get("run_id", "") or "")
@@ -118,6 +126,11 @@ class AdvisorSystem:
             result_data = {"product_analysis": state.get("product_analysis", {})}
         else:
             result_data = state.get("intent_results", {}).get("casual_chat", {})
+        if task is not None:
+            task_result = (state.get("task_results", {}) or {}).get(task.task_id)
+            if isinstance(task_result, ExpertResult):
+                self.audit.upsert_expert_result(run_id, trace_id, task_result)
+                return
         self.audit.upsert_expert_result(
             run_id,
             trace_id,
@@ -127,6 +140,56 @@ class AdvisorSystem:
                 summary=str(state.get("agent_response", "")).strip() or f"{expert} 分析完成",
                 result_data=result_data,
             ),
+        )
+
+    def _capture_task_facts(self, state: Dict[str, Any], task: Any) -> list[str]:
+        """将本轮专家产出的业务输入登记为可引用的事实快照。"""
+        domain = {
+            "market_query": "market",
+            "stock_recommendation": "market",
+            "asset_allocation": "allocation",
+            "product_analysis": "product",
+        }.get(task.intent.value if task.intent else "", "runtime")
+        payload_keys = (
+            "stock_data", "stock_analysis", "technical_analysis",
+            "allocation_result", "debate_result", "product_analysis",
+        )
+        payload = {key: state.get(key, {}) for key in payload_keys if state.get(key)}
+        if not payload:
+            return []
+        fact_id = f"{task.task_id}-fact-1"
+        facts = [fact for fact in state.get("facts", []) or [] if fact.fact_id != fact_id]
+        facts.append(FactSnapshot(
+            fact_id=fact_id,
+            domain=domain,
+            source=task.expert_name,
+            fetched_at=datetime.now(timezone.utc),
+            payload=payload,
+        ))
+        state["facts"] = facts
+        return [fact_id]
+
+    def _make_task_result(self, state: Dict[str, Any], task: Any, expert: str) -> ExpertResult:
+        """从兼容专家状态构造严格的 task 级结果。"""
+        intent = task.intent.value if task.intent else ""
+        intent_result = (state.get("intent_results", {}) or {}).get(intent, {})
+        status_name = str(intent_result.get("status", "success"))
+        status = ExpertStatus.DEGRADED if status_name == "degraded" else ExpertStatus.SUCCESS
+        fact_ids = self._capture_task_facts(state, task)
+        return ExpertResult(
+            task_id=task.task_id,
+            intent=task.intent,
+            expert_name=expert,
+            status=status,
+            summary=str(intent_result.get("content", "")).strip()
+            or str(state.get("agent_response", "")),
+            result_data={
+                key: state.get(key, {}) for key in (
+                    "stock_data", "stock_analysis", "technical_analysis",
+                    "allocation_result", "debate_result", "product_analysis",
+                ) if state.get(key)
+            },
+            fact_ids=fact_ids,
         )
 
     # 构建总管分派、专家执行、总管合成的状态图。
@@ -148,6 +211,11 @@ class AdvisorSystem:
             state["task_plan"] = list(dict.fromkeys(
                 str(item["expert"]) for item in dispatch
             ))
+            state["classification_error"] = state.get("classification_error", {}) or {}
+            if state["classification_error"]:
+                state.setdefault("warnings", []).append(
+                    str(state["classification_error"].get("error_code", "intent_unavailable"))
+                )
             # 澄清：无高置信度意图但有低置信度意图时，汇总澄清问题
             if not dispatch:
                 uncertain = state.get("uncertain_intents", []) or []
@@ -166,10 +234,112 @@ class AdvisorSystem:
             self._emit_progress("slots", "正在提取专家所需的结构化参数")
             return self.slot_extractor.extract(state)
 
+        def route_after_slots(state: AdvisorState) -> str:
+            """新契约任务走 DAG 批处理，旧字典分派走兼容路由。"""
+            if state.get("tasks"):
+                return "task_batch"
+            return route_expert(state)
+
+        def task_batch_handler(state: AdvisorState) -> AdvisorState:
+            """按 task_id 执行当前请求的 DAG，并合并各任务结果。"""
+            tasks = list(state.get("tasks", []) or [])
+            agents = {
+                "stock_analysis": self.stock_agent,
+                "asset_allocation": self.allocation_agent,
+                "product_analysis": self.product_agent,
+                "casual_chat": self.casual_chat_agent,
+            }
+            local_states: dict[str, dict[str, Any]] = {}
+
+            def runner(task: Any, payload: dict[str, Any]) -> dict[str, Any]:
+                local_state = copy.deepcopy(dict(state))
+                local_state["thread_id"] = f"{state.get('thread_id', 'default')}:{task.task_id}"
+                local_state["requirement"] = task.requirement
+                local_state["current_task_intent"] = task.intent.value if task.intent else ""
+                local_state["task_context"] = {
+                    **build_task_context(state, task),
+                    "upstream_results": payload.get("upstream_results", {}),
+                }
+                agent = agents[task.expert_name]
+                self._trace_agent(local_state, getattr(agent, "agent_name", task.expert_name))
+                self._emit_progress(task.expert_name, f"正在执行{task.expert_name}专家分析")
+                if task.expert_name == "asset_allocation":
+                    self._emit_progress("debate", "正在进行资产配置多空辩论")
+                output = agent.invoke(local_state)
+                local_states[task.task_id] = output
+                return self._make_task_result(output, task, task.expert_name).model_dump(mode="json")
+
+            results = run_task_dag(
+                tasks,
+                TaskContext(payload={}, runner=runner),
+                max_retries=2,
+                timeout_seconds=90,
+                deadline_seconds=180,
+            )
+            state["task_results"] = results
+            state["completed_tasks"] = []
+            state["completed_experts"] = []
+            state["facts"] = []
+            for task in tasks:
+                result = results[task.task_id]
+                task.status = (
+                    TaskStatus.SUCCESS
+                    if result.status is ExpertStatus.SUCCESS
+                    else TaskStatus.DEGRADED
+                    if result.status is ExpertStatus.DEGRADED
+                    else TaskStatus.BLOCKED
+                    if result.error_code == "dependency_blocked"
+                    else TaskStatus.TIMEOUT
+                    if result.status is ExpertStatus.TIMEOUT
+                    else TaskStatus.FAILED
+                )
+                task.retry_count = 0
+                if result.error_code:
+                    task.error_code = result.error_code
+                self._audit_expert_result(state, task.expert_name, task)
+                if task.task_id in local_states:
+                    local = local_states[task.task_id]
+                    for key in (
+                        "user_profile", "stock_data", "stock_analysis", "technical_analysis",
+                        "allocation_result", "debate_result", "product_analysis",
+                    ):
+                        if local.get(key):
+                            state[key] = local[key]
+                    for intent, value in (local.get("intent_results", {}) or {}).items():
+                        state.setdefault("intent_results", {})[intent] = value
+                    for fact in local.get("facts", []) or []:
+                        if fact.fact_id not in [item.fact_id for item in state["facts"]]:
+                            state["facts"].append(fact)
+                    state["completed_tasks"].append(task.task_id)
+                    if task.expert_name not in state["completed_experts"]:
+                        state["completed_experts"].append(task.expert_name)
+            if any(result.status is ExpertStatus.SUCCESS for result in results.values()):
+                state["run_status"] = (
+                    RunStatus.COMPLETED
+                    if all(result.status is ExpertStatus.SUCCESS for result in results.values())
+                    else RunStatus.PARTIAL
+                )
+            elif results:
+                state["run_status"] = RunStatus.FAILED
+            for task_id, result in results.items():
+                if result.status is not ExpertStatus.SUCCESS:
+                    state.setdefault("warnings", []).append(
+                        f"{task_id}: {result.error_code or result.status.value}"
+                    )
+            return state
+
         # 从委托列表中选择尚未执行的专家。
         def route_expert(state: AdvisorState) -> str:
             if self._is_stopped(str(state.get("thread_id", ""))):
                 return "manager_synthesis"
+            completed_tasks = set(state.get("completed_tasks", []))
+            for task in state.get("tasks", []) or []:
+                if (
+                    task.task_id not in completed_tasks
+                    and task.expert_name in experts
+                    and all(dep in completed_tasks for dep in task.depends_on)
+                ):
+                    return task.expert_name
             completed = set(state.get("completed_experts", []))
             for item in state.get("task_dispatch", []):
                 expert = str(item.get("expert", ""))
@@ -183,7 +353,17 @@ class AdvisorSystem:
 
             # 执行单个专家委托并记录结果。
             def handle(state: AdvisorState) -> AdvisorState:
-                requirement = next(
+                completed_tasks = set(state.get("completed_tasks", []))
+                pending_task = next(
+                    (
+                        task for task in state.get("tasks", []) or []
+                        if task.expert_name == expert
+                        and task.task_id not in completed_tasks
+                        and all(dep in completed_tasks for dep in task.depends_on)
+                    ),
+                    None,
+                )
+                requirement = pending_task.requirement if pending_task else next(
                     (item.get("requirement", "")
                      for item in state.get("task_dispatch", [])
                      if item.get("expert") == expert),
@@ -194,12 +374,25 @@ class AdvisorSystem:
                 self._emit_progress(stage, f"正在执行{stage}专家分析")
                 if expert == "asset_allocation":
                     self._emit_progress("debate", "正在进行资产配置多空辩论")
+                if pending_task is not None:
+                    pending_task.status = TaskStatus.RUNNING
+                    state["current_task_intent"] = pending_task.intent.value if pending_task.intent else ""
+                    state["task_context"] = build_task_context(state, pending_task)
                 result = agent.invoke(state)
+                if pending_task is not None:
+                    task_result = self._make_task_result(result, pending_task, expert)
+                    result.setdefault("task_results", {})[pending_task.task_id] = task_result
+                    result["completed_tasks"] = list(result.get("completed_tasks", [])) + [pending_task.task_id]
+                    pending_task.status = (
+                        TaskStatus.DEGRADED
+                        if expert_status is ExpertStatus.DEGRADED
+                        else TaskStatus.SUCCESS
+                    )
                 completed = list(result.get("completed_experts", []))
                 if expert not in completed:
                     completed.append(expert)
                 result["completed_experts"] = completed
-                self._audit_expert_result(result, expert)
+                self._audit_expert_result(result, expert, pending_task)
                 return result
 
             return handle
@@ -215,21 +408,30 @@ class AdvisorSystem:
             if question:
                 state["agent_response"] = f"需要您进一步确认：{question}"
                 return state
+            classification_error = state.get("classification_error", {}) or {}
+            if classification_error:
+                state["run_status"] = RunStatus.FAILED
+                state["agent_response"] = (
+                    "暂时无法确认您的需求，请稍后重试或更具体地描述要分析的股票、产品或配置目标。"
+                )
+                return state
             self._emit_progress("manager", "正在综合专家分析结果")
             state["agent_response"] = self.manager.synthesize_response(state)
             return state
 
         graph.add_node("manager", manager_handler)
         graph.add_node("slot_extraction", slot_handler)
+        graph.add_node("task_batch", task_batch_handler)
         for expert in experts:
             graph.add_node(expert, expert_handler(expert))
         graph.add_node("manager_synthesis", synthesis_handler)
         graph.add_edge(START, "manager")
         graph.add_edge("manager", "slot_extraction")
         targets = list(experts) + ["manager_synthesis"]
-        graph.add_conditional_edges("slot_extraction", route_expert, targets)
+        graph.add_conditional_edges("slot_extraction", route_after_slots, [*targets, "task_batch"])
         for expert in experts:
             graph.add_conditional_edges(expert, route_expert, targets)
+        graph.add_edge("task_batch", "manager_synthesis")
         graph.add_edge("manager_synthesis", END)
         return graph.compile(checkpointer=self.checkpointer)
 
@@ -294,6 +496,8 @@ class AdvisorSystem:
             state: AdvisorState = {
                 "user_message": message, "chat_history": history, "customer_id": customer_id,
                 "task_plan": [], "task_dispatch": [], "completed_experts": [],
+                "tasks": [], "completed_tasks": [], "task_results": {}, "run_status": RunStatus.RUNNING,
+                "warnings": [], "facts": [],
                 "business_state": {}, "user_profile": memory_data.get("profile", {}) or {},
                 "stock_data": {}, "stock_analysis": {}, "technical_analysis": {},
                 "allocation_result": {}, "debate_result": {}, "product_analysis": {},
@@ -326,6 +530,16 @@ class AdvisorSystem:
                 "response": result.get("agent_response", ""),
                 "task_plan": result.get("task_plan", []),
                 "task_dispatch": result.get("task_dispatch", []),
+                "tasks": [task.model_dump(mode="json") for task in result.get("tasks", [])],
+                "task_results": {
+                    task_id: value.model_dump(mode="json") if hasattr(value, "model_dump") else value
+                    for task_id, value in (result.get("task_results", {}) or {}).items()
+                },
+                "run_status": result.get("run_status", RunStatus.COMPLETED).value
+                if hasattr(result.get("run_status", RunStatus.COMPLETED), "value")
+                else result.get("run_status", "completed"),
+                "warnings": result.get("warnings", []),
+                "facts": [fact.model_dump(mode="json") for fact in result.get("facts", [])],
                 "user_profile": result.get("user_profile", {}),
                 "stock_data": result.get("stock_data", {}),
                 "stock_analysis": result.get("stock_analysis", {}),
@@ -340,7 +554,7 @@ class AdvisorSystem:
             self.audit.complete_run(
                 run_id, conversation_id, output["response"],
                 message_id=str(uuid.uuid4()),
-                status="cancelled" if result.get("cancelled") else "completed",
+                status="cancelled" if result.get("cancelled") else output["run_status"],
                 metadata={"task_plan": output["task_plan"]},
             )
             self._update_conversation_meta(conversation_id, message, customer_id)

@@ -122,34 +122,40 @@ class PostgresRuntimeRepository:
         trace_id: str,
         result: ExpertResult,
     ) -> dict[str, Any]:
-        """按运行和专家名称幂等保存专家结果。"""
+        """按运行和任务 ID 幂等保存专家结果。"""
         now = datetime.now(timezone.utc)
-        result_id = str(uuid5(UUID(run_id), result.expert_name))
+        task_id = result.task_id or result.expert_name
         with self._transaction() as connection:
             cursor = connection.cursor()
             try:
                 cursor.execute(
                     """
                     INSERT INTO finance.agent_results
-                        (result_id, run_id, trace_id, expert_name, status,
+                        (result_id, run_id, trace_id, task_id, intent, expert_name, status,
                          schema_version, summary, result_data, fact_ids,
-                         degradation_reason, created_at, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb,
-                            %s, %s, %s)
-                    ON CONFLICT (run_id, expert_name) DO UPDATE SET
+                         degradation_reason, error_code, created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb,
+                            %s, %s, %s, %s)
+                    -- Legacy ON CONFLICT (run_id, expert_name) is no longer sufficient.
+                    ON CONFLICT (run_id, task_id) DO UPDATE SET
                         trace_id = EXCLUDED.trace_id,
+                        intent = EXCLUDED.intent,
+                        expert_name = EXCLUDED.expert_name,
                         status = EXCLUDED.status,
                         schema_version = EXCLUDED.schema_version,
                         summary = EXCLUDED.summary,
                         result_data = EXCLUDED.result_data,
                         fact_ids = EXCLUDED.fact_ids,
                         degradation_reason = EXCLUDED.degradation_reason,
+                        error_code = EXCLUDED.error_code,
                         updated_at = EXCLUDED.updated_at
                     """,
                     (
-                        result_id,
+                        str(uuid5(UUID(run_id), task_id)),
                         run_id,
                         trace_id,
+                        task_id,
+                        result.intent.value if result.intent else "",
                         result.expert_name,
                         result.status.value,
                         result.schema_version,
@@ -157,6 +163,7 @@ class PostgresRuntimeRepository:
                         json.dumps(result.result_data, ensure_ascii=False),
                         json.dumps(result.fact_ids),
                         result.degradation_reason,
+                        result.error_code,
                         now,
                         now,
                     ),
@@ -166,6 +173,8 @@ class PostgresRuntimeRepository:
         return {
             "run_id": run_id,
             "trace_id": trace_id,
+            "task_id": task_id,
+            "intent": result.intent.value if result.intent else "",
             "expert_name": result.expert_name,
             "status": result.status.value,
         }

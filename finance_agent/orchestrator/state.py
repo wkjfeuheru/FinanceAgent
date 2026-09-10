@@ -10,6 +10,8 @@ from typing import Any, Dict, List
 
 from typing_extensions import TypedDict
 
+from finance_agent.contracts import ExpertResult, FactSnapshot, RunStatus, Task
+
 
 class AdvisorState(TypedDict, total=False):
     """金融投顾多 Agent 系统的共享状态。"""
@@ -23,13 +25,18 @@ class AdvisorState(TypedDict, total=False):
     # ── 计划与意图 ──
     task_plan: List[str]
     task_dispatch: List[Dict[str, Any]]
+    tasks: List[Task]
     completed_experts: List[str]
     detected_intents: List[Dict[str, Any]]
     uncertain_intents: List[Dict[str, Any]]
     intent_results: Dict[str, Dict[str, Any]]
+    task_results: Dict[str, ExpertResult]
+    facts: List[FactSnapshot]
     # 意图后槽位提取层产出的结构化入参（按意图 key 组织，跨轮合并）
     intent_slots: Dict[str, Dict[str, Any]]
     finance_related: bool
+    run_status: RunStatus
+    warnings: List[str]
     business_state: Dict[str, Any]
 
     # ── 用户画像与股票 ──

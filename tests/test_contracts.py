@@ -12,16 +12,80 @@ from finance_agent.contracts import (
     ExpertResult,
     ExpertStatus,
     FactSnapshot,
+    IntentKind,
     PreparedContext,
     RequestEnvelope,
     ResponseEnvelope,
     RunStatus,
     Task,
     TaskKind,
+    TaskStatus,
     generate_identifiers,
     propagate_identifiers,
     transition_run_status,
 )
+
+
+def test_task_contract_preserves_distinct_same_expert_intents():
+    from finance_agent.contracts.adapters import normalize_dispatch_plan
+
+    plan = normalize_dispatch_plan([
+        {
+            "intent": "market_query",
+            "query": "分析贵州茅台",
+            "confidence": 0.99,
+            "execution_mode": "security_analysis",
+        },
+        {
+            "intent": "stock_recommendation",
+            "query": "推荐几只AI股票",
+            "confidence": 0.98,
+            "execution_mode": "candidate_search",
+        },
+    ], "分析贵州茅台，并推荐几只AI股票")
+
+    assert [task.task_id for task in plan.tasks] == ["task-1", "task-2"]
+    assert [task.intent for task in plan.tasks] == [
+        IntentKind.MARKET_QUERY,
+        IntentKind.STOCK_RECOMMENDATION,
+    ]
+    assert [task.expert_name for task in plan.tasks] == [
+        "stock_analysis", "stock_analysis",
+    ]
+    assert all(task.status is TaskStatus.PENDING for task in plan.tasks)
+
+
+def test_response_envelope_exposes_run_status_tasks_results_and_warnings():
+    response = ResponseEnvelope(
+        run_id=uuid4(),
+        trace_id=uuid4(),
+        conversation_id="conversation-1",
+        message_id=uuid4(),
+        response="部分完成",
+        run_status=RunStatus.PARTIAL,
+        tasks=[Task(
+            task_id="task-1",
+            intent=IntentKind.MARKET_QUERY,
+            expert_name="stock_analysis",
+            requirement="分析600519",
+            execution_mode="security_analysis",
+            status=TaskStatus.SUCCESS,
+        )],
+        results=[ExpertResult(
+            task_id="task-1",
+            intent=IntentKind.MARKET_QUERY,
+            expert_name="stock_analysis",
+            status=ExpertStatus.SUCCESS,
+            summary="完成",
+        )],
+        warnings=["另一个任务失败"],
+    )
+
+    payload = response.model_dump(mode="json")
+    assert payload["run_status"] == "partial"
+    assert payload["tasks"][0]["task_id"] == "task-1"
+    assert payload["results"][0]["task_id"] == "task-1"
+    assert payload["warnings"] == ["另一个任务失败"]
 
 
 def test_contracts_serialize_to_json_schema_and_json():

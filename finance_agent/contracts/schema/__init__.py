@@ -2,8 +2,10 @@
 
 from finance_agent.contracts.schema.enums import (
     ExpertStatus,
+    IntentKind,
     RunStatus,
     TaskKind,
+    TaskStatus,
 )
 from finance_agent.contracts.schema.models import (
     DispatchPlan,
@@ -25,6 +27,7 @@ __all__ = [
     "DispatchPlan",
     "ExpertResult",
     "ExpertStatus",
+    "IntentKind",
     "FactSnapshot",
     "PreparedContext",
     "RequestEnvelope",
@@ -33,6 +36,7 @@ __all__ = [
     "RunStatus",
     "Task",
     "TaskKind",
+    "TaskStatus",
     "generate_identifiers",
     "propagate_identifiers",
     "transition_run_status",
