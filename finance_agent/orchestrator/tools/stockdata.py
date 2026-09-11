@@ -111,12 +111,13 @@ def get_stock_history(
     period: str = "daily",
     start_date: str = "",
     end_date: str = "",
+    adjustment: str = "forward",
 ) -> str:
     """获取 A 股历史 K 线数据。"""
     if period != "daily":
         return _json({"code": stock_code, "error": "当前仅支持 daily 周期"})
     manager = get_provider_manager()
-    result = manager.get_daily(stock_code, start_date, end_date)
+    result = manager.get_daily(stock_code, start_date, end_date, adjustment)
     rows = _records(result)
     normalized = []
     for row in rows:
@@ -130,7 +131,15 @@ def get_stock_history(
             "amount": row.get("amount"),
             "change_pct": _first_value(row, "pct_chg", "change_pct"),
         })
-    return _json({"code": stock_code, "count": len(normalized), "data": normalized, **_meta()})
+    return _json({
+        "code": stock_code,
+        "count": len(normalized),
+        "data": normalized,
+        "adjustment": adjustment,
+        "as_of": normalized[-1].get("date") if normalized else None,
+        "quality_status": "complete" if normalized else "critical_missing",
+        **_meta(),
+    })
 
 
 @tool

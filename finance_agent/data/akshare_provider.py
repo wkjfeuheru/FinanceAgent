@@ -38,15 +38,24 @@ class AkshareDataSource:
         """返回 AKShare 是否可导入。"""
         return self.ak is not None
 
-    def get_daily(self, stock_code: str, start_date: str = "", end_date: str = "") -> list[dict[str, Any]]:
+    def get_daily(
+        self,
+        stock_code: str,
+        start_date: str = "",
+        end_date: str = "",
+        adjustment: str = "raw",
+    ) -> list[dict[str, Any]]:
         """获取 AKShare 日线行情并转换为统一记录。"""
+        adjustment_map = {"raw": "", "forward": "qfq", "backward": "hfq"}
+        if adjustment not in adjustment_map:
+            raise UnsupportedProviderCapability(f"AKShare 不支持复权口径: {adjustment}")
         end = datetime.now()
         frame = self.ak.stock_zh_a_hist(
             symbol=str(stock_code).split(".")[0],
             period="daily",
             start_date=_date(start_date, end - timedelta(days=365)),
             end_date=_date(end_date, end),
-            adjust="",
+            adjust=adjustment_map[adjustment],
         )
         return _records(frame)
 

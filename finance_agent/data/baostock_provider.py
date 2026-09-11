@@ -54,8 +54,17 @@ class BaostockDataSource:
             raise RuntimeError(getattr(result, "error_msg", "BaoStock 登录失败"))
         return result
 
-    def get_daily(self, stock_code: str, start_date: str = "", end_date: str = "") -> list[dict[str, Any]]:
+    def get_daily(
+        self,
+        stock_code: str,
+        start_date: str = "",
+        end_date: str = "",
+        adjustment: str = "raw",
+    ) -> list[dict[str, Any]]:
         """获取 BaoStock 日线行情。"""
+        adjustment_map = {"raw": "3", "forward": "2", "backward": "1"}
+        if adjustment not in adjustment_map:
+            raise UnsupportedProviderCapability(f"BaoStock 不支持复权口径: {adjustment}")
         now = datetime.now()
         self._login()
         try:
@@ -65,7 +74,7 @@ class BaostockDataSource:
                 start_date=_date(start_date, now - timedelta(days=365)),
                 end_date=_date(end_date, now),
                 frequency="d",
-                adjustflag="3",
+                adjustflag=adjustment_map[adjustment],
             )
             return self._query(result)
         finally:

@@ -23,6 +23,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 from finance_agent.config import TUSHARE_MCP_TIMEOUT, TUSHARE_MCP_URL
+from finance_agent.data.providers import UnsupportedProviderCapability
 
 logger = logging.getLogger(__name__)
 
@@ -201,8 +202,13 @@ class TushareMcpDataSource:
         except Exception as exc:
             raise TushareMcpError(f"Tushare MCP 工具 {name} 调用失败: {exc}") from exc
 
-    def get_daily(self, stock_code: str, start_date: str = "",
-                  end_date: str = "") -> Any:
+    def get_daily(
+        self,
+        stock_code: str,
+        start_date: str = "",
+        end_date: str = "",
+        adjustment: str = "raw",
+    ) -> Any:
         """获取 A 股日线行情（开高低收、成交量等）。
 
         Args:
@@ -211,6 +217,11 @@ class TushareMcpDataSource:
             end_date: 结束日期 YYYY-MM-DD，默认今天
         """
         from datetime import datetime, timedelta
+
+        if adjustment != "raw":
+            raise UnsupportedProviderCapability(
+                "Tushare MCP 当前日线接口未声明复权口径"
+            )
 
         ts_code = _to_ts_code(stock_code)
         end = end_date or datetime.now().strftime("%Y-%m-%d")

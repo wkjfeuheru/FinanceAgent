@@ -176,18 +176,8 @@ def test_asset_agent_debate_disabled_falls_back_to_mpt(monkeypatch):
 
 
 def test_stock_agent_successful_result_keeps_quote_and_candidate(monkeypatch):
-    """股票专家正常 ReAct 结果必须能写回完整股票条目。"""
+    """股票专家确定性结果必须能写回完整股票条目。"""
     agent = StockAnalysisAgent()
-
-    class FakeMessage:
-        content = "基本面分析完成"
-
-    class FakeGraph:
-        def invoke(self, *args, **kwargs):
-            return {"messages": [FakeMessage()]}
-
-    monkeypatch.setattr(agent, "_agent", FakeGraph())
-    monkeypatch.setattr(agent, "_direct_technical_analysis", lambda *args: None)
     data = stock_data_fixture()
     data["600519"]["quote"] = {"price": 1700}
     data["600519"]["search_candidate"] = {"source": "fixture"}

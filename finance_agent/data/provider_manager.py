@@ -83,9 +83,15 @@ class ProviderManager:
         }
         raise ProviderUnavailableError(f"所有可用数据源均无法执行 {method}: {failures}")
 
-    def get_daily(self, stock_code: str, start_date: str = "", end_date: str = "") -> Any:
-        """获取日线行情。"""
-        return self._call("get_daily", stock_code, start_date, end_date)
+    def get_daily(
+        self,
+        stock_code: str,
+        start_date: str = "",
+        end_date: str = "",
+        adjustment: str = "raw",
+    ) -> Any:
+        """获取指定复权口径的日线行情。"""
+        return self._call("get_daily", stock_code, start_date, end_date, adjustment)
 
     def get_stock_basic(self, stock_code: str = "") -> Any:
         """获取股票基础信息。"""

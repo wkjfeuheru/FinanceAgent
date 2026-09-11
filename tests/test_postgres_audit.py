@@ -2,7 +2,7 @@
 
 import uuid
 
-from finance_agent.contracts import RequestEnvelope, generate_identifiers
+from finance_agent.contracts import ExpertResult, ExpertStatus, IntentKind, RequestEnvelope, Task, generate_identifiers
 from finance_agent.data.postgres_repository import PostgresAuditStore
 
 
@@ -109,3 +109,36 @@ def test_orchestrator_audit_expert_result():
 
     assert len(system.audit.calls) == 1
     assert system.audit.calls[0] == ("run-1", "trace-1", "stock_analysis")
+
+
+def test_task_result_keeps_research_rule_and_snapshot_fact_ids():
+    """股票研究审计必须直接引用规则版本和原始快照事实。"""
+    from datetime import datetime, timezone
+    from finance_agent.contracts import FactSnapshot
+    from finance_agent.orchestrator.orchestrator import AdvisorSystem
+
+    system = object.__new__(AdvisorSystem)
+    task = Task(
+        task_id="task-1",
+        intent=IntentKind.MARKET_QUERY,
+        expert_name="stock_analysis",
+    )
+    state = {
+        "intent_results": {"market_query": {"status": "success", "content": "完成"}},
+        "analysis_results": [{
+            "rule_version": "research_rules/v1",
+            "evidence_ids": ["stock_snapshot:600519:fixture"],
+        }],
+        "facts": [FactSnapshot(
+            fact_id="stock_snapshot:600519:fixture",
+            domain="stock_research_snapshot",
+            source="fixture",
+            fetched_at=datetime.now(timezone.utc),
+            payload={"code": "600519"},
+        )],
+    }
+
+    result = system._make_task_result(state, task, "stock_analysis")
+
+    assert result.result_data["analysis_results"][0]["rule_version"] == "research_rules/v1"
+    assert "stock_snapshot:600519:fixture" in result.fact_ids

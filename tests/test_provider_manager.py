@@ -43,8 +43,16 @@ class FakeProvider:
             return self._daily
         return {"data": [{"name": self.provider_name}]}
 
-    def get_daily(self, stock_code: str, start_date: str = "", end_date: str = "") -> Any:
-        return self._run("get_daily", stock_code, start_date, end_date)
+    def get_daily(
+        self,
+        stock_code: str,
+        start_date: str = "",
+        end_date: str = "",
+        adjustment: str = "raw",
+    ) -> Any:
+        return self._run(
+            "get_daily", stock_code, start_date, end_date, adjustment=adjustment,
+        )
 
     def get_stock_basic(self, stock_code: str = "") -> Any:
         return self._run("get_stock_basic", stock_code)
@@ -177,6 +185,35 @@ def test_history_tool_normalizes_and_tags_source(monkeypatch):
     assert result["count"] == 1
     assert result["data"][0]["date"] == "20260101"
     assert result["source"] == "akshare"
+
+
+def test_history_tool_requests_forward_adjusted_data(monkeypatch):
+    """技术分析默认请求前复权日线，并把实际口径返回给上层。"""
+    import json
+
+    from finance_agent.orchestrator.tools import stockdata
+
+    class AdjustedProvider(FakeProvider):
+        def get_daily(
+            self,
+            stock_code: str,
+            start_date: str = "",
+            end_date: str = "",
+            adjustment: str = "raw",
+        ) -> Any:
+            return self._run(
+                "get_daily", stock_code, start_date, end_date, adjustment=adjustment,
+            )
+
+    provider = AdjustedProvider("akshare")
+    manager = _manager({"akshare": provider}, ["akshare"])
+    monkeypatch.setattr(stockdata, "get_provider_manager", lambda: manager)
+
+    raw = stockdata.get_stock_history.invoke({"stock_code": "600519"})
+    result = json.loads(raw)
+
+    assert provider.calls[0][2]["adjustment"] == "forward"
+    assert result["adjustment"] == "forward"
 
 
 def test_tool_errors_when_no_provider_available(monkeypatch):

@@ -22,7 +22,13 @@ class StockDataProvider(Protocol):
         """返回 provider 是否已配置且依赖可用。"""
         ...
 
-    def get_daily(self, stock_code: str, start_date: str = "", end_date: str = "") -> Any:
+    def get_daily(
+        self,
+        stock_code: str,
+        start_date: str = "",
+        end_date: str = "",
+        adjustment: str = "raw",
+    ) -> Any:
         """获取日线行情。"""
         ...
 

@@ -23,7 +23,6 @@ from finance_agent.contracts import (
     ExpertResult,
     ExpertStatus,
     FactSnapshot,
-    FactSnapshot,
     RequestEnvelope,
     RunStatus,
     TaskStatus,
@@ -116,6 +115,7 @@ class AdvisorSystem:
                 "stock_data": state.get("stock_data", {}),
                 "stock_analysis": state.get("stock_analysis", {}),
                 "technical_analysis": state.get("technical_analysis", {}),
+                "analysis_results": state.get("analysis_results", []),
             }
         elif expert == "asset_allocation":
             result_data = {
@@ -151,7 +151,7 @@ class AdvisorSystem:
             "product_analysis": "product",
         }.get(task.intent.value if task.intent else "", "runtime")
         payload_keys = (
-            "stock_data", "stock_analysis", "technical_analysis",
+            "stock_data", "stock_analysis", "technical_analysis", "analysis_results",
             "allocation_result", "debate_result", "product_analysis",
         )
         payload = {key: state.get(key, {}) for key in payload_keys if state.get(key)}
@@ -167,7 +167,14 @@ class AdvisorSystem:
             payload=payload,
         ))
         state["facts"] = facts
-        return [fact_id]
+        evidence_ids: list[str] = []
+        for result in state.get("analysis_results", []) or []:
+            if not isinstance(result, dict):
+                continue
+            for evidence_id in result.get("evidence_ids", []) or []:
+                if isinstance(evidence_id, str) and evidence_id:
+                    evidence_ids.append(evidence_id)
+        return list(dict.fromkeys([*evidence_ids, fact_id]))
 
     def _make_task_result(self, state: Dict[str, Any], task: Any, expert: str) -> ExpertResult:
         """从兼容专家状态构造严格的 task 级结果。"""
@@ -185,7 +192,7 @@ class AdvisorSystem:
             or str(state.get("agent_response", "")),
             result_data={
                 key: state.get(key, {}) for key in (
-                    "stock_data", "stock_analysis", "technical_analysis",
+                    "stock_data", "stock_analysis", "technical_analysis", "analysis_results",
                     "allocation_result", "debate_result", "product_analysis",
                 ) if state.get(key)
             },
@@ -301,6 +308,7 @@ class AdvisorSystem:
                     local = local_states[task.task_id]
                     for key in (
                         "user_profile", "stock_data", "stock_analysis", "technical_analysis",
+                        "analysis_results",
                         "allocation_result", "debate_result", "product_analysis",
                     ):
                         if local.get(key):

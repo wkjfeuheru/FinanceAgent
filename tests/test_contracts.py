@@ -147,6 +147,7 @@ def test_response_envelope_maps_to_legacy_chat_response():
                     "stock_data": {"code": "600519"},
                     "fundamental_analysis": {"pe": 20.5},
                     "technical_analysis": {"trend": "up"},
+                    "analysis_results": [{"rule_version": "research_rules/v1"}],
                 },
             ),
             ExpertResult(
@@ -171,6 +172,7 @@ def test_response_envelope_maps_to_legacy_chat_response():
     assert legacy.stock_data == {"code": "600519"}
     assert legacy.fundamental_analysis == {"pe": 20.5}
     assert legacy.technical_analysis == {"trend": "up"}
+    assert legacy.analysis_results[0]["rule_version"] == "research_rules/v1"
     assert legacy.allocation_result.weights == {"stock": 0.6}
     assert legacy.debate_result == {"summary": "风险可控"}
     assert legacy.product_analysis == {"report": "适合稳健投资者"}

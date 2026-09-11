@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Header, Request
@@ -19,17 +20,26 @@ from finance_agent.api.schemas import (
     ProfileResponse,
     RegisterRequest,
     RegisterResponse,
+    ThemeLeadResponse,
+    ThemeLeadReviewRequest,
 )
 from finance_agent.api.sse import sse_stream
 from finance_agent.config import ADMIN_CUSTOMER_IDS
 from finance_agent.data.auth import get_user_store
 from finance_agent.orchestrator.orchestrator import AdvisorSystem
+from finance_agent.research.theme_repository import InMemoryThemeRepository
 
 
 router = APIRouter()
 
 # 全局系统实例（延迟初始化）
 _system: AdvisorSystem | None = None
+_theme_repository = InMemoryThemeRepository()
+
+
+def get_theme_repository() -> InMemoryThemeRepository:
+    """获取主题审核仓储；生产部署可由应用启动时替换为 PostgreSQL 实现。"""
+    return _theme_repository
 
 
 def get_system() -> AdvisorSystem:
@@ -214,6 +224,39 @@ def _authorize_customer(request: Request, path_customer_id: str) -> str:
 def _resolve_customer_id(http_request: Request, request: ChatRequest, x_customer_id: str | None) -> str:
     """从有效 Bearer token 解析 customer_id；未登录请求统一拒绝。"""
     return _require_customer_id(http_request)
+
+
+def _require_admin(request: Request) -> str:
+    customer_id = _require_customer_id(request)
+    if customer_id.upper() not in ADMIN_CUSTOMER_IDS:
+        raise HTTPException(status_code=403, detail="仅管理员可审核主题线索")
+    return customer_id
+
+
+@router.get("/api/admin/themes/{theme_id}/leads", response_model=list[ThemeLeadResponse])
+async def list_theme_leads(http_request: Request, theme_id: str) -> list[ThemeLeadResponse]:
+    """仅管理员可见的待核验研究线索，不含评分和行动结论。"""
+    _require_admin(http_request)
+    return [ThemeLeadResponse(**lead.model_dump()) for lead in get_theme_repository().pending_leads(theme_id)]
+
+
+@router.post("/api/admin/theme-leads/{lead_id}/review")
+async def review_theme_lead(
+    lead_id: str, payload: ThemeLeadReviewRequest, http_request: Request,
+) -> dict[str, Any]:
+    """审核现有线索；不得修改原股票代码或证据内容。"""
+    reviewer_id = _require_admin(http_request)
+    try:
+        expires_at = datetime.fromisoformat(payload.evidence_expires_at.replace("Z", "+00:00"))
+        member = get_theme_repository().review_lead(
+            lead_id, reviewer_id=reviewer_id, decision=payload.decision,
+            expires_at=expires_at, note=payload.note,
+        )
+        return member.model_dump(mode="json")
+    except KeyError:
+        raise HTTPException(status_code=404, detail="待审核线索不存在")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.get("/api/profile/{customer_id}", response_model=ProfileResponse)

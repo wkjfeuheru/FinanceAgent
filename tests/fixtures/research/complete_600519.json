@@ -1,0 +1,26 @@
+{
+  "request": {
+    "kind": "single_stock",
+    "stock_codes": ["600519"],
+    "profile_complete": true
+  },
+  "security": {
+    "basic_info": {"code": "600519", "name": "固定完整样本"},
+    "quote": {
+      "price": 1500.0,
+      "date": "2026-09-10",
+      "source": "fixture",
+      "fetched_at": "2026-09-10T08:00:00+00:00"
+    },
+    "history": {
+      "adjustment": "forward",
+      "data": [{"high": 1510.0, "low": 1490.0, "close": 1500.0}]
+    },
+    "indicators": {
+      "fundamental_score": 85,
+      "technical_score": 80,
+      "risk_score": 90,
+      "suitability_score": 80
+    }
+  }
+}

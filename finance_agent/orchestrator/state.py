@@ -48,6 +48,7 @@ class AdvisorState(TypedDict, total=False):
     stock_data: Dict[str, Any]
     stock_analysis: Dict[str, Any]
     technical_analysis: Dict[str, Any]
+    analysis_results: List[Dict[str, Any]]
     allocation_result: Dict[str, Any]
     debate_result: Dict[str, Any]
     product_analysis: Dict[str, Any]
