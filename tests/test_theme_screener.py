@@ -48,3 +48,17 @@ def test_screener_caps_fine_industry_at_two():
         counts[item.industry] = counts.get(item.industry, 0) + 1
     assert max(counts.values()) <= 2
     assert result.personalization_status == "research_candidate"
+
+
+def test_screener_rejects_incomplete_rankings_after_data_quality_gate():
+    """防止五只有效成员中仅两只可评分时仍声称给出了完整推荐。"""
+    class SparseGateway(Gateway):
+        def get_security_data(self, code: str) -> dict:
+            if code in {"600519", "600520"}:
+                return super().get_security_data(code)
+            return {"quote": {"source": "fixture", "price": 10}}
+
+    result = ThemeScreener(_repo(5), SparseGateway()).screen(_request(), profile={})
+
+    assert result.status == "insufficient_eligible_coverage"
+    assert result.ranked_candidates == []

@@ -46,6 +46,10 @@ function formatNumber(value: number | null | undefined): string {
   return value.toFixed(2)
 }
 
+function scoreEntries(scores: Record<string, number | null>): Array<[string, number | null]> {
+  return Object.entries(scores).filter(([key]) => key !== 'total')
+}
+
 const isEmpty = computed(
   () => props.messages.length === 0 && !props.loading,
 )
@@ -130,6 +134,29 @@ const isEmpty = computed(
               </span>
             </div>
           </div>
+          <section
+            v-for="(result, resultIndex) in msg.data?.analysis_results || []"
+            :key="`${idx}-${resultIndex}`"
+            class="research-result"
+          >
+            <div class="research-heading">
+              <strong>确定性研究结论：{{ result.action }}</strong>
+              <span>{{ result.personalization_status === 'personalized' ? '已结合画像' : '研究候选' }}</span>
+            </div>
+            <div class="research-meta">规则 {{ result.rule_version }} · 数据质量 {{ result.data_quality }}</div>
+            <div v-if="scoreEntries(result.scores).length" class="score-list">
+              <span v-for="[name, value] in scoreEntries(result.scores)" :key="name">{{ name }} {{ formatNumber(value) }}</span>
+            </div>
+            <div v-if="result.evidence_ids.length" class="evidence-list">
+              <span v-for="factId in result.evidence_ids" :key="factId">证据 {{ factId }}</span>
+            </div>
+          </section>
+          <section v-if="msg.data?.pending_leads?.length" class="pending-leads">
+            <strong>待核验研究线索</strong>
+            <p v-for="lead in msg.data.pending_leads" :key="lead.id">
+              {{ lead.stock_code }} · {{ lead.industry || '行业待核验' }} · {{ lead.source_name }}
+            </p>
+          </section>
         </div>
       </div>
 
@@ -317,6 +344,14 @@ const isEmpty = computed(
   color: var(--color-primary);
   font-family: var(--font-mono);
 }
+.research-result, .pending-leads { margin-top: 8px; max-width: 100%; border: 1px solid var(--color-border); background: var(--color-surface); padding: 10px 12px; font-size: 12px; color: var(--color-text-secondary); }
+.research-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--color-text); }
+.research-heading span { color: var(--color-primary); font: 10px/1 var(--font-mono); letter-spacing: .06em; }
+.research-meta { margin-top: 7px; font-family: var(--font-mono); font-size: 10px; }
+.score-list, .evidence-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.score-list span, .evidence-list span { padding: 3px 5px; background: var(--color-primary-soft); color: var(--color-primary); font: 10px/1.2 var(--font-mono); }
+.pending-leads strong { color: var(--color-text); }
+.pending-leads p { margin: 6px 0 0; }
 
 .empty-tip {
   color: var(--color-text-secondary);

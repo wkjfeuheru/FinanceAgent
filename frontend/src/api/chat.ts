@@ -20,6 +20,8 @@ import type {
   Conversation,
   ConversationListResponse,
   HistoryMessage,
+  ThemeLead,
+  ThemeLeadReviewRequest,
 } from '@/types'
 
 const http = axios.create({
@@ -299,6 +301,23 @@ export async function clearRecords(
   return data
 }
 
+/** 获取管理员可审核的主题线索。非管理员由服务端拒绝。 */
+export async function getThemeLeads(themeId: string): Promise<ThemeLead[]> {
+  const { data } = await http.get<ThemeLead[]>(`/admin/themes/${encodeURIComponent(themeId)}/leads`)
+  return data
+}
+
+/** 审核既有线索；前端不具备修改股票或证据的能力。 */
+export async function reviewThemeLead(
+  leadId: string,
+  request: ThemeLeadReviewRequest,
+): Promise<{ status: string }> {
+  const { data } = await http.post<{ status: string }>(
+    `/admin/theme-leads/${encodeURIComponent(leadId)}/review`, request,
+  )
+  return data
+}
+
 export default {
   chat,
   chatStream,
@@ -310,6 +329,8 @@ export default {
   logout,
   getCurrentUser,
   clearRecords,
+  getThemeLeads,
+  reviewThemeLead,
   saveUser,
   getStoredUser,
   getToken,

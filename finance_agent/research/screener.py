@@ -77,4 +77,8 @@ class ThemeScreener:
             per_industry[item.industry] = per_industry.get(item.industry, 0) + 1
             if len(selected) == 5:
                 break
+        if len(selected) < 3:
+            return ThemeScreeningResult(
+                "insufficient_eligible_coverage", status, pending_leads=pending,
+            )
         return ThemeScreeningResult("complete", status, selected, pending)

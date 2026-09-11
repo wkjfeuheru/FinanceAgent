@@ -6,7 +6,7 @@ import json
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Iterator
-from uuid import UUID, uuid5
+from uuid import UUID, uuid4, uuid5
 
 from finance_agent.contracts import DispatchPlan, ExpertResult, RequestEnvelope
 
@@ -279,6 +279,81 @@ class PostgresRuntimeRepository:
                 cursor.close()
 
 
+class ResearchRunRepository:
+    """持久化可重放的确定性研究运行及其股票结论。"""
+
+    def __init__(self, connection_factory):
+        self._connection_factory = connection_factory
+
+    def save(
+        self,
+        result: Any,
+        *,
+        snapshot_manifest: list[dict[str, Any]],
+        run_id: str | None,
+        customer_id: str,
+        conversation_id: str,
+        status: str = "completed",
+        exclusion_reason: str = "",
+    ) -> str:
+        """原子保存研究输入、快照清单、规则版本与每个标的的结论。"""
+        if result.request is None:
+            raise ValueError("研究结果缺少请求，无法持久化")
+
+        research_run_id = str(uuid4())
+        request_data = result.request.model_dump(mode="json")
+        request_data["profile_complete"] = bool(result.request.profile_complete)
+        stock_codes = list(result.request.stock_codes)
+        connection = self._connection_factory()
+        try:
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO finance.research_runs
+                    (research_run_id, agent_run_id, customer_id, conversation_id, request_data,
+                     snapshot_manifest, rule_version, status)
+                    VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s)
+                    """,
+                    (
+                        research_run_id,
+                        run_id,
+                        customer_id,
+                        conversation_id,
+                        json.dumps(request_data, ensure_ascii=False),
+                        json.dumps(snapshot_manifest, ensure_ascii=False),
+                        result.rule_version,
+                        status,
+                    ),
+                )
+                for stock_code in stock_codes:
+                    cursor.execute(
+                        """
+                        INSERT INTO finance.research_results
+                        (result_id, research_run_id, stock_code, action, scores, fact_ids, exclusion_reason)
+                        VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s)
+                        """,
+                        (
+                            str(uuid4()),
+                            research_run_id,
+                            stock_code,
+                            result.action.value,
+                            json.dumps(result.scores, ensure_ascii=False),
+                            json.dumps(result.evidence_ids, ensure_ascii=False),
+                            exclusion_reason,
+                        ),
+                    )
+            finally:
+                cursor.close()
+            connection.commit()
+            return research_run_id
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+
 class PostgresAuditStore:
     """可选的 PostgreSQL 运行审计存储。
 
@@ -289,6 +364,9 @@ class PostgresAuditStore:
     def __init__(self, connection_factory=None):
         self._repository = (
             PostgresRuntimeRepository(connection_factory) if connection_factory else None
+        )
+        self._research_repository = (
+            ResearchRunRepository(connection_factory) if connection_factory else None
         )
         self._schema_ready = False
 
@@ -346,5 +424,29 @@ class PostgresAuditStore:
             return None
         try:
             return self._repository.cancel_run(run_id)
+        except Exception:
+            return None
+
+    def save_research_result(
+        self,
+        result: Any,
+        *,
+        snapshot_manifest: list[dict[str, Any]],
+        run_id: str,
+        customer_id: str,
+        conversation_id: str,
+    ) -> str | None:
+        """保存可重放研究结果；审计不可用时不影响对话主流程。"""
+        if not self._research_repository:
+            return None
+        try:
+            self._ensure_schema()
+            return self._research_repository.save(
+                result,
+                snapshot_manifest=snapshot_manifest,
+                run_id=run_id,
+                customer_id=customer_id,
+                conversation_id=conversation_id,
+            )
         except Exception:
             return None

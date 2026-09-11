@@ -321,6 +321,25 @@ python -m compileall -q finance_agent
 pytest -q
 ```
 
+主题候选池的日终刷新（仅处理审核有效且证据未过期的成员）：
+
+```bash
+python -m finance_agent.research.refresh --theme-id ai_compute
+```
+
+生产调度可在收盘后每日执行一次。也可通过 `THEME_REFRESH_IDS=ai_compute,robotics`
+配置多个主题；刷新失败会在 JSON 汇总中记录原因，且不会写入占位评分。
+
+首次建立或补充主题候选池时，配置 `THEME_DISCOVERY_ENDPOINT`、
+`THEME_DISCOVERY_SOURCE_NAME`、`THEME_DISCOVERY_SOURCE_CLASS` 和可选的
+`THEME_DISCOVERY_API_TOKEN`，再运行：
+
+```bash
+python -m finance_agent.research.theme_discovery --theme-id ai_compute
+```
+
+外部数据只会作为待核验研究线索写入 PostgreSQL；必须在管理员审核通过后才能参与主题筛选。
+
 构建前端：
 
 ```bash

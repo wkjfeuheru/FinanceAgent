@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from finance_agent.research.theme_models import ThemeLead
 from finance_agent.research.theme_repository import InMemoryThemeRepository
+from finance_agent.research.theme_repository import PostgresThemeRepository
 
 
 def _lead() -> ThemeLead:
@@ -57,3 +58,51 @@ def test_expired_member_is_excluded():
     repository.expire_stale_records(datetime.now(timezone.utc))
 
     assert repository.active_members("ai_compute", datetime.now(timezone.utc)) == []
+
+
+class _Cursor:
+    def __init__(self):
+        self.calls = []
+        self.rows = []
+
+    def execute(self, statement, params=()):
+        self.calls.append((statement, params))
+
+    def fetchone(self):
+        return self.rows.pop(0) if self.rows else None
+
+    def fetchall(self):
+        return self.rows
+
+    def close(self):
+        pass
+
+
+class _Connection:
+    def __init__(self):
+        self.cursor_instance = _Cursor()
+        self.committed = False
+
+    def cursor(self):
+        return self.cursor_instance
+
+    def commit(self):
+        self.committed = True
+
+    def rollback(self):
+        pass
+
+    def close(self):
+        pass
+
+
+def test_postgres_repository_persists_pending_lead_without_activating_it():
+    connection = _Connection()
+    repository = PostgresThemeRepository(lambda: connection)
+
+    repository.ingest_lead(_lead())
+
+    statements = [statement for statement, _ in connection.cursor_instance.calls]
+    assert any("finance.theme_memberships" in statement for statement in statements)
+    assert any("'pending'" in statement for statement in statements)
+    assert connection.committed is True

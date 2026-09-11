@@ -6,7 +6,8 @@ from uuid import uuid4
 import pytest
 
 from finance_agent.contracts import ExpertResult, ExpertStatus, RequestEnvelope
-from finance_agent.data.postgres_repository import PostgresRuntimeRepository
+from finance_agent.data.postgres_repository import PostgresRuntimeRepository, ResearchRunRepository
+from finance_agent.research.contracts import Action, AnalysisKind, AnalysisRequest, AnalysisResult
 
 
 class FakeCursor:
@@ -184,3 +185,42 @@ def test_cancel_run_rolls_back_when_persistence_fails():
 
     assert connection.committed is False
     assert connection.rolled_back is True
+
+
+def test_research_run_repository_persists_replayable_result_and_snapshot_manifest():
+    """防止研究审计丢失规则版本、画像状态、快照和事实引用。"""
+    connection = FakeConnection()
+    repository = ResearchRunRepository(lambda: connection)
+    result = AnalysisResult(
+        request=AnalysisRequest(
+            kind=AnalysisKind.SINGLE_STOCK,
+            stock_codes=["600519"],
+            profile_complete=True,
+        ),
+        action=Action.WATCH,
+        data_quality="complete",
+        rule_version="research_rules/v1",
+        scores={"fundamental": 80.0, "total": 82.5},
+        evidence_ids=["fact-600519"],
+        personalization_status="personalized",
+    )
+
+    research_run_id = repository.save(
+        result,
+        snapshot_manifest=[{"fact_id": "fact-600519", "as_of": "2026-09-11"}],
+        run_id=str(uuid4()),
+        customer_id="CUST001",
+        conversation_id="conversation-1",
+    )
+
+    run_statement, run_parameters = connection.cursor_instance.statements[0]
+    result_statement, result_parameters = connection.cursor_instance.statements[1]
+    assert research_run_id
+    assert "finance.research_runs" in run_statement
+    assert '"profile_complete": true' in run_parameters[4]
+    assert '"fact_id": "fact-600519"' in run_parameters[5]
+    assert run_parameters[6] == "research_rules/v1"
+    assert "finance.research_results" in result_statement
+    assert result_parameters[2] == "600519"
+    assert result_parameters[3] == "关注"
+    assert connection.committed is True

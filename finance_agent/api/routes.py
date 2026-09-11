@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Header, Request
@@ -24,21 +24,24 @@ from finance_agent.api.schemas import (
     ThemeLeadReviewRequest,
 )
 from finance_agent.api.sse import sse_stream
-from finance_agent.config import ADMIN_CUSTOMER_IDS
+from finance_agent.config import ADMIN_CUSTOMER_IDS, get_postgres_connection_factory
 from finance_agent.data.auth import get_user_store
 from finance_agent.orchestrator.orchestrator import AdvisorSystem
-from finance_agent.research.theme_repository import InMemoryThemeRepository
+from finance_agent.research.theme_repository import PostgresThemeRepository, ThemeRepository
 
 
 router = APIRouter()
 
 # 全局系统实例（延迟初始化）
 _system: AdvisorSystem | None = None
-_theme_repository = InMemoryThemeRepository()
+_theme_repository: ThemeRepository | None = None
 
 
-def get_theme_repository() -> InMemoryThemeRepository:
-    """获取主题审核仓储；生产部署可由应用启动时替换为 PostgreSQL 实现。"""
+def get_theme_repository() -> ThemeRepository:
+    """延迟构造 PostgreSQL 主题仓储，避免路由导入时连接数据库。"""
+    global _theme_repository
+    if _theme_repository is None:
+        _theme_repository = PostgresThemeRepository(get_postgres_connection_factory())
     return _theme_repository
 
 
@@ -237,7 +240,13 @@ def _require_admin(request: Request) -> str:
 async def list_theme_leads(http_request: Request, theme_id: str) -> list[ThemeLeadResponse]:
     """仅管理员可见的待核验研究线索，不含评分和行动结论。"""
     _require_admin(http_request)
-    return [ThemeLeadResponse(**lead.model_dump()) for lead in get_theme_repository().pending_leads(theme_id)]
+    return [
+        ThemeLeadResponse(
+            **lead.model_dump(),
+            evidence_expires_at=lead.discovered_at + timedelta(days=30),
+        )
+        for lead in get_theme_repository().pending_leads(theme_id)
+    ]
 
 
 @router.post("/api/admin/theme-leads/{lead_id}/review")

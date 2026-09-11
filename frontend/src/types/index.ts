@@ -70,11 +70,45 @@ export interface ChatResponse {
   fundamental_analysis: Record<string, any>
   stock_analysis: Record<string, any>
   technical_analysis: Record<string, any>
+  analysis_results: ResearchAnalysisResult[]
+  pending_leads?: ThemeLead[]
   allocation_result: AllocationResult
   debate_result: Record<string, any>
   product_analysis?: Record<string, any>
   compliance_result: Record<string, any>
   conversation_id: string
+}
+
+/** 已计算的确定性研究结论；与待核验线索分离。 */
+export interface ResearchAnalysisResult {
+  action: '关注' | '观望' | '规避' | '数据不足'
+  data_quality: 'complete' | 'warning' | 'critical_missing'
+  rule_version: string
+  scores: Record<string, number | null>
+  evidence_ids: string[]
+  personalization_status: 'personalized' | 'research_candidate'
+  restrictions: string[]
+}
+
+/** 仅供管理员审核的外部研究线索；不含评分或行动结论。 */
+export interface ThemeLead {
+  id: string
+  theme_id: string
+  stock_code: string
+  industry: string
+  source_name: string
+  source_class: 'official' | 'licensed_classification' | 'public_lead'
+  source_uri: string
+  evidence_excerpt: string
+  evidence_hash: string
+  discovered_at: string
+  evidence_expires_at: string
+}
+
+export interface ThemeLeadReviewRequest {
+  decision: 'approve' | 'reject'
+  evidence_expires_at: string
+  note: string
 }
 
 /** 对话请求体 */

@@ -93,6 +93,17 @@ TUSHARE_ENABLED = bool(TUSHARE_MCP_URL) and os.getenv("TUSHARE_ENABLED", "true")
 BAOSTOCK_ENABLED = os.getenv("BAOSTOCK_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 BAOSTOCK_USERNAME = os.getenv("BAOSTOCK_USERNAME", "").strip()
 BAOSTOCK_PASSWORD = os.getenv("BAOSTOCK_PASSWORD", "").strip()
+THEME_REFRESH_IDS = [
+    item.strip() for item in os.getenv("THEME_REFRESH_IDS", "").split(",") if item.strip()
+]
+THEME_DISCOVERY_ENDPOINT = os.getenv("THEME_DISCOVERY_ENDPOINT", "").strip()
+THEME_DISCOVERY_API_TOKEN = os.getenv("THEME_DISCOVERY_API_TOKEN", "").strip()
+THEME_DISCOVERY_SOURCE_NAME = os.getenv("THEME_DISCOVERY_SOURCE_NAME", "外部主题分类服务").strip()
+THEME_DISCOVERY_SOURCE_CLASS = os.getenv("THEME_DISCOVERY_SOURCE_CLASS", "licensed_classification").strip()
+THEME_DISCOVERY_TIMEOUT = float(os.getenv("THEME_DISCOVERY_TIMEOUT", "15"))
+THEME_DISCOVERY_IDS = [
+    item.strip() for item in os.getenv("THEME_DISCOVERY_IDS", "").split(",") if item.strip()
+]
 
 # DashScope 联网搜索已移除，板块/行业市场资料改用东方财富/新浪财经直接抓取
 # 意图分类使用独立的轻量 Qwen 兼容接口；保留旧变量作为迁移期回退。

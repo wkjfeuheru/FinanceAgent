@@ -29,6 +29,7 @@ from finance_agent.contracts import (
     generate_identifiers,
 )
 from finance_agent.data.postgres_repository import PostgresAuditStore
+from finance_agent.research.contracts import AnalysisResult
 from finance_agent.orchestrator.database import get_database
 from finance_agent.orchestrator.memory import AgentMemoryContext, RedisMemoryStore
 from finance_agent.orchestrator.slots import SlotExtractor
@@ -111,6 +112,8 @@ class AdvisorSystem:
         if not run_id:
             return
         if expert == "stock_analysis":
+            self._audit_research_results(state)
+        if expert == "stock_analysis":
             result_data = {
                 "stock_data": state.get("stock_data", {}),
                 "stock_analysis": state.get("stock_analysis", {}),
@@ -141,6 +144,34 @@ class AdvisorSystem:
                 result_data=result_data,
             ),
         )
+
+    def _audit_research_results(self, state: Dict[str, Any]) -> None:
+        """将确定性研究结果及其引用的原始快照单独写入可重放审计表。"""
+        save = getattr(self.audit, "save_research_result", None)
+        if not callable(save):
+            return
+        evidence_facts = {
+            fact.fact_id: fact.model_dump(mode="json")
+            for fact in state.get("facts", []) or []
+            if isinstance(fact, FactSnapshot)
+        }
+        for raw_result in state.get("analysis_results", []) or []:
+            try:
+                result = AnalysisResult.model_validate(raw_result)
+            except (TypeError, ValueError):
+                continue
+            snapshot_manifest = [
+                evidence_facts[fact_id]
+                for fact_id in result.evidence_ids
+                if fact_id in evidence_facts
+            ]
+            save(
+                result,
+                snapshot_manifest=snapshot_manifest,
+                run_id=str(state.get("run_id", "")),
+                customer_id=str(state.get("customer_id", "")),
+                conversation_id=str(state.get("thread_id", "")),
+            )
 
     def _capture_task_facts(self, state: Dict[str, Any], task: Any) -> list[str]:
         """将本轮专家产出的业务输入登记为可引用的事实快照。"""
@@ -321,6 +352,8 @@ class AdvisorSystem:
                     state["completed_tasks"].append(task.task_id)
                     if task.expert_name not in state["completed_experts"]:
                         state["completed_experts"].append(task.expert_name)
+                    if task.expert_name == "stock_analysis":
+                        self._audit_research_results(local)
             if any(result.status is ExpertStatus.SUCCESS for result in results.values()):
                 state["run_status"] = (
                     RunStatus.COMPLETED

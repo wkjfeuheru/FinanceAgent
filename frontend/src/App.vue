@@ -5,6 +5,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import ChatWindow from '@/components/ChatWindow.vue'
 import ProfilePanel from '@/components/ProfilePanel.vue'
 import HistoryPanel from '@/components/HistoryPanel.vue'
+import ThemeReviewQueue from '@/components/ThemeReviewQueue.vue'
 import LoginView from '@/components/LoginView.vue'
 import { getProfile, getConversationMessages, getConversations, logout, getStoredUser } from '@/api/chat'
 import type { ProfileResponse, HistoryMessage, UserInfo } from '@/types'
@@ -182,6 +183,7 @@ onMounted(() => {
             @select-conversation="handleSelectConversation"
             @conversation-deleted="handleConversationDeleted"
           />
+          <ThemeReviewQueue />
         </div>
       </aside>
     </main>

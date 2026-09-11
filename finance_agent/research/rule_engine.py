@@ -52,6 +52,11 @@ class RuleEngine:
     def __init__(self, rules: dict[str, Any]):
         self._rules = rules
 
+    @property
+    def version(self) -> str:
+        """返回当前已加载规则集的稳定版本标识。"""
+        return str(self._rules["version"])
+
     @classmethod
     def default(cls) -> "RuleEngine":
         """加载仓库内审定的首版规则。"""

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -182,3 +183,6 @@ class ThemeLeadResponse(BaseModel):
     source_class: str
     source_uri: str
     evidence_excerpt: str
+    evidence_hash: str
+    discovered_at: datetime
+    evidence_expires_at: datetime

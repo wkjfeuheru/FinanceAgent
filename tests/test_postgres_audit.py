@@ -111,6 +111,52 @@ def test_orchestrator_audit_expert_result():
     assert system.audit.calls[0] == ("run-1", "trace-1", "stock_analysis")
 
 
+def test_orchestrator_persists_structured_stock_research_with_snapshot_manifest():
+    """防止专家审计只保存文本而遗漏确定性研究的重放输入。"""
+    from datetime import datetime, timezone
+    from finance_agent.contracts import FactSnapshot
+    from finance_agent.orchestrator.orchestrator import AdvisorSystem
+
+    class _RecordingAudit:
+        def is_available(self):
+            return True
+
+        def upsert_expert_result(self, *args):
+            pass
+
+        def save_research_result(self, result, **context):
+            self.result = result
+            self.context = context
+
+    system = object.__new__(AdvisorSystem)
+    system.audit = _RecordingAudit()
+    state = {
+        "run_id": "run-1", "trace_id": "trace-1", "customer_id": "CUST001",
+        "thread_id": "conversation-1",
+        "analysis_results": [{
+            "request": {"kind": "single_stock", "stock_codes": ["600519"], "profile_complete": True},
+            "action": "关注", "data_quality": "complete", "rule_version": "research_rules/v1",
+            "scores": {"total": 80.0}, "evidence_ids": ["fact-1"],
+            "personalization_status": "personalized", "restrictions": [], "narrative": "", "report_mode": "deterministic",
+        }],
+        "facts": [FactSnapshot(
+            fact_id="fact-1", domain="stock_research_snapshot", source="fixture",
+            fetched_at=datetime.now(timezone.utc), payload={"code": "600519"},
+        )],
+    }
+
+    system._audit_expert_result(state, "stock_analysis")
+
+    assert system.audit.result.rule_version == "research_rules/v1"
+    assert system.audit.context["run_id"] == "run-1"
+    assert system.audit.context["customer_id"] == "CUST001"
+    manifest = system.audit.context["snapshot_manifest"]
+    assert len(manifest) == 1
+    assert manifest[0]["fact_id"] == "fact-1"
+    assert manifest[0]["domain"] == "stock_research_snapshot"
+    assert manifest[0]["payload"] == {"code": "600519"}
+
+
 def test_task_result_keeps_research_rule_and_snapshot_fact_ids():
     """股票研究审计必须直接引用规则版本和原始快照事实。"""
     from datetime import datetime, timezone
