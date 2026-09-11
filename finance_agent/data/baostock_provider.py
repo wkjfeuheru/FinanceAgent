@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
+from finance_agent.data.board_codes import baostock_symbol
 from finance_agent.data.normalization import (
     normalize_basic_records,
     normalize_daily_records,
@@ -16,14 +17,6 @@ from finance_agent.data.providers import ProviderUnavailableError, UnsupportedPr
 def _date(value: str, fallback: datetime) -> str:
     """将日期转换为 BaoStock 所需的 YYYY-MM-DD 格式。"""
     return value or fallback.strftime("%Y-%m-%d")
-
-
-def _code(value: str) -> str:
-    """将纯数字代码转换为 BaoStock 格式。"""
-    code = str(value).split(".")[0]
-    if code.startswith(("60", "68")):
-        return f"sh.{code}"
-    return f"sz.{code}"
 
 
 class BaostockDataSource:
@@ -70,11 +63,13 @@ class BaostockDataSource:
         adjustment_map = {"raw": "3", "forward": "2", "backward": "1"}
         if adjustment not in adjustment_map:
             raise UnsupportedProviderCapability(f"BaoStock 不支持复权口径: {adjustment}")
+        # 符号校验必须先于登录：北交所代码在这里就失败，不为一只注定失败的票打网络往返。
+        symbol = baostock_symbol(stock_code)
         now = datetime.now()
         self._login()
         try:
             result = self.bs.query_history_k_data_plus(
-                _code(stock_code),
+                symbol,
                 "date,open,high,low,close,volume,amount,pctChg",
                 start_date=_date(start_date, now - timedelta(days=365)),
                 end_date=_date(end_date, now),
@@ -88,9 +83,10 @@ class BaostockDataSource:
 
     def get_stock_basic(self, stock_code: str = "") -> list[dict[str, Any]]:
         """获取 BaoStock 股票基本信息。"""
+        symbol = baostock_symbol(stock_code) if stock_code else ""
         self._login()
         try:
-            result = self.bs.query_stock_basic(code=_code(stock_code)) if stock_code else self.bs.query_stock_basic()
+            result = self.bs.query_stock_basic(code=symbol) if symbol else self.bs.query_stock_basic()
             # BaoStock 用 code_name/ipoDate，需统一为 name/list_date。
             return normalize_basic_records(self._query(result))
         finally:
