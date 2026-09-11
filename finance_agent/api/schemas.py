@@ -51,6 +51,7 @@ class ChatResponse(BaseModel):
     stock_analysis: dict[str, Any] = Field(default_factory=dict, description="股票综合分析")
     technical_analysis: dict[str, Any] = Field(default_factory=dict, description="技术面分析")
     analysis_results: list[dict[str, Any]] = Field(default_factory=list, description="结构化研究结果")
+    theme_screening: dict[str, Any] = Field(default_factory=dict, description="主题筛选结果")
     allocation_result: AllocationResult = Field(default_factory=AllocationResult, description="资产配置结果")
     debate_result: dict[str, Any] = Field(default_factory=dict, description="辩论结果")
     compliance_result: dict[str, Any] = Field(default_factory=dict, description="合规审查结果")
@@ -86,6 +87,7 @@ def to_chat_response(result: ResponseEnvelope | Mapping[str, Any] | ChatResponse
                 payload.update({key: data[key] for key in (
                     "stock_data", "fundamental_analysis", "stock_analysis", "technical_analysis",
                     "analysis_results",
+                    "theme_screening",
                 ) if key in data})
             elif expert_result.expert_name == "asset_allocation":
                 payload["allocation_result"] = data

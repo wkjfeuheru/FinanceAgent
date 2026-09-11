@@ -8,6 +8,10 @@ from finance_agent.research.pipeline import ResearchPipeline
 from finance_agent.research.snapshot_builder import SnapshotBuilder
 from finance_agent.research.rule_engine import RuleEngine
 from finance_agent.agents.stock_analysis import StockAnalysisAgent
+from finance_agent.research.screener import ThemeScreener
+from finance_agent.research.theme_models import ThemeLead
+from finance_agent.research.theme_repository import InMemoryThemeRepository
+from datetime import timedelta
 
 
 class CompleteGateway:
@@ -125,3 +129,61 @@ def test_stock_agent_publishes_pipeline_facts_for_audit():
     evidence_ids = result["analysis_results"][0]["evidence_ids"]
     assert evidence_ids
     assert [fact.fact_id for fact in result["facts"]] == evidence_ids
+
+
+def _theme_repo(count: int) -> InMemoryThemeRepository:
+    repo = InMemoryThemeRepository()
+    for index in range(count):
+        code = f"600{519 + index:03d}"
+        lead = ThemeLead(
+            theme_id="ai_compute", stock_code=code, industry=f"行业{index % 3}",
+            source_name="fixture", source_class="official", source_uri=f"https://e/{code}",
+            evidence_excerpt="公告", evidence_hash=code,
+            discovered_at=datetime.now(timezone.utc),
+        )
+        repo.ingest_lead(lead)
+        repo.review_lead(lead.id, reviewer_id="admin", decision="approve",
+                         expires_at=datetime.now(timezone.utc) + timedelta(days=30), note="ok")
+    return repo
+
+
+class ThemeGateway(CompleteGateway):
+    pass
+
+
+def test_stock_agent_routes_theme_request_to_screener_and_keeps_pending_leads_separate():
+    repo = _theme_repo(5)
+    lead = ThemeLead(
+        theme_id="ai_compute", stock_code="601000", industry="行业0",
+        source_name="provider", source_class="public_lead", source_uri="https://e/pending",
+        evidence_excerpt="线索", evidence_hash="pending",
+        discovered_at=datetime.now(timezone.utc),
+    )
+    repo.ingest_lead(lead)
+    screener = ThemeScreener(repo, ThemeGateway())
+    agent = StockAnalysisAgent(pipeline=_pipeline(), theme_screener=screener)
+
+    result = agent.invoke({
+        "requirement": "推荐人工智能主题股票",
+        "resolved_stocks": [], "intent_slots": {}, "user_profile": {},
+        "intent_results": {}, "current_task_intent": "stock_recommendation",
+    })
+
+    assert result["theme_screening"]["status"] == "complete"
+    assert 3 <= len(result["theme_screening"]["candidates"]) <= 5
+    assert result["theme_screening"]["pending_leads"]
+    assert all("action" not in lead for lead in result["theme_screening"]["pending_leads"])
+    assert result["theme_screening"]["personalization_status"] == "research_candidate"
+
+
+def test_stock_agent_reports_theme_coverage_shortage():
+    agent = StockAnalysisAgent(
+        pipeline=_pipeline(), theme_screener=ThemeScreener(_theme_repo(4), ThemeGateway())
+    )
+    result = agent.invoke({
+        "requirement": "推荐人工智能主题股票", "resolved_stocks": [],
+        "intent_slots": {}, "user_profile": {}, "intent_results": {},
+        "current_task_intent": "stock_recommendation",
+    })
+    assert result["theme_screening"]["status"] == "insufficient_active_coverage"
+    assert result["theme_screening"]["candidates"] == []

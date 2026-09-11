@@ -10,6 +10,9 @@ from finance_agent.research.contracts import AnalysisKind, AnalysisRequest
 
 _CODE_PATTERN = re.compile(r"(?<!\d)(?:60\d{4}|00\d{4}|30\d{4}|68\d{4}|8\d{5}|4\d{5})(?!\d)")
 _COMPARISON_WORDS = ("比较", "对比", "相比", "哪个好", "孰优", "vs", "VS")
+_THEME_ALIASES = {
+    "ai_compute": ("人工智能", "AI", "ai", "算力", "AI算力", "人工智能主题"),
+}
 _INDICATOR_ALIASES = {
     "macd": "MACD",
     "kdj": "KDJ",
@@ -67,6 +70,24 @@ def _normalize_indicators(raw_indicators: Any) -> list[str]:
     return normalized
 
 
+def _resolve_theme_id(message: str, slots: dict[str, Any]) -> str | None:
+    raw_theme = slots.get("theme_id") or slots.get("theme")
+    if isinstance(raw_theme, dict):
+        raw_theme = raw_theme.get("id") or raw_theme.get("name")
+    if raw_theme:
+        value = str(raw_theme).strip()
+        if value == "ai_compute" or any(value.lower() == alias.lower() for alias in _THEME_ALIASES["ai_compute"]):
+            return "ai_compute"
+        raise ValueError(f"无法识别主题：{value}，请提供有效的主题名称或 theme_id")
+    text = message or ""
+    for theme_id, aliases in _THEME_ALIASES.items():
+        if any(alias in text for alias in aliases):
+            return theme_id
+    if "主题" in text and not _ordered_codes(_CODE_PATTERN.findall(text)):
+        raise ValueError("无法识别主题，请明确提供主题名称或 theme_id")
+    return None
+
+
 def parse_analysis_request(
     message: str,
     *,
@@ -79,6 +100,7 @@ def parse_analysis_request(
     股票优先级固定为：显式槽位、已解析股票、消息中的六位代码。
     """
     slots = _market_slots(intent_slots or {})
+    theme_id = _resolve_theme_id(message, slots)
     slot_codes = _ordered_codes(slots.get("stock_codes", slots.get("codes", [])))
     resolved_codes = _ordered_codes(resolved_stocks or [])
     message_codes = _ordered_codes(_CODE_PATTERN.findall(message or ""))
@@ -88,7 +110,11 @@ def parse_analysis_request(
         any(word.lower() in (message or "").lower() for word in _COMPARISON_WORDS)
         and len(codes) >= 2
     )
-    kind = AnalysisKind.COMPARISON if comparison_requested else AnalysisKind.SINGLE_STOCK
+    kind = (
+        AnalysisKind.THEME_SCREENING if theme_id
+        else AnalysisKind.COMPARISON if comparison_requested
+        else AnalysisKind.SINGLE_STOCK
+    )
 
     profile = user_profile or {}
     profile_complete = bool(
@@ -98,6 +124,7 @@ def parse_analysis_request(
     return AnalysisRequest(
         kind=kind,
         stock_codes=codes,
+        theme_id=theme_id,
         indicators=_normalize_indicators(slots.get("indicators", [])),
         profile_complete=profile_complete,
     )

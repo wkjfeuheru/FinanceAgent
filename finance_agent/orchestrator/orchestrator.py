@@ -119,6 +119,7 @@ class AdvisorSystem:
                 "stock_analysis": state.get("stock_analysis", {}),
                 "technical_analysis": state.get("technical_analysis", {}),
                 "analysis_results": state.get("analysis_results", []),
+                "theme_screening": state.get("theme_screening", {}),
             }
         elif expert == "asset_allocation":
             result_data = {
@@ -182,7 +183,7 @@ class AdvisorSystem:
             "product_analysis": "product",
         }.get(task.intent.value if task.intent else "", "runtime")
         payload_keys = (
-            "stock_data", "stock_analysis", "technical_analysis", "analysis_results",
+            "stock_data", "stock_analysis", "technical_analysis", "analysis_results", "theme_screening",
             "allocation_result", "debate_result", "product_analysis",
         )
         payload = {key: state.get(key, {}) for key in payload_keys if state.get(key)}
@@ -224,6 +225,7 @@ class AdvisorSystem:
             result_data={
                 key: state.get(key, {}) for key in (
                     "stock_data", "stock_analysis", "technical_analysis", "analysis_results",
+                    "theme_screening",
                     "allocation_result", "debate_result", "product_analysis",
                 ) if state.get(key)
             },
@@ -340,6 +342,7 @@ class AdvisorSystem:
                     for key in (
                         "user_profile", "stock_data", "stock_analysis", "technical_analysis",
                         "analysis_results",
+                        "theme_screening",
                         "allocation_result", "debate_result", "product_analysis",
                     ):
                         if local.get(key):
@@ -541,7 +544,7 @@ class AdvisorSystem:
                 "warnings": [], "facts": [],
                 "business_state": {}, "user_profile": memory_data.get("profile", {}) or {},
                 "stock_data": {}, "stock_analysis": {}, "technical_analysis": {},
-                "allocation_result": {}, "debate_result": {}, "product_analysis": {},
+                "theme_screening": {}, "allocation_result": {}, "debate_result": {}, "product_analysis": {},
                 "intent_results": {}, "detected_intents": [], "finance_related": True,
                 "agent_response": "", "compliance_result": {},
                 "memory_context": memory_data.get("context_text", ""),
@@ -584,6 +587,7 @@ class AdvisorSystem:
                 "user_profile": result.get("user_profile", {}),
                 "stock_data": result.get("stock_data", {}),
                 "stock_analysis": result.get("stock_analysis", {}),
+                "theme_screening": result.get("theme_screening", {}),
                 "allocation_result": result.get("allocation_result", {}),
                 "debate_result": result.get("debate_result", {}),
                 "product_analysis": result.get("product_analysis", {}),

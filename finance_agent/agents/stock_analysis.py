@@ -17,6 +17,8 @@ from finance_agent.research.pipeline import ResearchPipeline
 from finance_agent.research.request_parser import parse_analysis_request
 from finance_agent.research.rule_engine import RuleEngine
 from finance_agent.research.snapshot_builder import SnapshotBuilder
+from finance_agent.research.screener import ThemeScreener
+from finance_agent.research.theme_repository import PostgresThemeRepository
 
 
 class _FetchGateway:
@@ -37,6 +39,10 @@ class _InlineGateway:
         return dict(value) if isinstance(value, dict) else {}
 
 
+class _ThemeGateway(_FetchGateway):
+    """主题筛选按成员逐只取数，复用生产行情网关。"""
+
+
 class StockAnalysisAgent(AgentProtocol):
     """确定性股票研究专家，兼容旧的股票分析状态字段。"""
 
@@ -47,6 +53,7 @@ class StockAnalysisAgent(AgentProtocol):
         checkpointer: Any = None,
         *,
         pipeline: ResearchPipeline | None = None,
+        theme_screener: ThemeScreener | None = None,
     ):
         # checkpointer 仅为旧编排构造签名保留，研究专家自身不持有会话状态。
         del checkpointer
@@ -55,6 +62,15 @@ class StockAnalysisAgent(AgentProtocol):
             snapshot_builder=SnapshotBuilder(_FetchGateway()),
             rule_engine=RuleEngine.default(),
         )
+        self._theme_screener = theme_screener
+
+    def _get_theme_screener(self) -> ThemeScreener:
+        if self._theme_screener is None:
+            from finance_agent.config import get_postgres_connection_factory
+            self._theme_screener = ThemeScreener(
+                PostgresThemeRepository(get_postgres_connection_factory()), _ThemeGateway(),
+            )
+        return self._theme_screener
 
     @staticmethod
     def _codes_from_state(state: dict[str, Any], message: str) -> list[str]:
@@ -119,6 +135,26 @@ class StockAnalysisAgent(AgentProtocol):
                 intent_slots=state.get("intent_slots", {}) or {},
                 user_profile=profile,
             )
+            if request.kind.value == "theme_screening":
+                screening = self._get_theme_screener().screen(request, profile)
+                payload = {
+                    "status": screening.status,
+                    "personalization_status": screening.personalization_status,
+                    "candidates": [candidate.__dict__ for candidate in screening.ranked_candidates],
+                    "pending_leads": screening.pending_leads,
+                }
+                state["theme_screening"] = payload
+                state["stock_analysis"] = {}
+                state["technical_analysis"] = {}
+                state["analysis_results"] = []
+                content = (
+                    "主题候选研究已完成。"
+                    if screening.status == "complete"
+                    else f"主题候选暂不可完整生成：{screening.status}。"
+                )
+                state["agent_response"] = content
+                self._write_intent_result(state, content, "success" if screening.status == "complete" else "degraded")
+                return state
             if not request.stock_codes:
                 raise ValueError("未识别到股票代码")
             if not stock_data and not self._injected_pipeline:

@@ -27,3 +27,42 @@ def test_profile_is_complete_only_with_risk_and_holding_period():
     )
 
     assert request.profile_complete is False
+
+
+def test_theme_request_without_stock_code_is_parsed_as_theme_screening():
+    request = parse_analysis_request(
+        "推荐人工智能主题股票",
+        resolved_stocks=[],
+        intent_slots={},
+        user_profile={},
+    )
+
+    assert request.kind.value == "theme_screening"
+    assert request.theme_id == "ai_compute"
+    assert request.stock_codes == []
+
+
+def test_explicit_theme_id_wins_without_stock_code():
+    request = parse_analysis_request(
+        "给我主题候选",
+        resolved_stocks=[],
+        intent_slots={"stock_recommendation": {"theme_id": "ai_compute"}},
+        user_profile={},
+    )
+
+    assert request.kind.value == "theme_screening"
+    assert request.theme_id == "ai_compute"
+
+
+def test_unknown_theme_returns_clear_error():
+    try:
+        parse_analysis_request(
+            "推荐新能源主题股票",
+            resolved_stocks=[],
+            intent_slots={},
+            user_profile={},
+        )
+    except ValueError as exc:
+        assert "主题" in str(exc)
+    else:
+        raise AssertionError("未知主题应返回明确的主题澄清错误")
