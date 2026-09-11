@@ -37,11 +37,11 @@ from finance_agent.research.quality_gates import (
     source_consistency,
     weekday_trading_days,
 )
-from finance_agent.research.rule_engine import load_rules
+from finance_agent.research.rule_engine import CURRENT_RULES_VERSION, load_rules
 from finance_agent.research.scoring import build_scores
 
 # 已审定的规则文件里门禁阈值与评分权重同源，避免两处阈值漂移。
-_DEFAULT_RULES_VERSION = "research_rules/v1"
+_DEFAULT_RULES_VERSION = CURRENT_RULES_VERSION
 # 证据摘要只覆盖内容字段：逐项 fetched_at 会随抓取时刻变化，纳入摘要会让
 # 同一份市场数据在两次运行中得到不同事实 ID。时点信息由 evaluated_at 承担。
 _VOLATILE_KEYS = frozenset({"fetched_at"})

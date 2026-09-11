@@ -8,6 +8,7 @@ import argparse
 import json
 from typing import Any, Callable, Protocol
 
+from finance_agent.research.rule_engine import CURRENT_RULES_VERSION
 from finance_agent.research.theme_repository import ThemeRepository
 
 
@@ -36,7 +37,7 @@ class ThemeFeatureRefresher:
         fetch_feature: Callable[[str], dict[str, Any]],
         *,
         feature_store: FeatureSnapshotStore | None = None,
-        rule_version: str = "research_rules/v1",
+        rule_version: str = CURRENT_RULES_VERSION,
     ):
         self._themes = themes
         self._fetch_feature = fetch_feature

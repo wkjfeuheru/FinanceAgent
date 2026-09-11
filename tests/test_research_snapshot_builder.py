@@ -190,3 +190,18 @@ def test_missing_valuation_is_recorded_per_field():
     assert "fundamental_metrics" not in restrictions, "仍有可用指标时不得报全缺"
     assert security.indicators["fundamental_score"] is not None
     assert snapshot.quality.status != "critical_missing"
+
+
+def test_fact_payload_carries_quote_source():
+    """审计重放必须知道每个事实来自哪个数据源。
+
+    补上 PE/PB 之后，同一只股票在不同数据源下会得到不同分数；若证据里不记来源，
+    "分数为什么变了"就无法追溯。
+    """
+    request = AnalysisRequest(kind=AnalysisKind.SINGLE_STOCK, stock_codes=["600519"])
+
+    snapshot, facts = SnapshotBuilder(RawMetricsGateway()).build(request)
+    provenance = facts[0].payload["provenance"]["quote"]
+
+    assert provenance["source"] == "fixture"
+    assert provenance["source"] == facts[0].source

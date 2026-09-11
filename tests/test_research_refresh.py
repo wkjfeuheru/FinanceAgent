@@ -45,5 +45,5 @@ def test_refresh_persists_only_successful_active_member_features():
     assert store.snapshots[0]["theme_id"] == "ai"
     assert store.snapshots[0]["stock_code"] == "600519"
     assert store.snapshots[0]["industry"] == "A"
-    assert store.snapshots[0]["rule_version"] == "research_rules/v1"
+    assert store.snapshots[0]["rule_version"] == "research_rules/v1.1"
     assert store.snapshots[0]["payload"] == {"total_score": 80, "code": "600519"}

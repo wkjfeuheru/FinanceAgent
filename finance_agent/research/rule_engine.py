@@ -39,10 +39,23 @@ class DeterministicAssessment:
 
 
 # 版本标识 → 仓库内已审定的规则文件；重放按审计记录里的版本号精确加载。
-_RULE_FILES = {"research_rules/v1": "v1.json"}
+#
+# **新增版本而不是替换**是硬要求：审计与快照重放按记录里的版本号精确加载，
+# 旧记录必须一直可重放。v1.1 的规则**内容与 v1 完全相同**，但它标记的是不同的
+# 评分口径——数据源补上 PE/PB 之后，基本面分数由 5 项而不是 3 项平均而成，
+# 同样的输入会得到不同的分数。若沿用 v1，`(theme_id, stock_code, rule_version,
+# as_of)` 上的 ON CONFLICT DO UPDATE 会在同一个键上覆盖掉旧口径的历史快照。
+_RULE_FILES = {
+    "research_rules/v1": "v1.json",
+    "research_rules/v1.1": "v1.1.json",
+}
+
+# 当前默认版本。这里是唯一真源——此前默认值重复声明在 load_rules 的参数、
+# refresh 的服务默认值与 snapshot_builder 的常量三处，容易各自漂移。
+CURRENT_RULES_VERSION = "research_rules/v1.1"
 
 
-def load_rules(version: str = "research_rules/v1") -> dict[str, Any]:
+def load_rules(version: str = CURRENT_RULES_VERSION) -> dict[str, Any]:
     """按版本标识加载仓库内规则集；未知版本必须显式失败，不得静默回退。"""
     key = str(version or "").strip()
     filename = _RULE_FILES.get(key)

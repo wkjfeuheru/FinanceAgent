@@ -48,7 +48,29 @@ def test_rule_version_is_in_assessment():
 
     assessment = RuleEngine.default().evaluate(snapshot, snapshot.request)
 
-    assert assessment.rule_version == "research_rules/v1"
+    assert assessment.rule_version == "research_rules/v1.1"
+
+
+def test_previous_rule_version_still_loads_for_replay():
+    """新版本必须**新增**而非替换：审计记录里的旧版本要一直能精确重放。
+
+    v1.1 的规则内容与 v1 相同，区别在评分口径——补上 PE/PB 之后基本面分数由
+    5 项而非 3 项平均而成，同样输入会得到不同分数。若直接改写 v1，同一个
+    ``(theme_id, stock_code, rule_version, as_of)`` 键上的 upsert 会覆盖掉
+    旧口径的历史快照。
+    """
+    from finance_agent.research.rule_engine import CURRENT_RULES_VERSION, load_rules
+
+    legacy = load_rules("research_rules/v1")
+    current = load_rules()
+
+    assert legacy["version"] == "research_rules/v1"
+    assert current["version"] == CURRENT_RULES_VERSION
+    assert CURRENT_RULES_VERSION != "research_rules/v1"
+    # 规则内容完全相同，只有版本标识不同——这正是"口径变了、规则没变"的形态。
+    assert {k: v for k, v in legacy.items() if k != "version"} == {
+        k: v for k, v in current.items() if k != "version"
+    }
 
 
 def test_good_fundamentals_and_bearish_technicals_are_wait():
