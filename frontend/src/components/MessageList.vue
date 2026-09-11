@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, nextTick, computed } from 'vue'
 import { User, Headset, Loading } from '@element-plus/icons-vue'
-import type { ChatMessage } from '@/types'
+import type { ChatMessage, ResearchAnalysisResult } from '@/types'
 
 const props = defineProps<{
   messages: ChatMessage[]
@@ -76,6 +76,11 @@ const RESTRICTION_TEXT: Record<string, string> = {
 
 function restrictionText(code: string): string {
   return RESTRICTION_TEXT[code] ?? code
+}
+
+/** 结论对应的标的代码；比较请求会为每只标的各出一条结论。 */
+function resultCode(result: ResearchAnalysisResult): string {
+  return result.request?.stock_codes?.[0] ?? ''
 }
 
 const isEmpty = computed(
@@ -169,6 +174,7 @@ const isEmpty = computed(
           >
             <div class="research-heading">
               <strong>确定性研究结论：{{ result.action }}</strong>
+              <span v-if="resultCode(result)">{{ resultCode(result) }}</span>
               <span>{{ result.personalization_status === 'personalized' ? '已结合画像' : '研究候选' }}</span>
             </div>
             <div class="research-meta">规则 {{ result.rule_version }} · 数据质量 {{ result.data_quality }}</div>

@@ -76,12 +76,15 @@ class NarrativeRenderer:
             if result.personalization_status == "research_candidate"
             else "已结合必填用户画像。"
         )
+        codes = result.request.stock_codes if result.request is not None else []
+        # 比较请求会产出多条结论，文本必须标明各自标的，否则无法对应。
+        target = f"（{codes[0]}）" if len(codes) == 1 else ""
         score_items = _score_items(result.scores)
         scores_text = "、".join(score_items) if score_items else "不可计算"
         limitations = _restriction_items(result.restrictions)
         limitations_text = "；".join(limitations) if limitations else "无"
         return (
-            f"确定性研究结论：{action}。规则版本：{result.rule_version or '未设置'}。"
+            f"确定性研究结论{target}：{action}。规则版本：{result.rule_version or '未设置'}。"
             f"数据质量：{result.data_quality}。{candidate_notice}"
             f"评分：{scores_text}。"
             f"限制与提示：{limitations_text}。",

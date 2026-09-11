@@ -12,7 +12,7 @@ from typing import Any
 from finance_agent.agents.base import AgentProtocol
 from finance_agent.orchestrator.tools.stockdata import fetch_stock_data, search_candidates
 from finance_agent.research.contracts import Action, AnalysisRequest
-from finance_agent.research.legacy_adapter import project_legacy
+from finance_agent.research.legacy_adapter import project_legacy_many
 from finance_agent.research.pipeline import ResearchPipeline
 from finance_agent.research.request_parser import parse_analysis_request
 from finance_agent.research.rule_engine import RuleEngine
@@ -110,12 +110,18 @@ class StockAnalysisAgent(AgentProtocol):
         )
 
     @staticmethod
-    def _status(result: Any) -> str:
-        return "degraded" if result.action is Action.INSUFFICIENT_DATA else "success"
+    def _status(results: list[Any]) -> str:
+        """任一标的结论降级即视为本轮降级。"""
+        return "degraded" if any(
+            result.action is Action.INSUFFICIENT_DATA for result in results
+        ) else "success"
 
     @staticmethod
-    def _content(result: Any) -> str:
-        return result.narrative or f"研究结论：{result.action.value}。"
+    def _content(results: list[Any]) -> str:
+        """逐条给出标的结论，比较请求不会只展示其中一只。"""
+        return "\n".join(
+            result.narrative or f"研究结论：{result.action.value}。" for result in results
+        )
 
     def invoke(self, state: dict[str, Any]) -> dict[str, Any]:
         """解析一次状态并写回新旧两套结果，不保存本次调用数据。"""
@@ -189,11 +195,10 @@ class StockAnalysisAgent(AgentProtocol):
                 stock_data = fetch_stock_data(request.stock_codes)
                 state["stock_data"] = stock_data
             pipeline = self._pipeline_for_state(stock_data)
-            if hasattr(pipeline, "analyze_with_facts"):
-                result, facts = pipeline.analyze_with_facts(request, user_profile=profile)
+            if hasattr(pipeline, "analyze_per_security"):
+                results, facts = pipeline.analyze_per_security(request, user_profile=profile)
             else:
-                result = pipeline.analyze(request, user_profile=profile)
-                facts = []
+                results, facts = [pipeline.analyze(request, user_profile=profile)], []
         except Exception as exc:
             state["stock_analysis"] = {}
             state["technical_analysis"] = {}
@@ -207,7 +212,7 @@ class StockAnalysisAgent(AgentProtocol):
             state["agent_response"] = content
             return state
 
-        projected = project_legacy(result)
+        projected = project_legacy_many(results)
         for code, entry in projected["stock_analysis"].items():
             raw = stock_data.get(code, {}) if isinstance(stock_data, dict) else {}
             if isinstance(raw, dict):
@@ -217,13 +222,15 @@ class StockAnalysisAgent(AgentProtocol):
         state["stock_analysis"] = projected["stock_analysis"]
         state["technical_analysis"] = projected["technical_analysis"]
         state["analysis_results"] = projected["analysis_results"]
+        # 运行级请求（比较请求含全部标的）单独留档，审计才能按一次运行归组重放。
+        state["research_request"] = request.model_dump(mode="json")
         if facts:
             existing = state.get("facts", []) or []
             existing_ids = {fact.fact_id for fact in existing}
             state["facts"] = existing + [fact for fact in facts if fact.fact_id not in existing_ids]
-        content = self._content(result)
+        content = self._content(results)
         state["agent_response"] = content
-        self._write_intent_result(state, content, self._status(result))
+        self._write_intent_result(state, content, self._status(results))
         return state
 
     @staticmethod
@@ -248,7 +255,7 @@ class StockAnalysisAgent(AgentProtocol):
         data = stock_data or fetch_stock_data([code])
         request = AnalysisRequest(kind="single_stock", stock_codes=[code])
         result = self._pipeline_for_state(data).analyze(request, user_profile={})
-        entry = project_legacy(result)["stock_analysis"].get(code, {"code": code})
+        entry = project_legacy_many([result])["stock_analysis"].get(code, {"code": code})
         raw = data.get(code, {}) if isinstance(data, dict) else {}
         if isinstance(raw, dict):
             for key in ("quote", "basic_info", "search_candidate"):

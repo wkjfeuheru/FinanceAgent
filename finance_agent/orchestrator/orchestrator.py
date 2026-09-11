@@ -147,61 +147,108 @@ class AdvisorSystem:
         )
 
     def _audit_research_results(self, state: Dict[str, Any]) -> None:
-        """将确定性研究结果及其引用的原始快照单独写入可重放审计表。"""
+        """将确定性研究结果及其引用的原始快照单独写入可重放审计表。
+
+        多标的一轮（比较、主题筛选）必须写成**同一次运行的多条结果**：
+        ``save`` 会先删除该运行下的既有结果行，逐条调用只会留下最后一只。
+        """
         save = getattr(self.audit, "save_research_result", None)
+        save_run = getattr(self.audit, "save_research_run", None)
         evidence_facts = {
             fact.fact_id: fact.model_dump(mode="json")
             for fact in state.get("facts", []) or []
             if isinstance(fact, FactSnapshot)
         }
-        theme_screening = state.get("theme_screening", {}) or {}
-        if theme_screening:
-            save_run = getattr(self.audit, "save_research_run", None)
-            try:
-                request = AnalysisRequest.model_validate(theme_screening.get("request", {}))
-                results = [
-                    AnalysisResult.model_validate(item)
-                    for item in state.get("analysis_results", []) or []
-                ]
-            except (TypeError, ValueError):
-                return
-            if callable(save_run):
-                fact_ids = {
-                    fact_id for result in results for fact_id in result.evidence_ids
-                }
-                save_run(
-                    request=request,
-                    results=results,
-                    snapshot_manifest=[
-                        evidence_facts[fact_id] for fact_id in fact_ids if fact_id in evidence_facts
-                    ],
-                    active_members=list(theme_screening.get("active_members", [])),
-                    exclusions=list(theme_screening.get("exclusions", [])),
-                    run_id=str(state.get("run_id", "")),
-                    customer_id=str(state.get("customer_id", "")),
-                    conversation_id=str(state.get("thread_id", "")),
-                    status=str(theme_screening.get("status", "completed")),
-                )
-            return
-        if not callable(save):
-            return
+        results = []
         for raw_result in state.get("analysis_results", []) or []:
             try:
-                result = AnalysisResult.model_validate(raw_result)
+                results.append(AnalysisResult.model_validate(raw_result))
             except (TypeError, ValueError):
                 continue
-            snapshot_manifest = [
-                evidence_facts[fact_id]
-                for fact_id in result.evidence_ids
-                if fact_id in evidence_facts
-            ]
+
+        theme_screening = state.get("theme_screening", {}) or {}
+        if theme_screening:
+            try:
+                request = AnalysisRequest.model_validate(theme_screening.get("request", {}))
+            except (TypeError, ValueError):
+                return
+            self._save_research_run(
+                save_run, request=request, results=results, evidence_facts=evidence_facts,
+                state=state,
+                active_members=list(theme_screening.get("active_members", [])),
+                exclusions=list(theme_screening.get("exclusions", [])),
+                status=str(theme_screening.get("status", "completed")),
+            )
+            return
+
+        run_request = self._run_level_request(state, results)
+        if len(results) > 1 and callable(save_run) and run_request is not None:
+            self._save_research_run(
+                save_run, request=run_request, results=results, evidence_facts=evidence_facts,
+                state=state, active_members=[], exclusions=[], status="completed",
+            )
+            return
+
+        if not callable(save):
+            return
+        for result in results:
             save(
                 result,
-                snapshot_manifest=snapshot_manifest,
+                snapshot_manifest=[
+                    evidence_facts[fact_id]
+                    for fact_id in result.evidence_ids
+                    if fact_id in evidence_facts
+                ],
                 run_id=str(state.get("run_id", "")),
                 customer_id=str(state.get("customer_id", "")),
                 conversation_id=str(state.get("thread_id", "")),
             )
+
+    def _save_research_run(
+        self,
+        save_run: Any,
+        *,
+        request: AnalysisRequest,
+        results: List[AnalysisResult],
+        evidence_facts: Dict[str, Any],
+        state: Dict[str, Any],
+        active_members: List[Dict[str, Any]],
+        exclusions: List[Dict[str, Any]],
+        status: str,
+    ) -> None:
+        """把一轮多标的结论写成同一次研究运行。"""
+        if not callable(save_run):
+            return
+        fact_ids = {fact_id for result in results for fact_id in result.evidence_ids}
+        save_run(
+            request=request,
+            results=results,
+            snapshot_manifest=[
+                evidence_facts[fact_id] for fact_id in fact_ids if fact_id in evidence_facts
+            ],
+            active_members=active_members,
+            exclusions=exclusions,
+            run_id=str(state.get("run_id", "")),
+            customer_id=str(state.get("customer_id", "")),
+            conversation_id=str(state.get("thread_id", "")),
+            status=status,
+        )
+
+    @staticmethod
+    def _run_level_request(
+        state: Dict[str, Any], results: List[AnalysisResult],
+    ) -> AnalysisRequest | None:
+        """取运行级请求：优先专家留档的原始请求，其次回退到首条结论的请求。"""
+        raw_request = state.get("research_request")
+        if isinstance(raw_request, dict):
+            try:
+                return AnalysisRequest.model_validate(raw_request)
+            except (TypeError, ValueError):
+                pass
+        for result in results:
+            if result.request is not None:
+                return result.request
+        return None
 
     def _capture_task_facts(self, state: Dict[str, Any], task: Any) -> list[str]:
         """将本轮专家产出的业务输入登记为可引用的事实快照。"""

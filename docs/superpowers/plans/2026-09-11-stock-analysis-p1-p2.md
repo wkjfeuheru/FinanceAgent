@@ -82,10 +82,40 @@
 - `cd frontend && npm run build`：通过（vue-tsc + vite）。
 - `python -m pyflakes finance_agent tests`：无未定义名（`expert_status` 已消失）。
 
+## 补充修复：比较请求按标的独立结论（本轮后续）
+
+**缺陷（实测复现）：** 比较请求只对 `snapshot.securities[0]` 评分，`project_legacy` 再把这一条结论
+投影给请求里的每个代码，因此"强票 vs 弱票"会输出同一个评级与总分：
+
+```
+改前: 600519(ROE 25/上行) → 关注 86.0 ；600036(ROE 2/下行) → 关注 86.0
+改后: 600519 → 关注 ；600036 → 观望（各自评分与证据）
+```
+
+连带发现两处问题：
+
+1. `save_research_result` 内部按 `agent_run_id` 派生同一个 `research_run_id`，写入前 `DELETE`
+   该运行既有结果行 → 多标的逐条 save 只会留下最后一只，必须整批写入。
+2. 报告层（模板文本与前端卡片）不标注结论所属标的，多条结论无法对应到股票。
+
+**修复：**
+
+- `AnalysisRequest.for_security(code)`：运行级 → 单标的请求的唯一收敛点（比较请求的单项结论按单股描述）。
+- `ResearchPipeline.analyze_per_security(...)`：逐标的出结论，每条只引用自己的证据事实；快照仍按整批构建一次，跨标的门禁对每条结论都生效。`analyze` / `analyze_with_facts` 遇到多标的请求显式报错，不再静默只算第一只。
+- `project_legacy_many(...)`：按结果自身的 `request` 归属代码，不再互相复制评级。
+- `orchestrator._audit_research_results`：多标的一轮统一走 `save_research_run`（`state["research_request"]` 保留运行级请求）。
+- `narrative.py` 与前端 `MessageList.vue` / `types/index.ts`：标注结论所属代码。
+- `replay.py`：按"同一次构建"分组重建（跨标的门禁与评估时点取决于整批标的，逐只重建复现不出原结论），再按标的切分比对。
+
+**验证：** `python -m pytest -q` → 207 passed（新增 `tests/test_research_comparison.py` 7 项，
+含比较运行的重放一致性）；`npm run build` 通过。
+
 ## 遗留决策与已知限制
 
-- **规则版本**：若坚持"已发布规则集不可变"，把 `rules/v1.json` 的 `version` 改为
-  `research_rules/v2` 并同步 `_RULE_FILES` 与 6 处测试引用即可；本次按"补齐 v1"处理。
+- **规则版本（已裁决）**：保持 `research_rules/v1` —— 新鲜度门禁本就声明在 v1（只是未实现），
+  实现它属于补齐 v1，其余新键为 warning 语义、不改既有评分数值。
+  ⚠️ 并行计划 `2026-09-11-data-source-coverage-p0.md` 的 **D13 要求 bump `rule_version`**，
+  与本裁决冲突：**以本裁决为准，D13 需相应修改**，否则 task 7 会覆盖该决定。
 - **AKShare 部署**：AKShare 不提供日估值接口与披露日期，因此纯 AKShare 部署下
   `data_quality` 恒为 `warning`（含 `valuation_metrics_missing`、
   `fundamental_disclosure_date_missing`），结论不受阻但不再显示 `complete`。

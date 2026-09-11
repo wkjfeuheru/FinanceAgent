@@ -88,6 +88,8 @@ export interface ResearchAnalysisResult {
   evidence_ids: string[]
   personalization_status: 'personalized' | 'research_candidate'
   restrictions: string[]
+  /** 该结论对应的研究请求；比较请求会为每只标的各出一条结论。 */
+  request?: { stock_codes?: string[] }
 }
 
 /** 仅供管理员审核的外部研究线索；不含评分或行动结论。 */

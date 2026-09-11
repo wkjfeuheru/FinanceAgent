@@ -76,23 +76,32 @@ def _parse_moment(value: Any) -> datetime | None:
     return moment if moment.tzinfo is not None else moment.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
 
 
-def _entry_for(stored: dict[str, Any], facts: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+def _entry_for(
+    stored: dict[str, Any],
+    facts_by_id: dict[str, dict[str, Any]],
+    owners: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
     """按证据 ID 定位标的对应的事实记录，回退按股票代码匹配。"""
     for fact_id in stored.get("fact_ids") or []:
-        if isinstance(fact_id, str) and fact_id in facts:
-            return facts[fact_id]
-    code = str(stored.get("stock_code") or "")
-    for entry in facts.values():
-        payload = entry.get("payload")
-        if isinstance(payload, dict) and str(payload.get("code") or "") == code:
-            return entry
-    return None
+        if isinstance(fact_id, str) and fact_id in facts_by_id:
+            return facts_by_id[fact_id]
+    return owners.get(str(stored.get("stock_code") or ""))
+
+
+def _evaluated_at_of(members: list[tuple[str, dict[str, Any], dict[str, Any]]]) -> datetime | None:
+    """取同一次构建的评估时点：与快照层一致，取各数据项的最大值。"""
+    moments = [
+        moment
+        for _, payload, _ in members
+        if (moment := _parse_moment(payload.get("evaluated_at"))) is not None
+    ]
+    return max(moments) if moments else None
 
 
 def _member_request(
     payload: dict[str, Any], request_data: Any, code: str,
 ) -> AnalysisRequest | None:
-    """优先使用证据里记录的标的级请求，其次由运行级请求派生。"""
+    """还原该证据所属的请求：优先使用记录值，其次由运行级请求派生。"""
     recorded = payload.get("request")
     if isinstance(recorded, dict):
         try:
@@ -103,12 +112,15 @@ def _member_request(
         base = AnalysisRequest.model_validate(request_data)
     except (ValueError, TypeError):
         return None
-    if base.stock_codes == [code]:
-        return base
-    try:
-        return base.model_copy(update={"stock_codes": [code]})
-    except ValueError:
-        return None
+    return base.for_security(code)
+
+
+def _request_signature(payload: dict[str, Any], request_data: Any, code: str) -> str:
+    """按"同一次构建"给证据分组：同一个请求一起重建才能复现跨标的门禁。"""
+    recorded = payload.get("request")
+    if isinstance(recorded, dict):
+        return json.dumps(recorded, sort_keys=True, ensure_ascii=False, default=str)
+    return f"__run_level__:{json.dumps(request_data, sort_keys=True, ensure_ascii=False, default=str)}:{code}"
 
 
 def _calendar_for(
@@ -193,60 +205,104 @@ def replay_research_run(
 
     engine = RuleEngine(rules)
     gate_config = GateConfig.from_rules(rules)
-    facts = {
-        str(entry.get("fact_id")): entry
-        for entry in (snapshot_manifest or [])
-        if isinstance(entry, dict) and entry.get("fact_id")
-    }
     mismatches: list[str] = []
     advisories: list[str] = []
     stored_actions: dict[str, str] = {}
     replayed_actions: dict[str, str] = {}
     fact_ids_matched = True
     calendars = set()
+    handled: set[str] = set()
 
-    for stored in results or []:
-        if not isinstance(stored, dict):
+    # 按"同一次构建"分组：比较请求的全部标的必须一起重建，跨标的门禁
+    # （如报告期混用）与评估时点都取决于整批标的，逐只重建会复现不出原结论。
+    groups: dict[str, list[tuple[str, dict[str, Any], dict[str, Any]]]] = {}
+    owners: dict[str, dict[str, Any]] = {}
+    facts_by_id: dict[str, dict[str, Any]] = {}
+    for entry in snapshot_manifest or []:
+        if not isinstance(entry, dict):
             continue
-        code = str(stored.get("stock_code") or "")
-        entry = _entry_for(stored, facts)
-        payload = entry.get("payload") if isinstance(entry, dict) else None
-        inputs = payload.get("inputs") if isinstance(payload, dict) else None
-        request = _member_request(payload or {}, request_data, code) if isinstance(payload, dict) else None
-        if entry is None or not isinstance(inputs, dict) or not inputs or request is None:
-            mismatches.append(f"{code}:{EVIDENCE_INCOMPLETE}")
+        payload = entry.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        code = str(payload.get("code") or "")
+        if code:
+            owners[code] = entry
+        fact_id = str(entry.get("fact_id") or "")
+        if fact_id:
+            facts_by_id[fact_id] = entry
+        groups.setdefault(_request_signature(payload, request_data, code), []).append(
+            (code, payload, entry)
+        )
+
+    for members in groups.values():
+        request = _member_request(members[0][1], request_data, members[0][0])
+        member_codes = {code for code, _, _ in members}
+        if request is None:
+            mismatches.extend(f"{code}:{EVIDENCE_INCOMPLETE}" for code in sorted(member_codes))
+            handled.update(member_codes)
             continue
 
-        counter, basis, degraded = _calendar_for(payload, provider_calendar=provider_calendar)
+        inputs_by_code = {
+            code: payload["inputs"] for code, payload, _ in members
+            if isinstance(payload.get("inputs"), dict) and payload["inputs"]
+        }
+        counter, basis, degraded = _calendar_for(members[0][1], provider_calendar=provider_calendar)
         calendars.add(basis)
         builder = SnapshotBuilder(
-            EvidenceGateway({code: inputs}),
+            EvidenceGateway(inputs_by_code),
             gate_config=gate_config,
             trading_days=counter,
-            evaluated_at=_parse_moment(payload.get("evaluated_at")),
+            evaluated_at=_evaluated_at_of(members),
         )
         snapshot, replayed_facts = builder.build(request)
-        assessment = engine.evaluate(snapshot, request)
-        security = snapshot.securities[0] if snapshot.securities else None
+        replayed_by_code = {
+            str(fact.payload.get("code")): fact for fact in replayed_facts
+        }
+        securities = {security.code: security for security in snapshot.securities}
 
-        stored_actions[code] = str(stored.get("action", ""))
-        replayed_actions[code] = assessment.action.value
-        if stored_actions[code] != replayed_actions[code]:
-            mismatches.append(f"{code}:action {stored_actions[code]} -> {replayed_actions[code]}")
-        if not _scores_equal(stored.get("scores"), _assessment_scores(assessment)):
-            mismatches.append(f"{code}:scores")
+        for stored in results or []:
+            if not isinstance(stored, dict):
+                continue
+            code = str(stored.get("stock_code") or "")
+            entry = _entry_for(stored, facts_by_id, owners)
+            payload = entry.get("payload") if isinstance(entry, dict) else None
+            if not isinstance(payload, dict) or str(payload.get("code") or "") not in member_codes:
+                continue
+            if code not in inputs_by_code:
+                mismatches.append(f"{code}:{EVIDENCE_INCOMPLETE}")
+                handled.add(code)
+                continue
 
-        # 事实 ID 必须与审计记录里引用的完全一致，否则同一份记录无法复算同一证据。
-        if not replayed_facts or replayed_facts[0].fact_id not in set(stored.get("fact_ids") or []):
-            fact_ids_matched = False
-            mismatches.append(f"{code}:fact_id")
+            security = securities.get(code)
+            replayed_fact = replayed_by_code.get(code)
+            item_request = request.for_security(code)
+            if security is None:
+                mismatches.append(f"{code}:{EVIDENCE_INCOMPLETE}")
+                handled.add(code)
+                continue
+            handled.add(code)
+            item_snapshot = snapshot.model_copy(
+                update={"securities": [security], "request": item_request},
+            )
+            assessment = engine.evaluate(item_snapshot, item_request)
 
-        # 质量结论与限流原因：两者都是门禁与评分的确定性产物。
-        target = advisories if degraded else mismatches
-        expected_status = payload.get("snapshot_quality_status") or payload.get("quality_status")
-        if expected_status != snapshot.quality.status:
-            target.append(f"{code}:data_quality {expected_status} -> {snapshot.quality.status}")
-        if security is not None:
+            stored_actions[code] = str(stored.get("action", ""))
+            replayed_actions[code] = assessment.action.value
+            if stored_actions[code] != replayed_actions[code]:
+                mismatches.append(f"{code}:action {stored_actions[code]} -> {replayed_actions[code]}")
+            if not _scores_equal(stored.get("scores"), _assessment_scores(assessment)):
+                mismatches.append(f"{code}:scores")
+
+            # 事实 ID 必须与审计记录里引用的完全一致，否则记录无法复算同一证据。
+            if replayed_fact is None or replayed_fact.fact_id not in set(stored.get("fact_ids") or []):
+                fact_ids_matched = False
+                mismatches.append(f"{code}:fact_id")
+
+            # 质量结论与限制原因都是门禁与评分的确定性产物。
+            target = advisories if degraded else mismatches
+            expected_status = payload.get("snapshot_quality_status") or payload.get("quality_status")
+            if expected_status != snapshot.quality.status:
+                target.append(f"{code}:data_quality {expected_status} -> {snapshot.quality.status}")
             expected_missing = payload.get("missing_critical")
             if isinstance(expected_missing, list) and expected_missing != list(security.quality.missing_critical):
                 target.append(
@@ -257,6 +313,14 @@ def replay_research_run(
                 target.append(
                     f"{code}:warnings {_list_diff(expected_warnings, security.quality.warnings)}"
                 )
+
+    # 记录里存在结论但证据缺失的标的必须显式标记，不能因为没进任何分组而"matched"。
+    for stored in results or []:
+        if not isinstance(stored, dict):
+            continue
+        code = str(stored.get("stock_code") or "")
+        if code and code not in handled:
+            mismatches.append(f"{code}:{EVIDENCE_INCOMPLETE}")
 
     matched = not mismatches
     return ReplayOutcome(

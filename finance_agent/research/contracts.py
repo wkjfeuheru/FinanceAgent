@@ -76,6 +76,21 @@ class AnalysisRequest(BaseModel):
             raise ValueError("主题筛选必须提供 theme_id")
         return normalized
 
+    def for_security(self, code: str) -> "AnalysisRequest":
+        """收敛到单只标的的研究请求。
+
+        结论的原子单位是单只标的：比较请求的单项结论按单股结论描述
+        （``kind`` 转为 ``single_stock``），使每条结论都能独立评分、审计与
+        展示。已经是该标的的单标的请求时返回自身。
+        """
+        normalized = str(code).strip()
+        if self.kind is not AnalysisKind.COMPARISON and self.stock_codes == [normalized]:
+            return self
+        update: dict[str, Any] = {"stock_codes": [normalized]}
+        if self.kind is AnalysisKind.COMPARISON:
+            update["kind"] = AnalysisKind.SINGLE_STOCK
+        return self.model_copy(update=update)
+
 
 class AnalysisResult(BaseModel):
     """确定性研究产物的最小稳定外层契约。"""
