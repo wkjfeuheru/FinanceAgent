@@ -193,6 +193,7 @@ adjustflag=3/2/1 三种口径下 peTTM/pbMRQ/psTTM/pcfNcfTTM 全部非空且数�
 - AKShare 的 `get_trade_cal` 仍 `raise UnsupportedProviderCapability`。
 - 股息率（`dv_ratio`/`dv_ttm`）在免费源中不可得。
 - 腾讯源的 qfq 口径差异未做归一，仅通过"不进降级链"规避。
+- **BaoStock 的日线字段是字符串（新发现）**：其 socket 协议把所有字段返回为字符串（`close` 也是），而 `normalize_daily_records` 按契约只做改名牌、排序与日期校准，**不做类型转换**。因此纯 BaoStock 部署下 `quote.price`、`volume` 等会是字符串。估值路径已在本次修复（`_coerce_valuation`），**日线路径未动**——统一日线记录的类型是契约级改动（涉及 `close/open/high/low/vol/amount`），需要单独决策，且会影响 Tushare/AKShare 两条既有路径的断言。
 
 **仓库内的死配置（声明了但从不被读取，本次不做，且不再新增同类）：**
 

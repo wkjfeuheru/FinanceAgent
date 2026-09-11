@@ -202,25 +202,23 @@ git commit -m "fix: route Beijing exchange codes explicitly and never silently e
 - Consumes: `ak.stock_value_em(symbol)`。
 - Produces: `AkshareDataSource.get_daily_basic` 返回规范估值记录（`trade_date` 升序）。
 
-- [ ] **Step 1: 写入失败测试**
+- [x] **Step 1: 写入失败测试**
 
-用桩让 `provider.ak.stock_value_em` 返回带真实列名（`数据日期`/`PE(TTM)`/`PE(静)`/`市净率`/`市销率`/`总市值`/`流通市值`）的 DataFrame，断言：`get_daily_basic("600519")` 不再抛 `UnsupportedProviderCapability`，且首条记录含 `pe_ttm` 与 `pb`。
+新建 `tests/test_akshare_valuation.py`（7 个用例）：TTM 与静态 PE 分离；估值**真的改变**基本面分数；窗口在适配器侧裁剪；命中缓存不重复取数；缺少 `stock_value_em` 时报能力缺口；取数失败报 `ProviderUnavailableError`；已废止北交所代码在任何请求前失败。
 
-**关键断言（本次缺口的根因）：** 把该记录送入 `build_scores`，断言 `pe`、`pb` 两个子分**确实参与**了基本面均值——用「含 PE/PB 的输入」与「去掉 PE/PB 的同样输入」两次调用的分数**不相等**来证明。
+- [x] **Step 2: 验证测试按预期失败**
 
-- [ ] **Step 2: 验证测试按预期失败**
+实际（**偏离说明**）：本任务的 Step 1 与 Step 3 被合并成一次编辑，因此**没有单独执行"先验证失败"**。首轮运行的失败是漏了 `normalize_valuation_records` 的 import（`NameError`），补齐后 7 passed。这是一次对仓库 TDD 惯例的偏离，记录在此以便复盘——任务 5 恢复了先红后绿。
 
-运行：`python -m pytest -q tests/test_akshare_valuation.py`
+- [x] **Step 3: 实现**
 
-预期：失败于 `UnsupportedProviderCapability`。
+`get_daily_basic` 的 `raise` 替换为调用 `stock_value_em`。带括号的 PE 两列在适配器内显式映射（`PE(TTM) → pe_ttm`、`PE(静) → pe_lyr`），不进共享别名表；窗口用 `_within_window` 在客户端裁剪（该接口没有日期参数）；取数失败抛 `ProviderUnavailableError` 以便与能力缺口区分；结果写估值缓存。
 
-- [ ] **Step 3: 实现**
+**关键断言（本次缺口的根因）：** 测试用「含 PE/PB 的输入」与「去掉 PE/PB 的同样输入」两次调用 `build_scores`，断言分数**不相等**。仅断言"非空"是不够的——缺 PE/PB 时分数同样非空，只是由 3 个会计指标各占 1/3 平均而成，**口径被静默换掉**。
 
-`akshare_provider.py:79-81` 的 `raise` 替换为调用 `stock_value_em`，按任务 1 的映射产出规范键，出口调用 `normalize_valuation_records`。网络异常时抛 `ProviderUnavailableError`（而非 `UnsupportedProviderCapability`），以便 `_call` 语义正确。
+- [x] **Step 4: 验证通过并提交**
 
-- [ ] **Step 4: 验证通过并提交**
-
-运行：`python -m pytest -q tests/test_akshare_valuation.py tests/test_data_normalization.py tests/test_research_snapshot_builder.py`
+实际结果：**7 passed**；全量 `python -m pytest -q` → **213 passed**。
 
 ```bash
 git commit -m "feat: source daily valuation from AKShare stock_value_em"
@@ -235,23 +233,23 @@ git commit -m "feat: source daily valuation from AKShare stock_value_em"
 **Interfaces:**
 - Produces: `BaostockDataSource.get_daily_basic` 返回含 `pe_ttm`/`pb`/`ps_ttm` 的规范记录（免 token 的第二路）。
 
-- [ ] **Step 1: 写入失败测试**
+- [x] **Step 1: 写入失败测试**
 
-按仓库既有风格构造真实适配器再替换内部句柄（`provider.bs = StubBaostock()`，对应 `tests/test_data_normalization.py:125-135` 的 `provider.ak = StubAkshare()`），桩返回 `peTTM/pbMRQ/psTTM` 列，断言出口含 `pe_ttm`/`pb`/`ps_ttm`。
+新建 `tests/test_baostock_valuation.py`（6 个用例）：规范键映射；请求固定 `frequency="d"` 与 `adjustflag="3"`；空串估值行被剔除；全空时报 `ProviderUnavailableError`；命中缓存不重复取数；北交所在估值路径同样被拒。
 
-- [ ] **Step 2: 验证测试按预期失败**
+- [x] **Step 2: 验证测试按预期失败**
 
-运行：`python -m pytest -q tests/test_baostock_valuation.py`
+实际：首轮 1 failed, 5 passed——`assert '18.0' == 18.0`。这个失败**暴露了一个真实缺陷**：BaoStock 的 socket 协议把所有字段返回为**字符串**，而 AKShare 返回 float。见 Step 3 的第 2 条修正。
 
-预期：失败于 `UnsupportedProviderCapability("BaoStock 不支持统一日估值接口")`。
+- [x] **Step 3: 实现**
 
-- [ ] **Step 3: 实现**
+1. `get_daily_basic` 的 `raise` 替换为 `query_history_k_data_plus(symbol, "date,peTTM,pbMRQ,psTTM,pcfNcfTTM", frequency="d", adjustflag="3")`。估值字段与行情可在同一次请求返回，但这里只取估值以保持能力边界一致。
+2. **新增 `_coerce_valuation()`：在适配器出口把估值字段强转为 float。** 理由是同一能力在不同 provider 之间形状不一致会直接泄漏到报价契约（`quote["pe"]` 变成字符串）。
+3. **新增 `_has_valuation()` 过滤：剔除估值字段全为空串的行。** BaoStock 在停牌/无数据日返回空串，不过滤则 `_latest_daily_record` 取到的"最新一根"没有估值，表面上仍像"估值缺失"。
 
-`baostock_provider.py:98-100` 的 `raise` 替换为 `query_history_k_data_plus(code, "date,peTTM,pbMRQ,psTTM,pcfNcfTTM", frequency="d", adjustflag="3")`。**注意：估值字段在 `3/2/1` 三种口径下数值完全相同（实测），且 `frequency` 只能是 `d`**——周线/月线带估值字段会被服务端以 `10004012` 拒绝。出口调用 `normalize_valuation_records`。
+- [x] **Step 4: 验证通过并提交**
 
-- [ ] **Step 4: 验证通过并提交**
-
-运行：`python -m pytest -q tests/test_baostock_valuation.py`
+实际结果：**6 passed**；全量 `python -m pytest -q` → **220 passed**。
 
 ```bash
 git commit -m "feat: source daily valuation from BaoStock without a token"
