@@ -268,3 +268,20 @@ def test_comparison_with_mixed_report_periods_is_critical():
     assert assessment.action.value == "数据不足"
     assert facts[0].payload["cross_security_reasons"] == ["mixed_report_period"]
     assert mixed_report_periods({"600519": "2026-06-30"}) == []
+
+
+def test_static_pe_key_is_recognised_as_static_basis():
+    """``pe_lyr`` 是静态 PE 的规范键，必须被识别。
+
+    适配器现在把东财的 ``PE(静)`` 映射为 ``pe_lyr``、``PE(TTM)`` 映射为 ``pe_ttm``。
+    若 ``valuation_basis`` 只认 ``pe``，那么**只有静态 PE 的数据源会被误判为
+    "完全没有估值"**，给出错误的限制提示。
+    """
+    from finance_agent.research.quality_gates import valuation_basis
+
+    assert valuation_basis({"pe_ttm": 18.0}) == "ttm"
+    assert valuation_basis({"pe_ttm": 18.0, "pe_lyr": 20.0}) == "ttm"
+    assert valuation_basis({"pe": 20.0}) == "static"
+    assert valuation_basis({"pe_lyr": 20.0}) == "static"
+    assert valuation_basis({}) == "missing"
+    assert valuation_basis({"pe_ttm": None, "pe_lyr": None}) == "missing"

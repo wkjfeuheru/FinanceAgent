@@ -158,3 +158,35 @@ def test_missing_raw_metrics_do_not_create_placeholder_scores():
     assert "fundamental_metrics" in indicators["score_restrictions"]
     assert "price_history" in indicators["score_restrictions"]
     assert assessment.action.value == "数据不足"
+
+
+class NoValuationGateway(RawMetricsGateway):
+    """提供会计指标但不提供 PE/PB：分数仍可计算，只是口径不同。"""
+
+    def get_security_data(self, stock_code: str) -> dict:
+        data = super().get_security_data(stock_code)
+        indicators = dict(data["indicators"])
+        indicators.pop("pe_ttm", None)
+        indicators.pop("pb", None)
+        data["indicators"] = indicators
+        return data
+
+
+def test_missing_valuation_is_recorded_per_field():
+    """丢失 PE/PB 曾在无声中换掉评分口径。
+
+    缺 PE/PB 时基本面分数**依然非空**，只是由 3 项而非 5 项平均而成，
+    报告和审计都看不出差别。因此必须逐字段记录，且不得升级为关键数据缺失——
+    否则纯单源部署会大面积变成"数据不足"。
+    """
+    request = AnalysisRequest(kind=AnalysisKind.SINGLE_STOCK, stock_codes=["600519"])
+
+    snapshot, _ = SnapshotBuilder(NoValuationGateway()).build(request)
+    security = snapshot.securities[0]
+    restrictions = security.indicators["score_restrictions"]
+
+    assert "fundamental_missing:pe_ttm" in restrictions
+    assert "fundamental_missing:pb" in restrictions
+    assert "fundamental_metrics" not in restrictions, "仍有可用指标时不得报全缺"
+    assert security.indicators["fundamental_score"] is not None
+    assert snapshot.quality.status != "critical_missing"

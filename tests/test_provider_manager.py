@@ -119,6 +119,37 @@ def test_fallback_on_unsupported_capability():
     assert manager.last_metadata["source"] == "baostock"
 
 
+def test_unsupported_capability_is_not_recorded_as_degradation():
+    """能力缺口与真实失败必须分开记录。
+
+    否则每次 AKShare 优先的估值请求都显示 ``degraded``，而实际上那只是
+    "该源从未声明这个能力"——审计时无法区分"不支持"与"暂时取不到"。
+    """
+    a = FakeProvider("akshare", unsupported=["get_daily_basic"])
+    b = FakeProvider("tushare_mcp")
+    manager = _manager({"akshare": a, "tushare_mcp": b}, ["akshare", "tushare_mcp"])
+
+    manager.get_daily_basic("600519")
+
+    assert manager.last_metadata["source"] == "tushare_mcp"
+    assert manager.last_metadata["unsupported"] == ["akshare"]
+    assert manager.last_metadata["failures"] == []
+    assert manager.last_metadata["degraded"] is False
+
+
+def test_real_failure_still_marks_degradation():
+    """区分能力缺口不能顺手把真实故障也降级掉。"""
+    a = FakeProvider("akshare", error=RuntimeError("boom"))
+    b = FakeProvider("baostock")
+    manager = _manager({"akshare": a, "baostock": b}, ["akshare", "baostock"])
+
+    manager.get_daily("600519")
+
+    assert manager.last_metadata["degraded"] is True
+    assert manager.last_metadata["failures"][0]["provider"] == "akshare"
+    assert manager.last_metadata["unsupported"] == []
+
+
 def test_all_providers_fail_raises_unified_error():
     a = FakeProvider("akshare", error=RuntimeError("boom"))
     b = FakeProvider("baostock", error=RuntimeError("boom"))

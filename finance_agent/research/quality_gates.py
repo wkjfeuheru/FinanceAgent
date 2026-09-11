@@ -176,11 +176,15 @@ def _number(value: Any) -> float | None:
 
 
 def valuation_basis(indicators: dict[str, Any]) -> str:
-    """判断估值依据：ttm（优先）/ static（静态 PE）/ missing（无 PE）。"""
+    """判断估值依据：ttm（优先）/ static（静态 PE）/ missing（无 PE）。
+
+    ``pe_lyr`` 是静态 PE 的规范键（由适配器在出口映射），必须一并识别，
+    否则只有静态 PE 的数据源会被误判为"完全没有估值"。
+    """
     source = indicators if isinstance(indicators, dict) else {}
     if _number(source.get("pe_ttm")) is not None:
         return "ttm"
-    if _number(source.get("pe")) is not None:
+    if _number(source.get("pe")) is not None or _number(source.get("pe_lyr")) is not None:
         return "static"
     return "missing"
 

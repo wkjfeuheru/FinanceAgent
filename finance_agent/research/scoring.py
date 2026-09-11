@@ -144,8 +144,18 @@ def build_scores(
     roe = _first_number(raw, "roe", "roe_wa", "roe_dt")
     revenue_growth = _first_number(raw, "revenue_yoy", "or_yoy")
     profit_growth = _first_number(raw, "netprofit_yoy", "profit_yoy")
-    pe = _first_number(raw, "pe_ttm", "pe")
+    # PE 槽位按"完全取不到 PE"记录：只有静态 PE 的情况由质量门禁的
+    # ``valuation_not_ttm`` 负责报告，评分层不重复报警。
+    pe_ttm_value = _number(raw.get("pe_ttm"))
+    pe = pe_ttm_value if pe_ttm_value is not None else _number(raw.get("pe"))
     pb = _first_number(raw, "pb")
+    fundamental_inputs = (
+        ("roe", roe),
+        ("revenue_growth", revenue_growth),
+        ("profit_growth", profit_growth),
+        ("pe_ttm", pe),
+        ("pb", pb),
+    )
     fundamental_values = [
         score for score in (
             _roe_score(roe) if roe is not None else None,
@@ -156,8 +166,14 @@ def build_scores(
         ) if score is not None
     ]
     fundamental = _average(fundamental_values)
+    # 逐字段记录缺失。只记录"五项全缺"会让丢失 PE/PB 变成**静默的口径变更**：
+    # 分数依然非空，只是由 3 项而非 5 项平均而成，报告与审计都看不出差别。
+    # 注意 PE/PB 缺失不得升级为关键数据缺失——否则纯单源部署会大面积变成"数据不足"。
+    missing_inputs = [name for name, value in fundamental_inputs if value is None]
     if fundamental is None:
         restrictions.append("fundamental_metrics")
+    elif missing_inputs:
+        restrictions.extend(f"fundamental_missing:{name}" for name in missing_inputs)
 
     prices = _close_prices(history)
     if len(prices) < 60:

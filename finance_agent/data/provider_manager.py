@@ -15,7 +15,11 @@ from finance_agent.config import (
 )
 from finance_agent.data.akshare_provider import AkshareDataSource
 from finance_agent.data.baostock_provider import BaostockDataSource
-from finance_agent.data.providers import ProviderError, ProviderUnavailableError
+from finance_agent.data.providers import (
+    ProviderError,
+    ProviderUnavailableError,
+    UnsupportedProviderCapability,
+)
 from finance_agent.data.tushare_mcp import TushareMcpDataSource
 
 logger = logging.getLogger(__name__)
@@ -49,8 +53,14 @@ class ProviderManager:
         return result
 
     def _call(self, method: str, *args: Any, **kwargs: Any) -> Any:
-        """按优先级调用 provider，失败或空结果时自动尝试下一个。"""
+        """按优先级调用 provider，失败或空结果时自动尝试下一个。
+
+        ``unsupported`` 与 ``failures`` 必须分开记录：前者是"该源从未声明这个
+        能力"，后者是真实故障。混在一起会让每次 AKShare 优先的估值请求都显示
+        ``degraded``，审计时无法区分"不支持"与"暂时取不到"。
+        """
         failures: list[dict[str, str]] = []
+        unsupported: list[str] = []
         attempted: list[str] = []
         for name in self.order:
             provider = self.providers.get(name)
@@ -67,9 +77,13 @@ class ProviderManager:
                     "degraded": bool(failures),
                     "attempted": attempted,
                     "failures": failures,
+                    "unsupported": unsupported,
                     "fetched_at": datetime.now().isoformat(),
                 }
                 return result
+            except UnsupportedProviderCapability as exc:
+                unsupported.append(name)
+                logger.debug("数据源 %s 未声明 %s：%s", name, method, exc)
             except Exception as exc:  # provider 边界统一处理第三方异常
                 failures.append({"provider": name, "error": str(exc)})
                 logger.warning("数据源 %s.%s 失败: %s", name, method, exc)
@@ -79,6 +93,7 @@ class ProviderManager:
             "degraded": bool(failures),
             "attempted": attempted,
             "failures": failures,
+            "unsupported": unsupported,
             "fetched_at": datetime.now().isoformat(),
         }
         raise ProviderUnavailableError(f"所有可用数据源均无法执行 {method}: {failures}")

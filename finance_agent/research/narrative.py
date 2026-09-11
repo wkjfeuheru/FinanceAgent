@@ -28,6 +28,14 @@ _RESTRICTION_TEXT: dict[str, str] = {
     "mixed_sources": "不同数据项来自不同数据源",
     "trading_calendar_unavailable": "交易日历不可用，新鲜度按工作日估算",
 }
+# 逐字段的缺失原因码形如 ``fundamental_missing:pe_ttm``；字段名 → 报告用中文标签。
+_FUNDAMENTAL_FIELD_TEXT: dict[str, str] = {
+    "roe": "净资产收益率",
+    "revenue_growth": "营收增长",
+    "profit_growth": "净利润增长",
+    "pe_ttm": "市盈率(TTM)",
+    "pb": "市净率",
+}
 # 评分字段名 → 报告用中文标签；不得把它们当作限制项展示。
 _SCORE_LABELS: tuple[tuple[str, str], ...] = (
     ("fundamental", "基本面"),
@@ -46,6 +54,9 @@ def _restriction_items(restrictions: list[str]) -> list[str]:
         if not code:
             continue
         text = _RESTRICTION_TEXT.get(code, code)
+        if code.startswith("fundamental_missing:"):
+            field = code.split(":", 1)[1]
+            text = f"缺少可用的{_FUNDAMENTAL_FIELD_TEXT.get(field, field)}"
         if text not in items:
             items.append(text)
     return items
