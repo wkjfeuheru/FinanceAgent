@@ -22,6 +22,7 @@ from finance_agent.data.normalization import (
     normalize_basic_records,
     normalize_daily_records,
     normalize_financial_records,
+    normalize_valuation_records,
 )
 from finance_agent.data.providers import ProviderUnavailableError, UnsupportedProviderCapability
 from finance_agent.data.quote_cache import read as cache_read
@@ -51,6 +52,37 @@ def _records(frame: Any) -> list[dict[str, Any]]:
     if isinstance(frame, list):
         return [item for item in frame if isinstance(item, dict)]
     return []
+
+
+def _iso_bound(value: str) -> str:
+    """把 ``YYYYMMDD`` 或 ``YYYY-MM-DD`` 统一为 ``YYYY-MM-DD``；空串返回空串。"""
+    text = (value or "").strip()
+    if len(text) == 8 and text.isdigit():
+        return f"{text[:4]}-{text[4:6]}-{text[6:]}"
+    return text
+
+
+def _within_window(
+    rows: list[dict[str, Any]], start_date: str, end_date: str,
+) -> list[dict[str, Any]]:
+    """按闭区间裁剪记录；日期已是 ISO 文本，可直接字典序比较。
+
+    ``stock_value_em`` 没有日期参数、一次返回完整历史（起点为
+    ``max(2018-01-02, 上市日)``），因此窗口只能在这里裁剪。
+    """
+    start = _iso_bound(start_date)
+    end = _iso_bound(end_date)
+    if not start and not end:
+        return rows
+    kept = []
+    for row in rows:
+        as_of = str(row.get("trade_date") or "")
+        if start and as_of < start:
+            continue
+        if end and as_of > end:
+            continue
+        kept.append(row)
+    return kept
 
 
 class AkshareDataSource:
@@ -161,8 +193,46 @@ class AkshareDataSource:
         return normalize_basic_records(filtered)
 
     def get_daily_basic(self, stock_code: str, start_date: str = "", end_date: str = "") -> list[dict[str, Any]]:
-        """获取估值指标；AKShare 不保证所有版本提供统一估值接口。"""
-        raise UnsupportedProviderCapability("AKShare 当前未提供统一日估值接口")
+        """获取日估值指标（PE(TTM)/PE(静)/PB/PS/总市值/流通市值）。
+
+        ``stock_value_em`` 是 AKShare 1.18.94 中唯一按股票代码返回日频估值历史的
+        接口：``stock_a_indicator_lg`` 已被删除，``stock_zh_a_hist`` 不含任何估值列。
+        覆盖起点为 ``max(2018-01-02, 上市日)``，因此不做双源拼接。
+        """
+        code = ensure_current_code(stock_code)
+        fetch = getattr(self.ak, "stock_value_em", None)
+        if not callable(fetch):
+            raise UnsupportedProviderCapability("AKShare 该版本未提供 stock_value_em 接口")
+        cache_key = ("akshare", code, start_date, end_date)
+        cached = cache_read("valuation", cache_key)
+        if cached:
+            return cached
+        try:
+            frame = fetch(symbol=code)
+        except Exception as exc:
+            # 取数失败必须与"不支持该能力"区分：否则 _call 会把可重试故障
+            # 记成能力缺口，审计时看不出区别。
+            raise ProviderUnavailableError(f"AKShare 取 {code} 估值失败: {exc}") from exc
+        # 带括号的 PE 两列在这里显式映射，不进共享别名表：别名表是模糊匹配，
+        # 把 PE(TTM) 与 PE(静) 一起放进去必然产生口径歧义。
+        columns = {
+            "数据日期": "trade_date",
+            "PE(TTM)": "pe_ttm",
+            "PE(静)": "pe_lyr",
+            "市净率": "pb",
+            "市销率": "ps_ttm",
+            "总市值": "total_mv",
+            "流通市值": "circ_mv",
+        }
+        mapped = [
+            {columns.get(key, key): value for key, value in row.items()}
+            for row in _records(frame)
+        ]
+        rows = _within_window(normalize_valuation_records(mapped), start_date, end_date)
+        if not rows:
+            raise ProviderUnavailableError(f"AKShare 未取到 {code} 的估值数据")
+        cache_write("valuation", cache_key, rows)
+        return rows
 
     def get_financial_indicator(self, stock_code: str) -> list[dict[str, Any]]:
         """获取 AKShare 财务指标。"""
