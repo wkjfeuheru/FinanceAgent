@@ -93,6 +93,13 @@ TUSHARE_ENABLED = bool(TUSHARE_MCP_URL) and os.getenv("TUSHARE_ENABLED", "true")
 BAOSTOCK_ENABLED = os.getenv("BAOSTOCK_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 BAOSTOCK_USERNAME = os.getenv("BAOSTOCK_USERNAME", "").strip()
 BAOSTOCK_PASSWORD = os.getenv("BAOSTOCK_PASSWORD", "").strip()
+# 行情与估值的本地落盘缓存（最小版本，只覆盖 K 线与估值两条路径）。
+# 默认锚定仓库根目录，避免随进程工作目录漂移；TTL 设为 0 表示关闭缓存。
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+QUOTE_CACHE_DIR = os.getenv(
+    "QUOTE_CACHE_DIR", os.path.join(_PROJECT_ROOT, ".cache", "quotes")
+).strip()
+QUOTE_CACHE_TTL_SECONDS = int(os.getenv("QUOTE_CACHE_TTL_SECONDS", "3600"))
 THEME_REFRESH_IDS = [
     item.strip() for item in os.getenv("THEME_REFRESH_IDS", "").split(",") if item.strip()
 ]
