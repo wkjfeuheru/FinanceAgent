@@ -151,7 +151,17 @@ class ThemeGateway(CompleteGateway):
     pass
 
 
-def test_stock_agent_routes_theme_request_to_screener_and_keeps_pending_leads_separate():
+def test_stock_agent_routes_theme_request_without_candidate_search(monkeypatch):
+    """主题筛选不能先调用外部候选搜索。"""
+    class CandidateSearch:
+        called = False
+
+        def invoke(self, _payload):
+            self.called = True
+            return []
+
+    search = CandidateSearch()
+    monkeypatch.setattr("finance_agent.agents.stock_analysis.search_candidates", search)
     repo = _theme_repo(5)
     lead = ThemeLead(
         theme_id="ai_compute", stock_code="601000", industry="行业0",
@@ -174,6 +184,7 @@ def test_stock_agent_routes_theme_request_to_screener_and_keeps_pending_leads_se
     assert result["theme_screening"]["pending_leads"]
     assert all("action" not in lead for lead in result["theme_screening"]["pending_leads"])
     assert result["theme_screening"]["personalization_status"] == "research_candidate"
+    assert search.called is False
 
 
 def test_stock_agent_reports_theme_coverage_shortage():

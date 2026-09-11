@@ -122,19 +122,32 @@ class StockAnalysisAgent(AgentProtocol):
         message = str(state.get("requirement", "") or state.get("user_message", ""))
         profile = state.get("user_profile", {}) or {}
         stock_data = state.get("stock_data", {}) or {}
-        codes = self._codes_from_state(state, message)
-        if not codes and str(state.get("current_task_intent", "")) == "stock_recommendation":
-            codes = self._resolve_candidate_codes(message)
-            if codes:
-                state["resolved_stocks"] = [{"code": code} for code in codes]
 
         try:
-            request = parse_analysis_request(
-                message,
-                resolved_stocks=state.get("resolved_stocks", []) or [],
-                intent_slots=state.get("intent_slots", {}) or {},
-                user_profile=profile,
-            )
+            try:
+                request = parse_analysis_request(
+                    message,
+                    resolved_stocks=state.get("resolved_stocks", []) or [],
+                    intent_slots=state.get("intent_slots", {}) or {},
+                    user_profile=profile,
+                )
+            except ValueError as exc:
+                can_discover_candidates = (
+                    str(state.get("current_task_intent", "")) == "stock_recommendation"
+                    and "单股分析必须且只能包含一只股票" in str(exc)
+                )
+                if not can_discover_candidates:
+                    raise
+                codes = self._resolve_candidate_codes(message)
+                if not codes:
+                    raise
+                state["resolved_stocks"] = [{"code": code} for code in codes]
+                request = parse_analysis_request(
+                    message,
+                    resolved_stocks=state["resolved_stocks"],
+                    intent_slots=state.get("intent_slots", {}) or {},
+                    user_profile=profile,
+                )
             if request.kind.value == "theme_screening":
                 screening = self._get_theme_screener().screen(request, profile)
                 payload = {
