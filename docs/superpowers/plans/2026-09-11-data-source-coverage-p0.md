@@ -109,37 +109,45 @@ git commit -m "refactor: unify valuation field mapping and pin pe_ttm as the sco
 - Modify: `finance_agent/data/akshare_provider.py`
 - Create: `finance_agent/data/quote_cache.py`
 - Modify: `finance_agent/config.py`
+- Modify: `tests/conftest.py`（新增，计划外但必需）
 - Create: `tests/test_quote_cache.py`
-- Modify: `tests/test_data_normalization.py`
 
 **Interfaces:**
-- Produces: `quote_cache.read(namespace, key) -> list[dict] | None` 与 `quote_cache.write(namespace, key, records, ttl_seconds)`；`AkshareDataSource.get_daily` 内部先读缓存、失败时退避重试。
+- Produces: `quote_cache.read(namespace, key, ttl_seconds=None)` 与 `quote_cache.write(namespace, key, records, ttl_seconds=None)`；`AkshareDataSource.get_daily` 内部先读缓存、失败时退避重试。
 
-- [ ] **Step 1: 写入失败测试**
+- [x] **Step 1: 写入失败测试**
 
-用桩替换 `ak.stock_zh_a_daily` 与 `ak.stock_zh_a_hist`，断言：正常路径调用 `stock_zh_a_daily(symbol="sh600519", adjust="qfq")`；`stock_zh_a_daily` 抛错时回退到 `stock_zh_a_hist`；两次相同请求第二次命中缓存且不再调用桩。
+新建 `tests/test_quote_cache.py`，覆盖：主路径调用 `stock_zh_a_daily(symbol="sh600519", adjust="qfq")`；新浪失败时**重试 3 次后**回退东财；缺少新浪接口时**直接**回退（不浪费重试与退避）；相同请求第二次命中缓存且不再取数；缓存键区分复权口径与窗口；已废止北交所代码在任何请求之前失败；非法复权口径被拒；缓存往返、过期与缺失；numpy 标量可序列化；缓存目录不可用时只警告。
 
-- [ ] **Step 2: 验证测试按预期失败**
+- [x] **Step 2: 验证测试按预期失败**
 
 运行：`python -m pytest -q tests/test_quote_cache.py`
 
-预期：失败，`quote_cache` 尚不存在。
+实际：首轮 10 个用例全部 ERROR——但**不是**预期的"模块不存在"，而是 `tmp_path` 写入系统临时目录被拒（`PermissionError: ...\pytest-of-jason`）。这是本次发现的第一个环境限制，见下方"环境发现"。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
-1. 新建 `quote_cache.py`：落盘目录由 `config.py` 的 `QUOTE_CACHE_DIR`（默认 `.cache/quotes`）与 `QUOTE_CACHE_TTL_SECONDS`（默认 3600）控制；键为 `(provider, code, adjust, start, end)` 的哈希；`read` 过期返回 `None`。
-2. `AkshareDataSource.get_daily` 的符号转换：`6`/`68` → `sh`，`0`/`3` → `sz`，`43/83/87/92/920` → `bj`（北交所细节见任务 3）。
-3. 主调用改为 `ak.stock_zh_a_daily(symbol=..., start_date=..., end_date=..., adjust=...)`，`adjust` 直接使用 `""`/`qfq`/`hfq`（不再走东财的 `adjust` 映射）；异常时回退 `stock_zh_a_hist` 的现有实现。
-4. 退避：最多 3 次尝试，间隔 0.5s/1.5s，仅对网络类异常重试。
-5. 结果写缓存；`normalize_daily_records` 仍在出口调用。
+1. `quote_cache.py`：JSON 落盘，键由调用方给出的元组哈希成文件名；`QUOTE_CACHE_TTL_SECONDS`（默认 3600）**为 0 或负数即关闭缓存**；读写异常一律只记 warning。
+2. `config.py`：新增 `QUOTE_CACHE_DIR`（默认锚定**仓库根目录**的 `.cache/quotes`，而非相对路径 `.cache/quotes`——后者会随进程工作目录漂移）与 `QUOTE_CACHE_TTL_SECONDS`。两个键都被真实读取，不违反 D22。
+3. `AkshareDataSource.get_daily`：`ensure_current_code()` 先行（已废止北交所代码在打网络前失败）→ 读缓存 → 新浪主路径 → 东财回退 → 写缓存 → 全失败抛 `ProviderUnavailableError`（而非返回空列表，让 `_call` 的降级语义明确）。
+4. **偏差说明：** 原稿第 4 条写"仅对网络类异常重试"。实际实现为"只要没拿到有效记录就重试"，但**用 `getattr` 守卫把'接口不存在'排除在重试之外**——否则桩或旧版 AKShare 会白等 2 秒；空记录则视为失败，从而触发回退。两条取值序列共用 `_ADJUST_MAP`（`""`/`qfq`/`hfq`）。
 
-- [ ] **Step 4: 验证通过并提交**
+- [x] **Step 4: 验证通过并提交**
 
-运行：`python -m pytest -q tests/test_quote_cache.py tests/test_data_normalization.py tests/test_provider_manager.py`
+运行：`python -m pytest -q tests/test_quote_cache.py`
+
+实际结果：**10 passed**；全量 `python -m pytest -q` → **207 passed**（191 + 10，另有并行写入者的用例同时通过）。
 
 ```bash
-git commit -m "fix: source daily bars from Sina with cache and backoff"
+git commit -m "fix: source daily bars from Sina with retry backoff and a disk cache"
 ```
+
+**环境发现（记录以备后用）：**
+
+1. `tmp_path` 在本环境**不可用**——pytest 的临时基目录创建即 `PermissionError`（系统临时目录不可写）。
+2. `tempfile.mkdtemp()` 创建出的目录**无法在其下再建子目录**（`WinError 5`），而普通 `Path.mkdir()` 建的同级目录完全正常，两者 `st_mode` 都是 `0o777`。已复现，非权限位问题。
+
+因此 `tests/conftest.py` 新增 autouse 夹具，把 `QUOTE_CACHE_DIR` 锚定到 `<repo>/.cache/test-quote-cache/case-<uuid>`，测试结束删除。**这个隔离是必需的**：夹具行情以"今天"结尾，若读到上次运行留下的缓存，新鲜度门禁会失效、测试结果随运行日期漂移。
 
 ### 任务 3：北交所代码处理（**已在任务 2 之前执行**）
 
