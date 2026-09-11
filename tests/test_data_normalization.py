@@ -53,6 +53,63 @@ def test_dataframe_style_wrapper_is_normalized_in_place():
     assert payload["data"][0]["pb"] == 2.0
 
 
+def test_ttm_and_static_pe_are_never_conflated():
+    """PE 口径必须严格区分：``pe`` 不得再以 ``pe_ttm`` 兜底。
+
+    东方财富 stock_value_em 同时返回 ``PE(TTM)`` 与 ``PE(静)``，而
+    ``VALUATION_ALIASES["pe"]`` 曾把 ``pe_ttm`` 列为别名，导致取到哪个口径不确定。
+    """
+    ttm_only = normalize_valuation_records([{"trade_date": "2026-01-05", "pe_ttm": 18.0}])
+
+    assert ttm_only[0]["pe_ttm"] == 18.0
+    assert "pe" not in ttm_only[0]
+
+    both = normalize_valuation_records([
+        {"trade_date": "2026-01-05", "pe": 20.0, "pe_ttm": 18.0},
+    ])
+
+    assert both[0]["pe"] == 20.0
+    assert both[0]["pe_ttm"] == 18.0
+
+
+def test_stock_value_em_and_baostock_valuation_columns_are_unified():
+    """东财与 BaoStock 的估值列必须命中统一键，否则估值在归一层会再丢一次。"""
+    em = normalize_valuation_records([{
+        "数据日期": "2026-01-05", "市净率": 2.0, "总市值": 1.0e12, "流通市值": 8.0e11,
+    }])
+
+    assert em[0]["trade_date"] == "2026-01-05"
+    assert em[0]["pb"] == 2.0
+    assert em[0]["total_mv"] == 1.0e12
+    assert em[0]["circ_mv"] == 8.0e11
+
+    baostock = normalize_valuation_records([{
+        "date": "2026-01-05", "peTTM": 18.0, "pbMRQ": 2.0, "psTTM": 3.0,
+    }])
+
+    assert baostock[0]["trade_date"] == "2026-01-05"
+    assert baostock[0]["pe_ttm"] == 18.0
+    assert baostock[0]["pb"] == 2.0
+    assert baostock[0]["ps_ttm"] == 3.0
+
+
+def test_static_pe_is_carried_but_never_scored():
+    """``pe_lyr`` 是独立规范键：可携带静态 PE，但不得被当作 TTM 参与评分。"""
+    from finance_agent.research.scoring import build_scores
+
+    rows = normalize_valuation_records([{"trade_date": "2026-01-05", "pe_lyr": 20.0}])
+    assert rows[0]["pe_lyr"] == 20.0
+
+    static_only, _ = build_scores({"pe_lyr": 20.0}, {"adjustment": "forward", "data": []})
+    assert static_only["fundamental_score"] is None
+
+    with_pb, _ = build_scores(
+        {"pe_lyr": 20.0, "pb": 2.0}, {"adjustment": "forward", "data": []},
+    )
+    # 只有 PB 可评分时为 _pb_score(2.0)；静态 PE 不得被当成 TTM 拉低均分。
+    assert with_pb["fundamental_score"] == 75.0
+
+
 def test_sina_financial_labels_map_to_research_fields():
     rows = normalize_financial_records([
         {"日期": "2025-12-31", "净资产收益率(%)": 18.2, "加权净资产收益率(%)": 17.1,

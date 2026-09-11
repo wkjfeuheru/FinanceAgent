@@ -95,7 +95,9 @@ def get_stock_quote(stock_code: str) -> str:
         "low": daily.get("low"),
         "volume": _first_value(daily, "vol", "volume"),
         "amount": daily.get("amount"),
-        "pe": _first_value(valuation, "pe", "pe_ttm"),
+        # PE 优先取 TTM，与 research.scoring 的评分输入保持一致；静态 PE（pe_lyr）
+        # 不进入报价契约。
+        "pe": _first_value(valuation, "pe_ttm", "pe"),
         "pb": _first_value(valuation, "pb", "pb_mrq"),
         "ps": _first_value(valuation, "ps", "ps_ttm"),
         "total_market_cap": _first_value(valuation, "total_mv", "total_market_cap"),

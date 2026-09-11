@@ -64,29 +64,37 @@
 - Consumes: 各适配器的厂商原生列名。
 - Produces: 规范估值键 `pe_ttm`、`pe_lyr`、`pb`、`ps`、`ps_ttm`、`total_mv`、`circ_mv`、`trade_date`。
 
-- [ ] **Step 1: 写入失败测试**
+- [x] **Step 1: 写入失败测试**
 
-在 `tests/test_data_normalization.py` 增加断言：把 `{"数据日期": "2026-01-05", "PE(TTM)": 18.0, "PE(静)": 20.0, "市净率": 2.0}` 送入 `normalize_valuation_records`，要求输出同时含 `pe_ttm == 18.0` 与 `pe_lyr == 20.0`，且 `pe` 不等于 `pe_ttm`（证明别名兜底不再吞掉静态 PE）。
+在 `tests/test_data_normalization.py` 增加三组断言。**执行更正：** 本步骤原稿要求把 `{"数据日期", "PE(TTM)", "PE(静)", "市净率"}` 直接送入 `normalize_valuation_records` 并期望得到 `pe_ttm`/`pe_lyr`，这与决策 D11（PE 两列由适配器显式映射、不进别名表）自相矛盾。已按 D11 修正为：
 
-- [ ] **Step 2: 验证测试按预期失败**
+1. `{"trade_date": ..., "pe_ttm": 18.0}` → 输出含 `pe_ttm` 且**不含** `pe`；同时给出 `pe` 与 `pe_ttm` 时两者各自保留（证明 `pe` 不再以 `pe_ttm` 兜底）。
+2. 东财 `{"数据日期", "市净率", "总市值", "流通市值"}` 与 BaoStock `{"date", "peTTM", "pbMRQ", "psTTM"}` 均命中统一键。
+3. `pe_lyr` 可携带静态 PE 但 `build_scores` 不采信：只给 `pe_lyr` 时 `fundamental_score is None`，给 `pe_lyr + pb` 时等于 `_pb_score(2.0) == 75.0`。
 
-运行：`python -m pytest -q tests/test_data_normalization.py -k valuation`
+带括号的 `PE(TTM)`/`PE(静)` 由 `AkshareDataSource` 的估值出口显式映射（落地于任务 4），不在本任务的测试范围内。
 
-预期：失败，当前别名表不命中 AKShare 的 `数据日期`/`PE(TTM)`/`PE(静)`。
+- [x] **Step 2: 验证测试按预期失败**
 
-- [ ] **Step 3: 实现**
+运行：`python -m pytest -q tests/test_data_normalization.py -k "never_conflated or columns_are_unified or static_pe_is_carried"`
 
-1. 读 `normalization.py:37-46`，把 `pe_ttm` 从 `VALUATION_ALIASES["pe"]` 中摘除。
-2. 向 `VALUATION_ALIASES` 补非歧义别名：`trade_date += ("数据日期",)`、`pb += ("市净率",)`、`total_mv += ("总市值",)`、`circ_mv += ("流通市值",)`。
-3. `AkshareDataSource` 的估值出口显式映射 `PE(TTM) → pe_ttm`、`PE(静) → pe_lyr`。
-4. `BaostockDataSource` 的估值出口显式映射 `peTTM → pe_ttm`、`pbMRQ → pb`、`psTTM → ps_ttm`。
-5. `stockdata.py:96` 的优先级改为 `_first_value(valuation, "pe_ttm", "pe")`，与 `scoring.py:147` 一致。
+实际结果：2 failed, 1 passed——`pe` 仍被 `pe_ttm` 兜底（`assert 'pe' not in {...}` 失败），`数据日期` 未命中（`KeyError: 'trade_date'`）；第三条本已通过，因为 `pe_lyr` 作为未识别键会被原样保留，它断言的是评分侧不采信。
 
-- [ ] **Step 4: 验证通过并提交**
+- [x] **Step 3: 实现**
+
+实际改动（`normalization.py:36-53`、`stockdata.py:98`）：
+
+1. `VALUATION_ALIASES["pe"]` 摘除 `pe_ttm`，改为 `("pe", "市盈率")`；`pe_ttm` 保留 `pe` 作为"厂商原生 pe 即 TTM"的兜底。
+2. 新增规范键 `pe_lyr`（仅声明自身），并在表头注释中写明它是静态 PE、不参与评分。
+3. 补非歧义别名：`trade_date += ("数据日期",)`、`pe_ttm += ("peTTM",)`、`pb += ("pbMRQ",)`、`ps_ttm += ("psTTM",)`（`市净率`/`总市值`/`流通市值` 原本已在表中）。
+4. `stockdata.py` 的 `pe` 优先级改为 `_first_value(valuation, "pe_ttm", "pe")`，与 `scoring.py:147` 一致；**未改动** `scoring.py:147`（其 `pe` 兜底语义与 D9 的"厂商原生 pe 即 TTM"一致）。
+5. **偏差说明：** 原稿第 3、4 条要求 AKShare/BaoStock 适配器出口做显式列改名。实施后 AKShare 的部分**后移到任务 4**（其 `get_daily_basic` 在任务 4 才存在，提前加映射助手会成为死代码）；BaoStock 的部分**改为走别名表**（`peTTM`/`pbMRQ`/`psTTM` 是大小写明确的非歧义标签，放进共享表更省代码且已被测试覆盖）。
+
+- [x] **Step 4: 验证通过并提交**
 
 运行：`python -m pytest -q tests/test_data_normalization.py tests/test_research_snapshot_builder.py`
 
-预期：全部通过。
+实际结果：通过；全量 `python -m pytest -q` → **185 passed**（基线 182 + 3 条新增）。
 
 ```bash
 git add finance_agent/data/normalization.py finance_agent/data/akshare_provider.py \

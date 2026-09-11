@@ -33,14 +33,21 @@ DAILY_ALIASES: dict[str, tuple[str, ...]] = {
     "pct_chg": ("pct_chg", "pctChg", "change_pct", "涨跌幅"),
 }
 
-# 统一日估值字段：pe/pe_ttm/pb/ps/ps_ttm/total_mv/circ_mv。
+# 统一日估值字段：pe/pe_ttm/pe_lyr/pb/ps/ps_ttm/total_mv/circ_mv。
+#
+# PE 口径必须严格区分：``pe_ttm`` 是研究评分的唯一 PE 输入，``pe_lyr`` 承载静态
+# PE 且不参与评分。因此 ``pe`` **不再以 ``pe_ttm`` 兜底**——否则同时返回两种口径
+# 的数据源（东方财富 ``stock_value_em`` 的 ``PE(TTM)`` 与 ``PE(静)``）取到哪个是不
+# 确定的。带括号的厂商标签保持由适配器显式映射，不进本表，避免模糊匹配再次把
+# 两种口径混为一谈；``pe_ttm`` 仍保留 ``pe`` 作为"厂商原生 pe 即 TTM"的兜底。
 VALUATION_ALIASES: dict[str, tuple[str, ...]] = {
-    "trade_date": ("trade_date", "date", "日期"),
-    "pe": ("pe", "pe_ttm", "市盈率"),
-    "pe_ttm": ("pe_ttm", "pe", "市盈率ttm"),
-    "pb": ("pb", "pb_mrq", "市净率"),
+    "trade_date": ("trade_date", "date", "日期", "数据日期"),
+    "pe": ("pe", "市盈率"),
+    "pe_ttm": ("pe_ttm", "pe", "市盈率ttm", "peTTM"),
+    "pe_lyr": ("pe_lyr",),
+    "pb": ("pb", "pb_mrq", "市净率", "pbMRQ"),
     "ps": ("ps", "ps_ttm", "市销率"),
-    "ps_ttm": ("ps_ttm", "ps", "市销率"),
+    "ps_ttm": ("ps_ttm", "ps", "市销率", "psTTM"),
     "total_mv": ("total_mv", "total_market_cap", "总市值"),
     "circ_mv": ("circ_mv", "circ_market_cap", "流通市值"),
 }
