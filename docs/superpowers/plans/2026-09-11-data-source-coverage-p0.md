@@ -141,37 +141,44 @@ git commit -m "refactor: unify valuation field mapping and pin pe_ttm as the sco
 git commit -m "fix: source daily bars from Sina with cache and backoff"
 ```
 
-### 任务 3：北交所代码处理
+### 任务 3：北交所代码处理（**已在任务 2 之前执行**）
+
+**执行顺序说明：** 本任务原排在任务 2 之后，实际提前执行——任务 2 把 K 线切到新浪源必须构造 `sh600519`/`bj920799` 这类市场前缀，而这正是本任务的产物，先做任务 2 会导致同一份映射逻辑写两遍。
 
 **Files:**
-- Modify: `finance_agent/data/baostock_provider.py`
 - Create: `finance_agent/data/board_codes.py`
-- Modify: `finance_agent/data/akshare_provider.py`
+- Modify: `finance_agent/data/baostock_provider.py`
 - Create: `tests/test_board_codes.py`
+- （`akshare_provider.py` 的符号接入随任务 2 的 `get_daily` 重写一并落地，避免同一个函数改两次）
 
 **Interfaces:**
-- Produces: `board_codes.market_of(code) -> "sh" | "sz" | "bj"`；`board_codes.normalize_bj(code) -> str`（43/83 → 920 重映射）。
+- Produces: `board_codes.market_of(code) -> "sh" | "sz" | "bj"`；`sina_symbol(code)`；`baostock_symbol(code)`；`ensure_current_code(code)`。
 
-- [ ] **Step 1: 写入失败测试**
+- [x] **Step 1: 写入失败测试**
 
-断言：`market_of("830799") == "bj"`、`market_of("920799") == "bj"`、`market_of("600519") == "sh"`；`BaostockDataSource.get_daily("920799")` 抛出 `UnsupportedProviderCapability` 而**不是**返回 `[]`。
+断言：`market_of("830799") == "bj"`、`market_of("920799") == "bj"`、`market_of("600519") == "sh"`；`BaostockDataSource.get_daily("920799")` 抛出 `UnsupportedProviderCapability` 而**不是**返回 `[]`；`ensure_current_code("830799")` 抛出可操作的错误。
 
-- [ ] **Step 2: 验证测试按预期失败**
+- [x] **Step 2: 验证测试按预期失败**
 
 运行：`python -m pytest -q tests/test_board_codes.py`
 
-预期：失败，`board_codes` 不存在；且当前 `_code("920799")` 返回 `sz.920799`（静默空）。
+实际：模块不存在而失败（本步骤的"预期失败"体现在 `_code("920799") → "sz.920799"` 这一既有静默空行为上，见 Step 3 的偏差说明）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
-1. `board_codes.py`：`43/83/87/92/920` 前缀 → `bj`；`6`/`68` → `sh`；`0`/`3` → `sz`。
-2. 43/83 前缀的重映射用 `ak.stock_info_bj_name_code()`（343 行、100% `920` 前缀）构建一次进程内映射，失败时降级为原值并记 warning。
-3. `baostock_provider.py:20-25` 的 `_code()` 改为：`bj` 市场直接 `raise UnsupportedProviderCapability("BaoStock 不支持北交所")`；`sh`/`sz` 沿用 `sh.`/`sz.` 前缀。
-4. `akshare_provider.py` 生成 `bj920xxx` 格式符号。
+1. `board_codes.py`：`43/83/87` 与 `92` 前缀 → `bj`；`6` → `sh`；其余 → `sz`。`normalize_code` 兼容 `600519` / `sh600519` / `sh.600519` / `600519.SH` 四种写法。
+2. `baostock_symbol()`：`bj` 市场显式 `raise UnsupportedProviderCapability`；`sh`/`sz` 沿用 `sh.`/`sz.` 前缀。
+3. `baostock_provider.py` 删除 `_code()`，改用 `baostock_symbol()`，并把**符号校验移到 `_login()` 之前**——北交所代码要在打网络之前就失败。
+4. **偏差说明（推翻 D16 的一半）：原计划"43/83 → 920 重映射"经实测不可实现，已改为显式报错。** 依据：
+   - 免费数据源中**不存在**旧→新代码对照表——`stock_info_bj_name_code()` 的 343 行 100% 是 `920` 前缀，东财 clist 同，新浪/BaoStock 根本不服务旧代码；
+   - 唯一可行的启发式（取末三位）**已被证伪**：实测 `stock_info_bj_name_code()` 中 `920047` 的名称是**诺思兰德**，而 `920799` 是**另一家公司**；旧代码 `830799` 的名字正是诺思兰德（子代理经 `push2delay` 观测 `0.830799 → 诺思兰德`）。即末三位规则会把 `830799` 指到**错误的公司**上。
+   - 因此 `ensure_current_code()` 对 `43/83/87` 前缀抛出含反例的可操作错误，要求用户更新代码表；**不做猜测映射**。猜测映射产生的是静默错数据，比报错危险得多。
 
-- [ ] **Step 4: 验证通过并提交**
+- [x] **Step 4: 验证通过并提交**
 
-运行：`python -m pytest -q tests/test_board_codes.py tests/test_provider_manager.py`
+运行：`python -m pytest -q tests/test_board_codes.py`
+
+实际结果：**6 passed**；全量 `python -m pytest -q` → **191 passed**（185 + 6）。
 
 ```bash
 git commit -m "fix: route Beijing exchange codes explicitly and never silently empty"
