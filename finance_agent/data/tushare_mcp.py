@@ -23,6 +23,13 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 from finance_agent.config import TUSHARE_MCP_TIMEOUT, TUSHARE_MCP_URL
+from finance_agent.data.normalization import (
+    normalize_basic_records,
+    normalize_daily_records,
+    normalize_financial_records,
+    normalize_trade_cal_records,
+    normalize_valuation_records,
+)
 from finance_agent.data.providers import UnsupportedProviderCapability
 
 logger = logging.getLogger(__name__)
@@ -227,12 +234,12 @@ class TushareMcpDataSource:
         end = end_date or datetime.now().strftime("%Y-%m-%d")
         start = start_date or (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
 
-        return self._safe_call(
+        return normalize_daily_records(self._safe_call(
             "get_daily_data",
             ts_code=ts_code,
             start_date=_to_date(start),
             end_date=_to_date(end),
-        )
+        ))
 
     def get_stock_basic(self, stock_code: str = "") -> Any:
         """获取 A 股基础信息（代码、名称、行业、上市日期等）。
@@ -243,7 +250,7 @@ class TushareMcpDataSource:
         kwargs: dict[str, Any] = {}
         if stock_code:
             kwargs["ts_code"] = _to_ts_code(stock_code)
-        return self._safe_call("get_stock_basic", **kwargs)
+        return normalize_basic_records(self._safe_call("get_stock_basic", **kwargs))
 
     def get_daily_basic(self, stock_code: str, start_date: str = "",
                         end_date: str = "") -> Any:
@@ -260,12 +267,12 @@ class TushareMcpDataSource:
         end = end_date or datetime.now().strftime("%Y-%m-%d")
         start = start_date or (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
 
-        return self._safe_call(
+        return normalize_valuation_records(self._safe_call(
             "get_daily_basic",
             ts_code=ts_code,
             start_date=_to_date(start),
             end_date=_to_date(end),
-        )
+        ))
 
     def get_financial_indicator(self, stock_code: str) -> Any:
         """获取财务指标（ROE、毛利率、净利率等）。
@@ -273,10 +280,10 @@ class TushareMcpDataSource:
         Args:
             stock_code: 股票代码
         """
-        return self._safe_call(
+        return normalize_financial_records(self._safe_call(
             "get_fina_indicator",
             ts_code=_to_ts_code(stock_code),
-        )
+        ))
 
     def get_income(self, stock_code: str) -> Any:
         """获取利润表数据。
@@ -301,9 +308,9 @@ class TushareMcpDataSource:
         end = end_date or datetime.now().strftime("%Y-%m-%d")
         start = start_date or (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
 
-        return self._safe_call(
+        return normalize_trade_cal_records(self._safe_call(
             "get_trade_cal",
             start_date=_to_date(start),
             end_date=_to_date(end),
-        )
+        ))
 

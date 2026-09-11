@@ -38,6 +38,23 @@ class DeterministicAssessment:
     restrictions: tuple[str, ...]
 
 
+# 版本标识 → 仓库内已审定的规则文件；重放按审计记录里的版本号精确加载。
+_RULE_FILES = {"research_rules/v1": "v1.json"}
+
+
+def load_rules(version: str = "research_rules/v1") -> dict[str, Any]:
+    """按版本标识加载仓库内规则集；未知版本必须显式失败，不得静默回退。"""
+    key = str(version or "").strip()
+    filename = _RULE_FILES.get(key)
+    if filename is None:
+        raise ValueError(f"未知规则版本：{version}")
+    path = Path(__file__).with_name("rules") / filename
+    rules = json.loads(path.read_text(encoding="utf-8"))
+    if str(rules.get("version", "")) != key:
+        raise ValueError(f"规则文件与版本标识不一致：{path} 声明为 {rules.get('version')}")
+    return rules
+
+
 def _bounded_score(value: Any) -> float | None:
     """将外部计算值限制到 0–100，无法转换则表示缺失。"""
     try:
@@ -60,8 +77,7 @@ class RuleEngine:
     @classmethod
     def default(cls) -> "RuleEngine":
         """加载仓库内审定的首版规则。"""
-        path = Path(__file__).with_name("rules") / "v1.json"
-        return cls(json.loads(path.read_text(encoding="utf-8")))
+        return cls(load_rules())
 
     def evaluate(
         self,
@@ -100,6 +116,12 @@ class RuleEngine:
 
         primary = snapshot.securities[0] if snapshot.securities else None
         indicators = primary.indicators if primary is not None else {}
+        score_restrictions = indicators.get("score_restrictions", [])
+        if isinstance(score_restrictions, list):
+            restrictions.extend(
+                item for item in score_restrictions
+                if isinstance(item, str) and item
+            )
         fundamental = _bounded_score(indicators.get("fundamental_score"))
         technical = _bounded_score(indicators.get("technical_score"))
         risk = _bounded_score(indicators.get("risk_score"))

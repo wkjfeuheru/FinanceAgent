@@ -5,6 +5,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
+from finance_agent.data.normalization import (
+    normalize_basic_records,
+    normalize_daily_records,
+    normalize_financial_records,
+)
 from finance_agent.data.providers import ProviderUnavailableError, UnsupportedProviderCapability
 
 
@@ -57,16 +62,19 @@ class AkshareDataSource:
             end_date=_date(end_date, end),
             adjust=adjustment_map[adjustment],
         )
-        return _records(frame)
+        # AKShare 返回中文列（日期/开盘/收盘/...），必须在适配器出口统一字段名，
+        # 否则研究层读不到 close 而只能给出空评分。
+        return normalize_daily_records(_records(frame))
 
     def get_stock_basic(self, stock_code: str = "") -> list[dict[str, Any]]:
         """获取 AKShare A 股股票列表或指定股票信息。"""
         frame = self.ak.stock_info_a_code_name()
         rows = _records(frame)
         if not stock_code:
-            return rows
+            return normalize_basic_records(rows)
         code = str(stock_code).split(".")[0]
-        return [row for row in rows if str(row.get("code", row.get("代码", ""))) == code]
+        filtered = [row for row in rows if str(row.get("code", row.get("代码", ""))) == code]
+        return normalize_basic_records(filtered)
 
     def get_daily_basic(self, stock_code: str, start_date: str = "", end_date: str = "") -> list[dict[str, Any]]:
         """获取估值指标；AKShare 不保证所有版本提供统一估值接口。"""
@@ -75,7 +83,9 @@ class AkshareDataSource:
     def get_financial_indicator(self, stock_code: str) -> list[dict[str, Any]]:
         """获取 AKShare 财务指标。"""
         frame = self.ak.stock_financial_analysis_indicator(symbol=str(stock_code).split(".")[0])
-        return _records(frame)
+        # 新浪源返回中文指标名（净资产收益率(%)/主营业务收入增长率(%)/...），
+        # 统一为 roe/or_yoy/netprofit_yoy 后研究层才能生成基本面评分。
+        return normalize_financial_records(_records(frame))
 
     def get_income(self, stock_code: str) -> list[dict[str, Any]]:
         """获取 AKShare 利润表。"""

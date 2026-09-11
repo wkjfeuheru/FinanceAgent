@@ -5,6 +5,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
+from finance_agent.data.normalization import (
+    normalize_basic_records,
+    normalize_daily_records,
+    normalize_trade_cal_records,
+)
 from finance_agent.data.providers import ProviderUnavailableError, UnsupportedProviderCapability
 
 
@@ -76,7 +81,8 @@ class BaostockDataSource:
                 frequency="d",
                 adjustflag=adjustment_map[adjustment],
             )
-            return self._query(result)
+            # BaoStock 用 pctChg/volume，需统一为 pct_chg/vol 并校准日期升序。
+            return normalize_daily_records(self._query(result))
         finally:
             self.bs.logout()
 
@@ -85,7 +91,8 @@ class BaostockDataSource:
         self._login()
         try:
             result = self.bs.query_stock_basic(code=_code(stock_code)) if stock_code else self.bs.query_stock_basic()
-            return self._query(result)
+            # BaoStock 用 code_name/ipoDate，需统一为 name/list_date。
+            return normalize_basic_records(self._query(result))
         finally:
             self.bs.logout()
 
@@ -106,6 +113,7 @@ class BaostockDataSource:
         self._login()
         try:
             result = self.bs.query_trade_dates(start_date=start_date, end_date=end_date)
-            return self._query(result)
+            # BaoStock 用 calendar_date/is_trading_day，需统一为 cal_date/is_open。
+            return normalize_trade_cal_records(self._query(result))
         finally:
             self.bs.logout()

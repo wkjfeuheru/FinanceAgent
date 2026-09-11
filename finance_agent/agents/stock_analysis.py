@@ -16,7 +16,7 @@ from finance_agent.research.legacy_adapter import project_legacy
 from finance_agent.research.pipeline import ResearchPipeline
 from finance_agent.research.request_parser import parse_analysis_request
 from finance_agent.research.rule_engine import RuleEngine
-from finance_agent.research.snapshot_builder import SnapshotBuilder
+from finance_agent.research.snapshot_builder import production_builder
 from finance_agent.research.screener import ThemeScreener
 from finance_agent.research.theme_repository import PostgresThemeRepository
 
@@ -59,7 +59,7 @@ class StockAnalysisAgent(AgentProtocol):
         del checkpointer
         self._injected_pipeline = pipeline is not None
         self._pipeline = pipeline or ResearchPipeline(
-            snapshot_builder=SnapshotBuilder(_FetchGateway()),
+            snapshot_builder=production_builder(_FetchGateway()),
             rule_engine=RuleEngine.default(),
         )
         self._theme_screener = theme_screener
@@ -105,7 +105,7 @@ class StockAnalysisAgent(AgentProtocol):
         if not stock_data:
             return self._pipeline
         return ResearchPipeline(
-            snapshot_builder=SnapshotBuilder(_InlineGateway(stock_data)),
+            snapshot_builder=production_builder(_InlineGateway(stock_data)),
             rule_engine=RuleEngine.default(),
         )
 

@@ -54,6 +54,37 @@ def test_synthesis_context_contains_status_and_warnings_without_raw_history():
     assert "原始历史" not in str(context)
 
 
+def test_task_context_strips_audit_only_fact_payload():
+    """完整 K 线等重证据字段只供审计重放，不得进入专家上下文。"""
+    task = Task(
+        task_id="task-1",
+        intent=IntentKind.MARKET_QUERY,
+        expert_name="stock_analysis",
+        requirement="分析600519",
+        execution_mode="security_analysis",
+    )
+    state = {
+        "user_message": "分析600519",
+        "facts": [FactSnapshot(
+            fact_id="stock_snapshot:600519:abc", domain="market", source="fixture",
+            fetched_at=datetime.now(timezone.utc),
+            payload={
+                "code": "600519",
+                "quality_status": "complete",
+                "inputs": {"history": {"data": [{"close": 10.0}] * 500}},
+                "provenance": {"quote": {"source": "fixture"}},
+            },
+        )],
+    }
+
+    context = build_task_context(state, task)
+
+    payload = context["facts"][0]["payload"]
+    assert "inputs" not in payload
+    assert payload["quality_status"] == "complete"
+    assert context["fact_ids"] == ["stock_snapshot:600519:abc"]
+
+
 def test_intent_context_prioritizes_current_message():
     context = build_intent_context({
         "user_message": "分析600519",

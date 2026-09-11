@@ -81,7 +81,7 @@ def refresh_active_theme_features(
     from finance_agent.research.contracts import AnalysisKind, AnalysisRequest, Action
     from finance_agent.research.pipeline import ResearchPipeline
     from finance_agent.research.rule_engine import RuleEngine
-    from finance_agent.research.snapshot_builder import SnapshotBuilder
+    from finance_agent.research.snapshot_builder import production_builder
     from finance_agent.research.theme_repository import (
         PostgresFeatureSnapshotRepository,
         PostgresThemeRepository,
@@ -95,7 +95,7 @@ def refresh_active_theme_features(
     PostgresRuntimeRepository(connection_factory).setup_schema()
     rules = RuleEngine.default()
     pipeline = ResearchPipeline(
-        snapshot_builder=SnapshotBuilder(_Gateway()), rule_engine=rules,
+        snapshot_builder=production_builder(_Gateway()), rule_engine=rules,
     )
 
     def fetch_feature(stock_code: str) -> dict[str, Any]:

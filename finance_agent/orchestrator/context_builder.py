@@ -7,10 +7,19 @@ from typing import Any
 from finance_agent.contracts import ExpertResult, FactSnapshot, Task
 
 
+# 证据里只给审计使用的重型字段：完整 K 线与原始取数输入不进模型上下文。
+AUDIT_ONLY_PAYLOAD_KEYS = frozenset({"inputs", "snapshot"})
+
+
 def _fact_dict(fact: FactSnapshot | dict[str, Any]) -> dict[str, Any]:
-    if isinstance(fact, FactSnapshot):
-        return fact.model_dump(mode="json")
-    return dict(fact)
+    """投影事实快照，剥离仅供审计重放的重型字段。"""
+    data = fact.model_dump(mode="json") if isinstance(fact, FactSnapshot) else dict(fact)
+    payload = data.get("payload")
+    if isinstance(payload, dict):
+        data["payload"] = {
+            key: value for key, value in payload.items() if key not in AUDIT_ONLY_PAYLOAD_KEYS
+        }
+    return data
 
 
 def _facts_for_task(state: dict[str, Any], task: Task) -> list[dict[str, Any]]:

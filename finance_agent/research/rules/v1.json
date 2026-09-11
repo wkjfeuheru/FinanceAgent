@@ -10,6 +10,9 @@
     "minimum_history_bars": 60,
     "maximum_data_age_trading_days": 1
   },
+  "quality_gates": {
+    "maximum_report_period_age_days": 240
+  },
   "actions": {
     "watch_minimum_score": 70,
     "avoid_maximum_score": 40,

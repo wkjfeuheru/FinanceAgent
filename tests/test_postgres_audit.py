@@ -190,6 +190,76 @@ def test_task_result_keeps_research_rule_and_snapshot_fact_ids():
     assert "stock_snapshot:600519:fixture" in result.fact_ids
 
 
+def test_audit_manifest_written_by_stock_agent_can_be_replayed():
+    """审计写入的清单必须自带重放输入，且能复算出同一结论。"""
+    from finance_agent.agents.stock_analysis import StockAnalysisAgent
+    from finance_agent.orchestrator.orchestrator import AdvisorSystem
+    from finance_agent.research.pipeline import ResearchPipeline
+    from finance_agent.research.replay import replay_research_run
+    from finance_agent.research.rule_engine import RuleEngine
+    from finance_agent.research.snapshot_builder import SnapshotBuilder
+
+    fetched_at = "2026-08-28T08:00:00+00:00"
+
+    class Gateway:
+        def get_security_data(self, stock_code: str) -> dict:
+            closes = [round(10.0 * 1.004 ** index, 4) for index in range(60)]
+            return {
+                "basic_info": {"code": stock_code, "name": "测试股票"},
+                "quote": {"code": stock_code, "price": closes[-1], "date": "2026-08-28",
+                          "adjustment": "raw", "source": "fixture", "fetched_at": fetched_at},
+                "history": {"adjustment": "forward", "source": "fixture", "fetched_at": fetched_at,
+                            "data": [{"date": "2026-08-28", "close": close} for close in closes]},
+                "indicators": {"roe": 18.0, "revenue_yoy": 20.0, "netprofit_yoy": 20.0,
+                               "pe_ttm": 18.0, "pb": 2.0, "end_date": "2026-06-30",
+                               "ann_date": "2026-08-25", "source": "fixture",
+                               "fetched_at": fetched_at},
+            }
+
+    agent = StockAnalysisAgent(pipeline=ResearchPipeline(
+        snapshot_builder=SnapshotBuilder(Gateway()), rule_engine=RuleEngine.default(),
+    ))
+    state = agent.invoke({
+        "requirement": "分析600519", "resolved_stocks": [{"code": "600519"}],
+        "user_profile": {}, "intent_results": {}, "current_task_intent": "market_query",
+        "run_id": "run-1", "trace_id": "trace-1", "customer_id": "CUST001", "thread_id": "conv-1",
+    })
+
+    class _RecordingAudit:
+        def is_available(self):
+            return True
+
+        def upsert_expert_result(self, *args):
+            pass
+
+        def save_research_result(self, result, **context):
+            self.result = result
+            self.context = context
+
+    system = object.__new__(AdvisorSystem)
+    system.audit = _RecordingAudit()
+    system._audit_research_results(state)
+
+    manifest = system.audit.context["snapshot_manifest"]
+    analysis_result = state["analysis_results"][0]
+    assert manifest[0]["payload"]["inputs"]["history"]["data"]
+    assert manifest[0]["payload"]["evaluated_at"] == fetched_at
+
+    outcome = replay_research_run(
+        research_run_id="run-1",
+        request_data=analysis_result["request"],
+        results=[{
+            "stock_code": "600519", "action": analysis_result["action"],
+            "scores": analysis_result["scores"], "fact_ids": analysis_result["evidence_ids"],
+        }],
+        snapshot_manifest=manifest,
+        rule_version=analysis_result["rule_version"],
+    )
+
+    assert outcome.matched is True
+    assert outcome.fact_ids_matched is True
+
+
 def test_orchestrator_persists_theme_screening_as_one_multi_result_run():
     from finance_agent.orchestrator.orchestrator import AdvisorSystem
 

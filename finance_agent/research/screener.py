@@ -9,7 +9,7 @@ from typing import Any
 from finance_agent.research.contracts import AnalysisRequest, AnalysisResult
 from finance_agent.research.pipeline import ResearchPipeline
 from finance_agent.research.rule_engine import RuleEngine
-from finance_agent.research.snapshot_builder import SnapshotBuilder
+from finance_agent.research.snapshot_builder import production_builder
 from finance_agent.research.theme_repository import ThemeRepository
 
 
@@ -65,7 +65,7 @@ class ThemeScreener:
             )
 
         pipeline = ResearchPipeline(
-            snapshot_builder=SnapshotBuilder(self._gateway),
+            snapshot_builder=production_builder(self._gateway),
             rule_engine=RuleEngine.default(),
         )
         candidates: list[ThemeCandidate] = []

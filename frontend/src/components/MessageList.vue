@@ -50,6 +50,34 @@ function scoreEntries(scores: Record<string, number | null>): Array<[string, num
   return Object.entries(scores).filter(([key]) => key !== 'total')
 }
 
+/** 限制原因码 → 中文说明；未知原因码原样展示，避免隐藏审计信息。 */
+const RESTRICTION_TEXT: Record<string, string> = {
+  price_history: '缺少足够的历史收盘价',
+  fundamental_metrics: '缺少可用的财务或估值指标',
+  risk_history: '缺少计算风险所需的行情',
+  stock_data: '未获取到该股票数据',
+  quote: '缺少最新报价',
+  adjusted_history: '缺少前复权历史行情',
+  quote_as_of_missing: '报价缺少数据日期',
+  stale_quote: '最新报价超过允许的数据新鲜度',
+  history_as_of_missing: '历史行情缺少数据日期',
+  stale_history: '最新 K 线超过允许的数据新鲜度',
+  mixed_report_period: '比较标的的财务报告期不一致',
+  fundamental_report_period_missing: '财务数据缺少报告期',
+  stale_fundamental_report_period: '财务报告期过于陈旧',
+  fundamental_disclosure_date_missing: '财务数据缺少披露日期',
+  fundamental_disclosure_before_period: '披露日期早于报告期',
+  fundamental_disclosure_in_future: '披露日期晚于评估时点',
+  valuation_not_ttm: '估值使用静态 PE 而非 TTM',
+  valuation_metrics_missing: '缺少可用估值指标（PE）',
+  mixed_sources: '不同数据项来自不同数据源',
+  trading_calendar_unavailable: '交易日历不可用，新鲜度按工作日估算',
+}
+
+function restrictionText(code: string): string {
+  return RESTRICTION_TEXT[code] ?? code
+}
+
 const isEmpty = computed(
   () => props.messages.length === 0 && !props.loading,
 )
@@ -146,6 +174,10 @@ const isEmpty = computed(
             <div class="research-meta">规则 {{ result.rule_version }} · 数据质量 {{ result.data_quality }}</div>
             <div v-if="scoreEntries(result.scores).length" class="score-list">
               <span v-for="[name, value] in scoreEntries(result.scores)" :key="name">{{ name }} {{ formatNumber(value) }}</span>
+            </div>
+            <div v-if="result.restrictions?.length" class="restriction-list">
+              <span class="restriction-title">限制与提示</span>
+              <span v-for="item in result.restrictions" :key="item">{{ restrictionText(item) }}</span>
             </div>
             <div v-if="result.evidence_ids.length" class="evidence-list">
               <span v-for="factId in result.evidence_ids" :key="factId">证据 {{ factId }}</span>
@@ -350,6 +382,9 @@ const isEmpty = computed(
 .research-meta { margin-top: 7px; font-family: var(--font-mono); font-size: 10px; }
 .score-list, .evidence-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .score-list span, .evidence-list span { padding: 3px 5px; background: var(--color-primary-soft); color: var(--color-primary); font: 10px/1.2 var(--font-mono); }
+.restriction-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.restriction-list span { padding: 3px 5px; background: rgba(230, 162, 60, 0.12); color: #b8791a; font: 10px/1.2 var(--font-mono); }
+.restriction-list .restriction-title { background: transparent; color: var(--color-text-secondary); padding-left: 0; }
 .pending-leads strong { color: var(--color-text); }
 .pending-leads p { margin: 6px 0 0; }
 

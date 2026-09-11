@@ -1,5 +1,6 @@
 """PostgreSQL 运行审计 Repository 测试。"""
 
+import json
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -24,6 +25,9 @@ class FakeCursor:
 
     def fetchone(self):
         return self.rows.pop(0) if self.rows else None
+
+    def fetchall(self):
+        return list(self.rows)
 
     def close(self):
         self.closed = True
@@ -305,3 +309,33 @@ def test_research_run_repository_rolls_back_when_one_result_insert_fails():
         )
     assert connection.committed is False
     assert connection.rolled_back is True
+
+
+def test_research_run_repository_loads_record_for_replay():
+    """审计重放需要按运行 ID 读回请求、快照清单与标的结论。"""
+    manifest = [{"fact_id": "stock_snapshot:600519:abc", "payload": {"inputs": {"quote": {}}}}]
+    connection = FakeConnection(rows=[
+        ("run-uuid", None, "CUST001", "conversation-1",
+         '{"kind": "single_stock", "stock_codes": ["600519"], "profile_complete": true}',
+         json.dumps({"snapshots": manifest, "active_members": [], "exclusions": []}),
+         "research_rules/v1", "completed"),
+        ("600519", "关注", '{"total": 82.0}', '["stock_snapshot:600519:abc"]', ""),
+    ])
+    repository = ResearchRunRepository(lambda: connection)
+
+    record = repository.load("run-uuid")
+
+    assert record is not None
+    assert record["request_data"]["stock_codes"] == ["600519"]
+    assert record["snapshot_manifest"]["snapshots"] == manifest
+    assert record["rule_version"] == "research_rules/v1"
+    assert record["results"][0]["stock_code"] == "600519"
+    assert record["results"][0]["scores"] == {"total": 82.0}
+    assert connection.closed is True
+
+
+def test_research_run_repository_load_returns_none_when_missing():
+    repository = ResearchRunRepository(lambda: FakeConnection(rows=[]))
+
+    assert repository.load("missing-run") is None
+    assert repository.load("") is None

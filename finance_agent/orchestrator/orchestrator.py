@@ -427,17 +427,7 @@ class AdvisorSystem:
 
             # 执行单个专家委托并记录结果。
             def handle(state: AdvisorState) -> AdvisorState:
-                completed_tasks = set(state.get("completed_tasks", []))
-                pending_task = next(
-                    (
-                        task for task in state.get("tasks", []) or []
-                        if task.expert_name == expert
-                        and task.task_id not in completed_tasks
-                        and all(dep in completed_tasks for dep in task.depends_on)
-                    ),
-                    None,
-                )
-                requirement = pending_task.requirement if pending_task else next(
+                requirement = next(
                     (item.get("requirement", "")
                      for item in state.get("task_dispatch", [])
                      if item.get("expert") == expert),
@@ -448,25 +438,12 @@ class AdvisorSystem:
                 self._emit_progress(stage, f"正在执行{stage}专家分析")
                 if expert == "asset_allocation":
                     self._emit_progress("debate", "正在进行资产配置多空辩论")
-                if pending_task is not None:
-                    pending_task.status = TaskStatus.RUNNING
-                    state["current_task_intent"] = pending_task.intent.value if pending_task.intent else ""
-                    state["task_context"] = build_task_context(state, pending_task)
                 result = agent.invoke(state)
-                if pending_task is not None:
-                    task_result = self._make_task_result(result, pending_task, expert)
-                    result.setdefault("task_results", {})[pending_task.task_id] = task_result
-                    result["completed_tasks"] = list(result.get("completed_tasks", [])) + [pending_task.task_id]
-                    pending_task.status = (
-                        TaskStatus.DEGRADED
-                        if expert_status is ExpertStatus.DEGRADED
-                        else TaskStatus.SUCCESS
-                    )
                 completed = list(result.get("completed_experts", []))
                 if expert not in completed:
                     completed.append(expert)
                 result["completed_experts"] = completed
-                self._audit_expert_result(result, expert, pending_task)
+                self._audit_expert_result(result, expert)
                 return result
 
             return handle

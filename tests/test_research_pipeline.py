@@ -14,29 +14,56 @@ from finance_agent.research.theme_repository import InMemoryThemeRepository
 from datetime import timedelta
 
 
+def _closes(rate: float) -> list[float]:
+    """生成 60 根等比收盘价，供确定性的技术面/风险面评分使用。"""
+    return [round(10.0 * (1 + rate) ** index, 4) for index in range(60)]
+
+
+# 夹具使用固定的数据日期与抓取时刻：新鲜度门禁是时间敏感的，用 now() 会让
+# 测试结果随系统时钟漂移。
+FIXTURE_DAY = "2026-08-28"
+FIXTURE_FETCHED_AT = "2026-08-28T08:00:00+00:00"
+
+
 class CompleteGateway:
-    """为并行隔离测试提供两只股票的独立快照。"""
+    """为并行隔离测试提供两只股票的独立快照。
+
+    只提供生产取数层真实可得的原始字段（财务指标 + 前复权 K 线），
+    评分必须由 ``research.scoring`` 从这些原始字段推导。
+    """
 
     def get_security_data(self, stock_code: str) -> dict:
-        score = 85 if stock_code == "600519" else 75
         return {
             "basic_info": {"code": stock_code, "name": f"测试{stock_code}"},
             "quote": {
                 "code": stock_code,
-                "price": 10.0,
-                "date": "2026-09-10",
+                "price": 12.6558,
+                "date": FIXTURE_DAY,
+                "adjustment": "raw",
                 "source": "fixture",
-                "fetched_at": datetime.now(timezone.utc).isoformat(),
+                "fetched_at": FIXTURE_FETCHED_AT,
             },
             "history": {
                 "adjustment": "forward",
-                "data": [{"high": 10.5, "low": 9.5, "close": 10.0}] * 60,
+                "as_of": FIXTURE_DAY,
+                "source": "fixture",
+                "fetched_at": FIXTURE_FETCHED_AT,
+                "data": [
+                    {"date": FIXTURE_DAY, "close": close, "high": close * 1.01, "low": close * 0.99}
+                    for close in _closes(0.004)
+                ],
             },
             "indicators": {
-                "fundamental_score": score,
-                "technical_score": score,
-                "risk_score": 90,
-                "suitability_score": 80,
+                "roe": 18.0 if stock_code == "600519" else 12.0,
+                "revenue_yoy": 20.0,
+                "netprofit_yoy": 20.0,
+                "pe_ttm": 18.0,
+                "pb": 2.0,
+                "end_date": "2026-06-30",
+                "ann_date": "2026-08-25",
+                "source": "fixture",
+                "fetched_at": FIXTURE_FETCHED_AT,
+                "suitability_score": 80.0,
             },
         }
 
@@ -93,6 +120,45 @@ class CriticalPipeline:
             narrative="关键数据缺失，无法完成研究。",
             report_mode="template_fallback",
         )
+
+
+def test_stale_quote_is_reported_and_blocks_the_conclusion():
+    """超过允许交易日龄的报价必须降级为“数据不足”并给出原因。"""
+    class StaleQuoteGateway(CompleteGateway):
+        def get_security_data(self, stock_code: str) -> dict:
+            data = super().get_security_data(stock_code)
+            data["quote"]["date"] = "2026-08-20"
+            return data
+
+    request = AnalysisRequest(kind=AnalysisKind.SINGLE_STOCK, stock_codes=["600519"])
+    pipeline = ResearchPipeline(
+        snapshot_builder=SnapshotBuilder(StaleQuoteGateway()),
+        rule_engine=RuleEngine.default(),
+    )
+
+    result = pipeline.analyze(request, user_profile={})
+
+    assert result.data_quality == "critical_missing"
+    assert result.action.value == "数据不足"
+    assert "stale_quote" in result.restrictions
+    assert "最新报价超过允许的数据新鲜度" in result.narrative
+
+
+def test_pipeline_facts_carry_replay_inputs_and_stable_ids():
+    """证据必须包含完整重放输入，且同一输入的两次运行得到同一事实 ID。"""
+    request = AnalysisRequest(kind=AnalysisKind.SINGLE_STOCK, stock_codes=["600519"])
+    pipeline = _pipeline()
+
+    _, first_facts = pipeline.analyze_with_facts(request, user_profile={})
+    _, second_facts = pipeline.analyze_with_facts(request, user_profile={})
+
+    payload = first_facts[0].payload
+    assert payload["inputs"]["history"]["data"]
+    assert payload["inputs"]["indicators"]["roe"] == 18.0
+    assert payload["request"]["stock_codes"] == ["600519"]
+    assert payload["evaluated_at"] == FIXTURE_FETCHED_AT
+    assert payload["provenance"]["quote"]["price_basis"] == "raw"
+    assert [fact.fact_id for fact in first_facts] == [fact.fact_id for fact in second_facts]
 
 
 def test_stock_agent_projects_critical_result_as_degraded():

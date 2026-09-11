@@ -69,3 +69,34 @@ def test_configured_provider_normalizes_external_records_as_pending_leads():
     lead = repository.pending_leads("ai_compute")[0]
     assert lead.source_class == "licensed_classification"
     assert lead.evidence_hash == ThemeLead.evidence_digest(lead.source_uri, lead.evidence_excerpt)
+
+
+def test_provider_theme_mismatch_is_rejected_instead_of_overwritten():
+    provider = ConfiguredThemeDiscoveryProvider(
+        endpoint="https://provider.example/themes", source_name="provider",
+        source_class="public_lead", fetch_records=lambda endpoint, theme_id: [{
+            "theme_id": "other_theme", "stock_code": "600519", "industry": "算力",
+            "source_uri": "https://provider.example/evidence/1", "evidence_excerpt": "证据",
+        }],
+    )
+    repository = InMemoryThemeRepository()
+
+    summary = ThemeDiscoveryService(provider, repository).sync("ai_compute")
+
+    assert summary.rejected == 1
+    assert repository.pending_leads("ai_compute") == []
+
+
+def test_provider_timeout_is_recorded_without_writing_partial_leads():
+    class TimeoutProvider:
+        def discover(self, theme_id: str):
+            raise TimeoutError("provider timed out")
+
+    repository = InMemoryThemeRepository()
+    summary = ThemeDiscoveryService(TimeoutProvider(), repository).sync("ai_compute")
+
+    assert summary.status == "failed"
+    assert summary.error_type == "TimeoutError"
+    assert "timed out" in summary.error_message
+    assert summary.inserted_pending == 0
+    assert repository.pending_leads("ai_compute") == []

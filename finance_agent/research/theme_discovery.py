@@ -71,7 +71,7 @@ class ConfiguredThemeDiscoveryProvider:
             source_uri = str(record.get("source_uri", "")).strip()
             excerpt = str(record.get("evidence_excerpt", "")).strip()
             record.update({
-                "theme_id": theme_id,
+                "theme_id": record.get("theme_id") or theme_id,
                 "source_name": self._source_name,
                 "source_class": self._source_class,
                 "evidence_hash": record.get("evidence_hash") or ThemeLead.evidence_digest(source_uri, excerpt),
@@ -106,6 +106,9 @@ class DiscoverySummary:
     inserted_pending: int = 0
     duplicates: int = 0
     rejected: int = 0
+    status: str = "completed"
+    error_type: str = ""
+    error_message: str = ""
 
 
 class ThemeDiscoveryService:
@@ -121,7 +124,22 @@ class ThemeDiscoveryService:
             (lead.stock_code, lead.source_name, lead.evidence_hash)
             for lead in self._repository.pending_leads(theme_id)
         }
-        for raw in self._provider.discover(theme_id):
+        try:
+            records = self._provider.discover(theme_id)
+            iterator = iter(records)
+        except Exception as exc:
+            return DiscoverySummary(
+                theme_id=theme_id, status="failed",
+                error_type=type(exc).__name__, error_message=str(exc),
+            )
+        try:
+            records_list = list(iterator)
+        except Exception as exc:
+            return DiscoverySummary(
+                theme_id=theme_id, status="failed",
+                error_type=type(exc).__name__, error_message=str(exc),
+            )
+        for raw in records_list:
             try:
                 lead = raw if isinstance(raw, ThemeLead) else ThemeLead.model_validate(raw)
                 if lead.theme_id != theme_id:

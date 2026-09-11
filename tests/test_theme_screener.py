@@ -25,10 +25,34 @@ def _repo(count: int) -> InMemoryThemeRepository:
 
 
 class Gateway:
+    """提供生产取数层真实可得的原始字段，评分由研究层自行推导。"""
+
     def get_security_data(self, code: str) -> dict:
-        return {"quote": {"source": "fixture", "price": 10},
-                "history": {"adjustment": "forward", "data": [{}] * 60},
-                "indicators": {"fundamental_score": 80, "technical_score": 80, "risk_score": 90}}
+        closes = [round(10.0 * 1.004 ** index, 4) for index in range(60)]
+        fetched_at = "2026-08-28T08:00:00+00:00"
+        return {
+            "quote": {
+                "source": "fixture", "price": closes[-1], "date": "2026-08-28",
+                "adjustment": "raw", "fetched_at": fetched_at,
+            },
+            "history": {
+                "adjustment": "forward",
+                "source": "fixture",
+                "fetched_at": fetched_at,
+                "data": [{"date": "2026-08-28", "close": close} for close in closes],
+            },
+            "indicators": {
+                "roe": 18.0,
+                "revenue_yoy": 20.0,
+                "netprofit_yoy": 20.0,
+                "pe_ttm": 18.0,
+                "pb": 2.0,
+                "end_date": "2026-06-30",
+                "ann_date": "2026-08-25",
+                "source": "fixture",
+                "fetched_at": fetched_at,
+            },
+        }
 
 
 def _request():

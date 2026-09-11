@@ -72,14 +72,22 @@ def get_stock_quote(stock_code: str) -> str:
     """获取 A 股最近交易日行情与估值概览。"""
     manager = get_provider_manager()
     daily = _latest_daily_record(manager.get_daily(stock_code))
-    valuation = _latest_daily_record(manager.get_daily_basic(stock_code))
     if daily is None:
         return _json({"code": stock_code, "error": "未获取到最近交易日行情"})
-    valuation = valuation or {}
+    # 来源元数据必须在行情取数成功后立即读取：估值取数会覆盖 last_metadata。
+    meta = _meta()
+    # 估值接口并非所有数据源都提供（AKShare/BaoStock 明确不支持）。
+    # 估值缺失不能连累行情本身，否则快照会因缺少 quote 被判为关键数据缺失。
+    try:
+        valuation = _latest_daily_record(manager.get_daily_basic(stock_code)) or {}
+    except Exception:
+        valuation = {}
     result = {
         "code": stock_code,
         "date": _first_value(daily, "trade_date", "date"),
         "price": _first_value(daily, "close", "price"),
+        # 最新报价保持原始口径，必须与快照里的前复权 K 线区分标记。
+        "adjustment": "raw",
         "change_pct": _first_value(daily, "pct_chg", "change_pct"),
         "change_amount": _first_value(daily, "change_amount", "change"),
         "open": daily.get("open"),
@@ -92,7 +100,7 @@ def get_stock_quote(stock_code: str) -> str:
         "ps": _first_value(valuation, "ps", "ps_ttm"),
         "total_market_cap": _first_value(valuation, "total_mv", "total_market_cap"),
         "circ_market_cap": _first_value(valuation, "circ_mv", "circ_market_cap"),
-        **_meta(),
+        **meta,
     }
     return _json(result)
 

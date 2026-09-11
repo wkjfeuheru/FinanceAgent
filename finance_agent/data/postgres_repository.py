@@ -11,6 +11,20 @@ from uuid import UUID, uuid4, uuid5
 from finance_agent.contracts import DispatchPlan, ExpertResult, RequestEnvelope
 
 
+def _json_object(value: Any) -> Any:
+    """把 JSONB 列读出的值统一为 Python 对象。
+
+    psycopg 通常已把 JSONB 解码为对象，但驱动可配置为返回字符串；
+    重放要求两种形态都能读，因此这里做一次兼容解析。
+    """
+    if value is None or isinstance(value, (dict, list)):
+        return value
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class PostgresRuntimeRepository:
     """使用 DB-API 连接执行运行审计事务。"""
 
@@ -406,6 +420,61 @@ class ResearchRunRepository:
         finally:
             connection.close()
 
+    def load(self, research_run_id: str) -> dict[str, Any] | None:
+        """读取一次研究运行及其标的结论，供审计重放复算使用。"""
+        if not research_run_id:
+            return None
+        connection = self._connection_factory()
+        try:
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    """
+                    SELECT research_run_id, agent_run_id, customer_id, conversation_id,
+                           request_data, snapshot_manifest, rule_version, status
+                    FROM finance.research_runs
+                    WHERE research_run_id = %s
+                    """,
+                    (research_run_id,),
+                )
+                run = cursor.fetchone()
+                if not run:
+                    return None
+                cursor.execute(
+                    """
+                    SELECT stock_code, action, scores, fact_ids, exclusion_reason
+                    FROM finance.research_results
+                    WHERE research_run_id = %s
+                    ORDER BY stock_code
+                    """,
+                    (research_run_id,),
+                )
+                rows = cursor.fetchall() or []
+            finally:
+                cursor.close()
+        finally:
+            connection.close()
+        return {
+            "research_run_id": str(run[0]),
+            "agent_run_id": str(run[1]) if run[1] else None,
+            "customer_id": run[2],
+            "conversation_id": run[3],
+            "request_data": _json_object(run[4]),
+            "snapshot_manifest": _json_object(run[5]) or [],
+            "rule_version": run[6],
+            "status": run[7],
+            "results": [
+                {
+                    "stock_code": row[0],
+                    "action": row[1],
+                    "scores": _json_object(row[2]) or {},
+                    "fact_ids": _json_object(row[3]) or [],
+                    "exclusion_reason": row[4] or "",
+                }
+                for row in rows
+            ],
+        }
+
 
 class PostgresAuditStore:
     """可选的 PostgreSQL 运行审计存储。
@@ -527,5 +596,14 @@ class PostgresAuditStore:
                 active_members=active_members, exclusions=exclusions, run_id=run_id,
                 customer_id=customer_id, conversation_id=conversation_id, status=status,
             )
+        except Exception:
+            return None
+
+    def load_research_run(self, research_run_id: str) -> dict[str, Any] | None:
+        """读取已保存的研究运行；审计不可用时返回 None，不影响调用方。"""
+        if not self._research_repository or not research_run_id:
+            return None
+        try:
+            return self._research_repository.load(research_run_id)
         except Exception:
             return None

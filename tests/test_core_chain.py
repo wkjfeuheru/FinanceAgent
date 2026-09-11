@@ -251,6 +251,68 @@ def test_langgraph_routes_expert_result_into_manager_synthesis(monkeypatch):
     assert result["agent_response"].startswith("你好")
 
 
+def test_legacy_dispatch_without_tasks_routes_and_audits_expert(monkeypatch):
+    """兼容路径（只有 task_dispatch、没有 tasks）必须能执行并写入审计。
+
+    该分支曾引用未定义的 ``expert_status``，一旦被触发就会抛 NameError。
+    """
+    from langgraph.checkpoint.memory import MemorySaver
+    from finance_agent.orchestrator.orchestrator import AdvisorSystem
+
+    system = object.__new__(AdvisorSystem)
+    system.checkpointer = MemorySaver()
+    system.manager = ManagerAgent()
+    system.stock_agent = object()
+    system.allocation_agent = object()
+    system.product_agent = object()
+    system.casual_chat_agent = type(
+        "FakeCasual", (), {
+            "invoke": lambda self, state: {
+                **state,
+                "intent_results": {"casual_chat": {"status": "success", "content": "你好"}},
+            },
+        },
+    )()
+    system.slot_extractor = type("Slots", (), {"extract": lambda self, state: state})()
+    import threading
+    system._progress_context = type("Context", (), {})()
+    system._progress_callbacks = {}
+    system._progress_lock = threading.Lock()
+    system._trace_lock = threading.Lock()
+    system._trace_sequences = {}
+    system._workflow_lock = threading.RLock()
+    system._stop_requests = {}
+    system._active_runs = {}
+    system._stop_lock = threading.Lock()
+    audited: list[tuple[str, str]] = []
+
+    class _RecordingAudit:
+        def is_available(self):
+            return True
+
+        def upsert_expert_result(self, run_id, trace_id, result):
+            audited.append((result.expert_name, result.status.value))
+
+    system.audit = _RecordingAudit()
+    system._trace_agent = lambda *args, **kwargs: None
+    system._emit_progress = lambda *args, **kwargs: None
+    # 只提供旧式分派列表，不设置 state["tasks"]，强制走兼容专家节点。
+    monkeypatch.setattr(system.manager, "dispatch_tasks", lambda state: [{
+        "intent": "casual_chat", "expert": "casual_chat", "requirement": "你好",
+    }])
+    monkeypatch.setattr(system.manager, "synthesize_response", lambda state: "你好")
+
+    graph = system._build_graph()
+    result = graph.invoke(
+        {"user_message": "你好", "run_id": "run-1", "trace_id": "trace-1",
+         "completed_experts": [], "intent_results": {}},
+        config={"configurable": {"thread_id": "legacy-chain-test"}},
+    )
+
+    assert result["completed_experts"] == ["casual_chat"]
+    assert audited == [("casual_chat", "success")]
+
+
 def test_manager_synthesis_combines_expert_outputs():
     manager = ManagerAgent()
     state = {
