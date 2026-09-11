@@ -29,7 +29,7 @@ from finance_agent.contracts import (
     generate_identifiers,
 )
 from finance_agent.data.postgres_repository import PostgresAuditStore
-from finance_agent.research.contracts import AnalysisResult
+from finance_agent.research.contracts import AnalysisRequest, AnalysisResult
 from finance_agent.orchestrator.database import get_database
 from finance_agent.orchestrator.memory import AgentMemoryContext, RedisMemoryStore
 from finance_agent.orchestrator.slots import SlotExtractor
@@ -149,13 +149,42 @@ class AdvisorSystem:
     def _audit_research_results(self, state: Dict[str, Any]) -> None:
         """将确定性研究结果及其引用的原始快照单独写入可重放审计表。"""
         save = getattr(self.audit, "save_research_result", None)
-        if not callable(save):
-            return
         evidence_facts = {
             fact.fact_id: fact.model_dump(mode="json")
             for fact in state.get("facts", []) or []
             if isinstance(fact, FactSnapshot)
         }
+        theme_screening = state.get("theme_screening", {}) or {}
+        if theme_screening:
+            save_run = getattr(self.audit, "save_research_run", None)
+            try:
+                request = AnalysisRequest.model_validate(theme_screening.get("request", {}))
+                results = [
+                    AnalysisResult.model_validate(item)
+                    for item in state.get("analysis_results", []) or []
+                ]
+            except (TypeError, ValueError):
+                return
+            if callable(save_run):
+                fact_ids = {
+                    fact_id for result in results for fact_id in result.evidence_ids
+                }
+                save_run(
+                    request=request,
+                    results=results,
+                    snapshot_manifest=[
+                        evidence_facts[fact_id] for fact_id in fact_ids if fact_id in evidence_facts
+                    ],
+                    active_members=list(theme_screening.get("active_members", [])),
+                    exclusions=list(theme_screening.get("exclusions", [])),
+                    run_id=str(state.get("run_id", "")),
+                    customer_id=str(state.get("customer_id", "")),
+                    conversation_id=str(state.get("thread_id", "")),
+                    status=str(theme_screening.get("status", "completed")),
+                )
+            return
+        if not callable(save):
+            return
         for raw_result in state.get("analysis_results", []) or []:
             try:
                 result = AnalysisResult.model_validate(raw_result)
@@ -343,6 +372,7 @@ class AdvisorSystem:
                         "user_profile", "stock_data", "stock_analysis", "technical_analysis",
                         "analysis_results",
                         "theme_screening",
+                        "theme_screening_status", "theme_candidates", "pending_leads", "personalization_status",
                         "allocation_result", "debate_result", "product_analysis",
                     ):
                         if local.get(key):
@@ -544,7 +574,9 @@ class AdvisorSystem:
                 "warnings": [], "facts": [],
                 "business_state": {}, "user_profile": memory_data.get("profile", {}) or {},
                 "stock_data": {}, "stock_analysis": {}, "technical_analysis": {},
-                "theme_screening": {}, "allocation_result": {}, "debate_result": {}, "product_analysis": {},
+                "theme_screening": {}, "theme_screening_status": "", "theme_candidates": [],
+                "pending_leads": [], "personalization_status": "",
+                "allocation_result": {}, "debate_result": {}, "product_analysis": {},
                 "intent_results": {}, "detected_intents": [], "finance_related": True,
                 "agent_response": "", "compliance_result": {},
                 "memory_context": memory_data.get("context_text", ""),
@@ -588,6 +620,10 @@ class AdvisorSystem:
                 "stock_data": result.get("stock_data", {}),
                 "stock_analysis": result.get("stock_analysis", {}),
                 "theme_screening": result.get("theme_screening", {}),
+                "theme_screening_status": result.get("theme_screening_status", ""),
+                "theme_candidates": result.get("theme_candidates", []),
+                "pending_leads": result.get("pending_leads", []),
+                "personalization_status": result.get("personalization_status", ""),
                 "allocation_result": result.get("allocation_result", {}),
                 "debate_result": result.get("debate_result", {}),
                 "product_analysis": result.get("product_analysis", {}),

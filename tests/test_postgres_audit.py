@@ -188,3 +188,50 @@ def test_task_result_keeps_research_rule_and_snapshot_fact_ids():
 
     assert result.result_data["analysis_results"][0]["rule_version"] == "research_rules/v1"
     assert "stock_snapshot:600519:fixture" in result.fact_ids
+
+
+def test_orchestrator_persists_theme_screening_as_one_multi_result_run():
+    from finance_agent.orchestrator.orchestrator import AdvisorSystem
+
+    class _RecordingAudit:
+        def is_available(self):
+            return True
+
+        def upsert_expert_result(self, *args):
+            pass
+
+        def save_research_run(self, **context):
+            self.context = context
+
+    system = object.__new__(AdvisorSystem)
+    system.audit = _RecordingAudit()
+    state = {
+        "run_id": "run-1", "trace_id": "trace-1", "customer_id": "CUST001",
+        "thread_id": "conversation-1",
+        "theme_screening": {
+            "status": "partial_success", "request": {
+                "kind": "theme_screening", "stock_codes": [], "theme_id": "ai_compute",
+                "profile_complete": False,
+            },
+            "active_members": [{"stock_code": "600519"}, {"stock_code": "600036"}],
+            "exclusions": [{"stock_code": "600001", "reason": "critical_missing"}],
+        },
+        "analysis_results": [
+            {"request": {"kind": "theme_screening", "theme_id": "ai_compute", "stock_codes": ["600519"]},
+             "action": "关注", "data_quality": "complete", "rule_version": "research_rules/v1",
+             "scores": {"total": 88}, "evidence_ids": [], "personalization_status": "research_candidate",
+             "restrictions": [], "narrative": "", "report_mode": "deterministic"},
+            {"request": {"kind": "theme_screening", "theme_id": "ai_compute", "stock_codes": ["600036"]},
+             "action": "观望", "data_quality": "warning", "rule_version": "research_rules/v1",
+             "scores": {"total": 62}, "evidence_ids": [], "personalization_status": "research_candidate",
+             "restrictions": [], "narrative": "", "report_mode": "deterministic"},
+        ],
+        "facts": [],
+    }
+
+    system._audit_research_results(state)
+
+    assert len(system.audit.context["results"]) == 2
+    assert system.audit.context["request"].theme_id == "ai_compute"
+    assert system.audit.context["active_members"][0]["stock_code"] == "600519"
+    assert system.audit.context["exclusions"][0]["reason"] == "critical_missing"

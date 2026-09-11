@@ -214,7 +214,10 @@ def test_research_run_repository_persists_replayable_result_and_snapshot_manifes
     )
 
     run_statement, run_parameters = connection.cursor_instance.statements[0]
-    result_statement, result_parameters = connection.cursor_instance.statements[1]
+    result_statement, result_parameters = next(
+        item for item in connection.cursor_instance.statements
+        if "INSERT INTO finance.research_results" in item[0]
+    )
     assert research_run_id
     assert "finance.research_runs" in run_statement
     assert '"profile_complete": true' in run_parameters[4]
@@ -224,3 +227,81 @@ def test_research_run_repository_persists_replayable_result_and_snapshot_manifes
     assert result_parameters[2] == "600519"
     assert result_parameters[3] == "关注"
     assert connection.committed is True
+
+
+def test_research_run_repository_persists_multiple_independent_results_and_exclusions():
+    connection = FakeConnection()
+    repository = ResearchRunRepository(lambda: connection)
+    request = AnalysisRequest(
+        kind=AnalysisKind.THEME_SCREENING, theme_id="ai_compute", profile_complete=False,
+    )
+    results = [
+        AnalysisResult(
+            request=request.model_copy(update={"stock_codes": ["600519"]}),
+            action=Action.WATCH, data_quality="complete", rule_version="research_rules/v1",
+            scores={"total": 88}, evidence_ids=["fact-1"],
+        ),
+        AnalysisResult(
+            request=request.model_copy(update={"stock_codes": ["600036"]}),
+            action=Action.WAIT, data_quality="warning", rule_version="research_rules/v1",
+            scores={"total": 62}, evidence_ids=["fact-2"],
+        ),
+    ]
+
+    run_id = repository.save_many(
+        request=request,
+        results=results,
+        snapshot_manifest=[{"fact_id": "fact-1"}, {"fact_id": "fact-2"}],
+        active_members=[{"stock_code": "600519"}, {"stock_code": "600036"}],
+        exclusions=[{"stock_code": "600001", "reason": "critical_missing"}],
+        run_id=str(uuid4()), customer_id="CUST001", conversation_id="conversation-1",
+        status="partial_success",
+    )
+
+    assert run_id
+    run_statement, run_parameters = connection.cursor_instance.statements[0]
+    result_statements = [item for item in connection.cursor_instance.statements if "INSERT INTO finance.research_results" in item[0]]
+    assert '"active_members"' in run_parameters[5]
+    assert '"stock_code": "600001"' in run_parameters[5]
+    assert len(result_statements) == 3
+    assert result_statements[0][1][2] == "600519"
+    assert result_statements[1][1][2] == "600036"
+    assert result_statements[2][1][2] == "600001"
+    assert result_statements[2][1][6] == "critical_missing"
+
+
+def test_research_run_repository_uses_stable_id_and_upsert_for_same_agent_run():
+    connection = FakeConnection()
+    repository = ResearchRunRepository(lambda: connection)
+    agent_run_id = str(uuid4())
+    result = AnalysisResult(
+        request=AnalysisRequest(kind=AnalysisKind.SINGLE_STOCK, stock_codes=["600519"]),
+        action=Action.WATCH, data_quality="complete", rule_version="research_rules/v1",
+    )
+
+    first = repository.save(result, snapshot_manifest=[], run_id=agent_run_id,
+                            customer_id="CUST001", conversation_id="conversation-1")
+    second = repository.save(result, snapshot_manifest=[], run_id=agent_run_id,
+                             customer_id="CUST001", conversation_id="conversation-1")
+    run_statement = connection.cursor_instance.statements[-3][0]
+
+    assert first == second
+    assert "ON CONFLICT (research_run_id)" in run_statement
+    assert "DELETE FROM finance.research_results" in connection.cursor_instance.statements[-2][0]
+
+
+def test_research_run_repository_rolls_back_when_one_result_insert_fails():
+    connection = FakeConnection(fail_on="INSERT INTO finance.research_results")
+    repository = ResearchRunRepository(lambda: connection)
+    result = AnalysisResult(
+        request=AnalysisRequest(kind=AnalysisKind.SINGLE_STOCK, stock_codes=["600519"]),
+        action=Action.WATCH, data_quality="complete", rule_version="research_rules/v1",
+    )
+
+    with pytest.raises(RuntimeError, match="sql_failed"):
+        repository.save_many(
+            request=result.request, results=[result], snapshot_manifest=[], active_members=[],
+            exclusions=[], run_id=str(uuid4()), customer_id="CUST001", conversation_id="conversation-1",
+        )
+    assert connection.committed is False
+    assert connection.rolled_back is True

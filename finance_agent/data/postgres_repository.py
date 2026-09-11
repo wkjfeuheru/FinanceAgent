@@ -299,11 +299,42 @@ class ResearchRunRepository:
         """原子保存研究输入、快照清单、规则版本与每个标的的结论。"""
         if result.request is None:
             raise ValueError("研究结果缺少请求，无法持久化")
+        exclusions = ([
+            {"stock_code": code, "reason": exclusion_reason}
+            for code in result.request.stock_codes if exclusion_reason
+        ])
+        return self.save_many(
+            request=result.request, results=[result], snapshot_manifest=snapshot_manifest,
+            active_members=[], exclusions=exclusions, run_id=run_id,
+            customer_id=customer_id, conversation_id=conversation_id, status=status,
+        )
 
+    def save_many(
+        self,
+        *,
+        request: Any,
+        results: list[Any],
+        snapshot_manifest: list[dict[str, Any]],
+        active_members: list[dict[str, Any]],
+        exclusions: list[dict[str, Any]],
+        run_id: str | None,
+        customer_id: str,
+        conversation_id: str,
+        status: str = "completed",
+    ) -> str:
+        """原子保存一次研究运行及多个标的独立结果。"""
+        if request is None:
+            raise ValueError("研究运行缺少请求，无法持久化")
         research_run_id = str(uuid4())
-        request_data = result.request.model_dump(mode="json")
-        request_data["profile_complete"] = bool(result.request.profile_complete)
-        stock_codes = list(result.request.stock_codes)
+        if run_id:
+            try:
+                research_run_id = str(uuid5(UUID(str(run_id)), "research"))
+            except (ValueError, AttributeError):
+                pass
+        request_data = request.model_dump(mode="json") if hasattr(request, "model_dump") else dict(request)
+        request_data["profile_complete"] = bool(getattr(request, "profile_complete", False))
+        rule_version = next((str(getattr(item, "rule_version", "")) for item in results if getattr(item, "rule_version", "")), "")
+        manifest = {"snapshots": list(snapshot_manifest), "active_members": list(active_members), "exclusions": list(exclusions)}
         connection = self._connection_factory()
         try:
             cursor = connection.cursor()
@@ -314,6 +345,11 @@ class ResearchRunRepository:
                     (research_run_id, agent_run_id, customer_id, conversation_id, request_data,
                      snapshot_manifest, rule_version, status)
                     VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s)
+                    ON CONFLICT (research_run_id) DO UPDATE SET
+                        request_data = EXCLUDED.request_data,
+                        snapshot_manifest = EXCLUDED.snapshot_manifest,
+                        rule_version = EXCLUDED.rule_version,
+                        status = EXCLUDED.status
                     """,
                     (
                         research_run_id,
@@ -321,12 +357,19 @@ class ResearchRunRepository:
                         customer_id,
                         conversation_id,
                         json.dumps(request_data, ensure_ascii=False),
-                        json.dumps(snapshot_manifest, ensure_ascii=False),
-                        result.rule_version,
+                        json.dumps(manifest, ensure_ascii=False),
+                        rule_version,
                         status,
                     ),
                 )
-                for stock_code in stock_codes:
+                cursor.execute(
+                    "DELETE FROM finance.research_results WHERE research_run_id = %s",
+                    (research_run_id,),
+                )
+                for item in results:
+                    item_request = getattr(item, "request", None)
+                    stock_codes = list(getattr(item_request, "stock_codes", []) or [])
+                    stock_code = stock_codes[0] if stock_codes else ""
                     cursor.execute(
                         """
                         INSERT INTO finance.research_results
@@ -337,11 +380,21 @@ class ResearchRunRepository:
                             str(uuid4()),
                             research_run_id,
                             stock_code,
-                            result.action.value,
-                            json.dumps(result.scores, ensure_ascii=False),
-                            json.dumps(result.evidence_ids, ensure_ascii=False),
-                            exclusion_reason,
+                            item.action.value,
+                            json.dumps(item.scores, ensure_ascii=False),
+                            json.dumps(item.evidence_ids, ensure_ascii=False),
+                            "",
                         ),
+                    )
+                for exclusion in exclusions:
+                    cursor.execute(
+                        """
+                        INSERT INTO finance.research_results
+                        (result_id, research_run_id, stock_code, action, scores, fact_ids, exclusion_reason)
+                        VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s)
+                        """,
+                        (str(uuid4()), research_run_id, str(exclusion.get("stock_code", "")),
+                         "数据不足", "{}", "[]", str(exclusion.get("reason", ""))),
                     )
             finally:
                 cursor.close()
@@ -447,6 +500,32 @@ class PostgresAuditStore:
                 run_id=run_id,
                 customer_id=customer_id,
                 conversation_id=conversation_id,
+            )
+        except Exception:
+            return None
+
+    def save_research_run(
+        self,
+        *,
+        request: Any,
+        results: list[Any],
+        snapshot_manifest: list[dict[str, Any]],
+        active_members: list[dict[str, Any]],
+        exclusions: list[dict[str, Any]],
+        run_id: str,
+        customer_id: str,
+        conversation_id: str,
+        status: str,
+    ) -> str | None:
+        """保存一次可重放的多标的研究运行。"""
+        if not self._research_repository:
+            return None
+        try:
+            self._ensure_schema()
+            return self._research_repository.save_many(
+                request=request, results=results, snapshot_manifest=snapshot_manifest,
+                active_members=active_members, exclusions=exclusions, run_id=run_id,
+                customer_id=customer_id, conversation_id=conversation_id, status=status,
             )
         except Exception:
             return None

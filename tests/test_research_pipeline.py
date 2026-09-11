@@ -187,3 +187,13 @@ def test_stock_agent_reports_theme_coverage_shortage():
     })
     assert result["theme_screening"]["status"] == "insufficient_active_coverage"
     assert result["theme_screening"]["candidates"] == []
+
+
+def test_stock_agent_returns_theme_clarification_for_unknown_theme():
+    agent = StockAnalysisAgent(pipeline=_pipeline(), theme_screener=ThemeScreener(_theme_repo(5), ThemeGateway()))
+    result = agent.invoke({
+        "requirement": "推荐新能源主题股票", "resolved_stocks": [], "intent_slots": {},
+        "user_profile": {}, "intent_results": {}, "current_task_intent": "stock_recommendation",
+    })
+    assert "主题" in result["clarification_question"]
+    assert "股票研究暂不可用" not in result["agent_response"]

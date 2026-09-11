@@ -142,11 +142,26 @@ class StockAnalysisAgent(AgentProtocol):
                     "personalization_status": screening.personalization_status,
                     "candidates": [candidate.__dict__ for candidate in screening.ranked_candidates],
                     "pending_leads": screening.pending_leads,
+                    "request": request.model_dump(mode="json"),
+                    "active_members": screening.active_members,
+                    "exclusions": screening.exclusions,
                 }
                 state["theme_screening"] = payload
+                state["theme_screening_status"] = screening.status
+                state["theme_candidates"] = payload["candidates"]
+                state["pending_leads"] = screening.pending_leads
+                state["personalization_status"] = screening.personalization_status
                 state["stock_analysis"] = {}
                 state["technical_analysis"] = {}
-                state["analysis_results"] = []
+                state["analysis_results"] = [
+                    item.model_dump(mode="json") for item in screening.analysis_results
+                ]
+                if screening.facts:
+                    existing = state.get("facts", []) or []
+                    existing_ids = {fact.fact_id for fact in existing}
+                    state["facts"] = existing + [
+                        fact for fact in screening.facts if fact.fact_id not in existing_ids
+                    ]
                 content = (
                     "主题候选研究已完成。"
                     if screening.status == "complete"
@@ -170,7 +185,11 @@ class StockAnalysisAgent(AgentProtocol):
             state["stock_analysis"] = {}
             state["technical_analysis"] = {}
             state["analysis_results"] = []
-            content = f"股票研究暂不可用：{exc}"
+            if "主题" in str(exc):
+                state["clarification_question"] = str(exc)
+                content = f"主题筛选暂不可用：{exc}"
+            else:
+                content = f"股票研究暂不可用：{exc}"
             self._write_intent_result(state, content, "degraded")
             state["agent_response"] = content
             return state

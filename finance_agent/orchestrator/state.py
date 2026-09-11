@@ -50,6 +50,10 @@ class AdvisorState(TypedDict, total=False):
     technical_analysis: Dict[str, Any]
     analysis_results: List[Dict[str, Any]]
     theme_screening: Dict[str, Any]
+    theme_screening_status: str
+    theme_candidates: List[Dict[str, Any]]
+    pending_leads: List[Dict[str, Any]]
+    personalization_status: str
     allocation_result: Dict[str, Any]
     debate_result: Dict[str, Any]
     product_analysis: Dict[str, Any]

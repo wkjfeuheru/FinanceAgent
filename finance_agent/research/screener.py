@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from finance_agent.research.contracts import AnalysisRequest
+from finance_agent.research.contracts import AnalysisRequest, AnalysisResult
 from finance_agent.research.pipeline import ResearchPipeline
 from finance_agent.research.rule_engine import RuleEngine
 from finance_agent.research.snapshot_builder import SnapshotBuilder
@@ -21,6 +21,9 @@ class ThemeCandidate:
     score: float | None
     summary: str
     evidence_ids: list[str]
+    rule_version: str = ""
+    data_quality: str = ""
+    scores: dict[str, float | None] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -29,6 +32,11 @@ class ThemeScreeningResult:
     personalization_status: str
     ranked_candidates: list[ThemeCandidate] = field(default_factory=list)
     pending_leads: list[dict[str, Any]] = field(default_factory=list)
+    request: AnalysisRequest | None = None
+    active_members: list[dict[str, Any]] = field(default_factory=list)
+    exclusions: list[dict[str, Any]] = field(default_factory=list)
+    analysis_results: list[AnalysisResult] = field(default_factory=list)
+    facts: list[Any] = field(default_factory=list)
 
 
 class ThemeScreener:
@@ -49,23 +57,39 @@ class ThemeScreener:
         ]
         complete = bool(str(profile.get("risk_preference", "")).strip() and str(profile.get("holding_period", "")).strip())
         status = "personalized" if complete else "research_candidate"
+        active_manifest = [member.model_dump(mode="json") for member in active]
         if len(active) < 5:
-            return ThemeScreeningResult("insufficient_active_coverage", status, pending_leads=pending)
+            return ThemeScreeningResult(
+                "insufficient_active_coverage", status, pending_leads=pending,
+                request=request, active_members=active_manifest,
+            )
 
         pipeline = ResearchPipeline(
             snapshot_builder=SnapshotBuilder(self._gateway),
             rule_engine=RuleEngine.default(),
         )
         candidates: list[ThemeCandidate] = []
+        analysis_results: list[AnalysisResult] = []
+        facts: list[Any] = []
+        exclusions: list[dict[str, Any]] = []
         for member in active:
             item_request = request.model_copy(update={"stock_codes": [member.stock_code], "profile_complete": complete})
-            result = pipeline.analyze(item_request, user_profile=profile)
+            result, item_facts = pipeline.analyze_with_facts(item_request, user_profile=profile)
+            facts.extend(item_facts)
             if result.action.value == "数据不足":
+                exclusions.append({
+                    "stock_code": member.stock_code,
+                    "reason": result.data_quality,
+                    "fact_ids": list(result.evidence_ids),
+                })
                 continue
+            analysis_results.append(result)
             candidates.append(ThemeCandidate(
                 stock_code=member.stock_code, industry=member.industry,
                 action=result.action.value, score=result.scores.get("total"),
                 summary=result.narrative, evidence_ids=result.evidence_ids,
+                rule_version=result.rule_version, data_quality=result.data_quality,
+                scores=dict(result.scores),
             ))
         candidates.sort(key=lambda item: (item.score is not None, item.score or -1), reverse=True)
         selected: list[ThemeCandidate] = []
@@ -80,5 +104,10 @@ class ThemeScreener:
         if len(selected) < 3:
             return ThemeScreeningResult(
                 "insufficient_eligible_coverage", status, pending_leads=pending,
+                request=request, active_members=active_manifest, exclusions=exclusions,
+                analysis_results=analysis_results, facts=facts,
             )
-        return ThemeScreeningResult("complete", status, selected, pending)
+        return ThemeScreeningResult(
+            "complete", status, selected, pending, request, active_manifest,
+            exclusions, analysis_results, facts,
+        )
