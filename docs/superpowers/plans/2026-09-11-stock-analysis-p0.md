@@ -166,7 +166,9 @@ git commit -m "fix: derive deterministic research scores from raw data"
 - [x] `get_stock_quote` 的估值取数改为 best-effort，并在行情取数成功后立即读取来源元数据（避免被失败的估值取数覆盖 `last_metadata`）。
 - [x] 端到端回归：以中文列 DataFrame 桩驱动真实 `AkshareDataSource` → `fetch_stock_data` → `SnapshotBuilder` → `RuleEngine`，断言三项评分非空、质量状态非 `critical_missing`、行动结论不是“数据不足”。
 
-**已知遗留（不在 P0 范围）：** AKShare 仍不提供日估值接口，纯 AKShare 部署下基本面评分不含 PE/PB；`get_income` 仍返回厂商原生字段（研究路径未消费）。
+**已知遗留（不在 P0 范围）：** ~~AKShare 仍不提供日估值接口，纯 AKShare 部署下基本面评分不含 PE/PB~~ —— **该结论已作废**。它引用的 `ak.stock_a_indicator_lg` 已从 AKShare 1.18.94 中删除，而 `ak.stock_value_em` 按股票代码提供日频 `PE(TTM)`/`PE(静)`/`市净率`/`市销率`/`总市值`/`流通市值`（实测 2111 行 × 13 列，起点 `max(2018-01-02, 上市日)`）。日估值、前复权取源与北交所代码等问题已由 `docs/superpowers/plans/2026-09-11-data-source-coverage-p0.md` 处理，事实核查见 `docs/superpowers/specs/2026-09-11-data-source-coverage-design.md`。`get_income` 仍返回厂商原生字段（研究路径未消费）。
+
+**另注：** 本文件 Task 2 的 Step 7 提交清单（`:149`）已过期——`snapshot_builder.py` 现在依赖同批次新增的 `quality_gates.py`，按原清单提交会得到**无法导入**的模块。该批次已随互咬基线快照 `437235e` 一并入库，详见数据源覆盖计划中的说明。
 
 ## 验证汇总
 

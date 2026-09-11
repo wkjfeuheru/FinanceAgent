@@ -266,23 +266,26 @@ git commit -m "feat: source daily valuation from BaoStock without a token"
 **Interfaces:**
 - Produces: `score_restrictions` 含逐字段项（如 `fundamental_missing:pe_ttm`）；`last_metadata` 新增 `unsupported` 列表。
 
-- [ ] **Step 1: 写入失败测试**
+- [x] **Step 1: 写入失败测试**
 
-1. `scoring.py`：仅缺 PE/PB 时 `score_restrictions` 含 `pe_ttm` 与 `pb` 的逐字段项，且 `fundamental_score` 不为 `None`。
-2. `provider_manager.py`：首个 provider 抛 `UnsupportedProviderCapability` 时，`last_metadata["degraded"] is False` 且 `"unsupported"` 含该 provider 名。
+1. `scoring.py`：仅缺 PE/PB 时 `score_restrictions` 含 `fundamental_missing:pe_ttm` 与 `fundamental_missing:pb`，且 `fundamental_score` 不为 `None`、质量状态不是 `critical_missing`。
+2. `provider_manager.py`：首个 provider 抛 `UnsupportedProviderCapability` 时 `last_metadata["degraded"] is False`、`"unsupported"` 含该 provider 名、`failures` 为空；并另加一条"真实故障仍然置 `degraded`"的反向断言。
 
-- [ ] **Step 2: 验证测试按预期失败**
+- [x] **Step 2: 验证测试按预期失败**
 
-运行：`python -m pytest -q tests/test_research_snapshot_builder.py tests/test_provider_manager.py -k "restriction or unsupported"`
+与本任务合并执行（见 Step 3 的实际改动）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
-1. `scoring.py:149-160`：收集缺失项到限制列表，仅当五项**全缺**时保留既有 `fundamental_metrics`（向后兼容），否则追加逐字段项。PE/PB 缺失**不得**升级为 `critical_missing`。
-2. `provider_manager.py:73`：`except UnsupportedProviderCapability` 分支记入 `unsupported`，`degraded` 只在真实失败时置 `True`。
+1. `scoring.py`：把五个基本面输入收集为 `fundamental_inputs`，逐字段生成 `fundamental_missing:<name>`；五项**全缺**时仍只报 `fundamental_metrics`（向后兼容）。PE 槽位按"完全取不到 PE"判定——只有静态 PE 的情况由质量门禁的 `valuation_not_ttm` 负责，评分层不重复报警。
+2. `provider_manager._call`：新增 `unsupported` 列表，`except UnsupportedProviderCapability` 单独分支（DEBUG 级日志），`degraded` 只看真实失败。`last_metadata` 新增 `unsupported` 键（全局约束允许）。
+3. **计划外但必需的两处一致性修复：**
+   - `quality_gates.valuation_basis` 只认 `pe_ttm`/`pe`，因此**只有静态 PE 的数据源会被误判成"完全没有估值"**；已让它识别 `pe_lyr`。
+   - `narrative.py` 会翻译原因码，逐字段码会被原样渲染成 `fundamental_missing:pe_ttm`；已补中文标签映射（该模块自身契约要求原因码可读）。
 
-- [ ] **Step 4: 验证通过并提交**
+- [x] **Step 4: 验证通过并提交**
 
-运行：`python -m pytest -q tests/test_research_snapshot_builder.py tests/test_provider_manager.py tests/test_research_rule_engine.py`
+实际结果：**7 条新测试**；全量 `python -m pytest -q` → **224 passed**。
 
 ```bash
 git commit -m "feat: record per-field score restrictions and separate unsupported from failure"
@@ -298,24 +301,31 @@ git commit -m "feat: record per-field score restrictions and separate unsupporte
 **Interfaces:**
 - Produces: 新的 `rule_version`；快照 payload 含 `quote.source`。
 
-- [ ] **Step 1: 写入失败测试**
+- [x] **Step 1: 写入失败测试**
 
-断言快照 payload 的 `quote.source` 等于桩 provider 的 `provider_name`；断言 `rule_version` 已递增（不等于旧值）。
+1. 快照 payload 的 `provenance.quote.source` 等于桩 provider 的 `provider_name`，且与 `FactSnapshot.source` 一致。
+2. `load_rules("research_rules/v1")` 仍然可加载（旧审计可重放），`load_rules()` 返回**新**版本，且两个版本的规则内容除 `version` 外完全相同。
 
-- [ ] **Step 2: 验证测试按预期失败**
+- [x] **Step 2: 验证测试按预期失败**
 
-运行：`python -m pytest -q tests/test_research_snapshot_builder.py -k "source or version"`
+与本任务合并执行。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
-bump `rules/v1.json` 的 `rule_version`（因为补上 PE/PB 会改变分数口径），并在 `snapshot_builder.py` 落 `last_metadata["source"]`。**不改** `theme_repository.py` 的快照主键。
+**偏差说明（一半的活已经干完了）：** 侦察发现 `payload["provenance"]["quote"]["source"]` 与 `FactSnapshot.source` **已经**由 P1-P2 落地，因此"落 source"这半只需补回归断言，不需要新增管线。真正的改动是版本：
 
-- [ ] **Step 4: 验证通过并提交**
+1. **新增** `rules/v1.1.json`（内容与 `v1.json` 完全相同，仅 `version` 不同）。**不替换 v1**：`replay.py` 按审计记录里的版本号精确加载，旧记录必须一直可重放。
+2. `rule_engine.py` 新增 `CURRENT_RULES_VERSION` 常量与 `_RULE_FILES` 的第二条目。
+3. **把重复三处的默认版本收敛为单一真源**：此前默认值分别声明在 `load_rules` 的参数、`refresh.py` 的服务默认值、`snapshot_builder.py` 的常量里，容易漂移；现在后两者都引用 `CURRENT_RULES_VERSION`。
+4. **不改** `theme_repository.py` 的快照主键（D13）。
+5. 更新 4 处断言默认版本的测试（`test_research_rule_engine.py`、`test_research_pipeline.py`、`test_research_golden.py`、`test_research_refresh.py`）。测试里用字面量而不是常量，是为了把行为钉住。
 
-运行：`python -m pytest -q tests/test_research_snapshot_builder.py tests/test_research_golden.py tests/test_research_refresh.py`
+- [x] **Step 4: 验证通过并提交**
+
+实际结果：**2 条新测试**；全量 `python -m pytest -q` → **226 passed**。金标夹具（`test_research_golden.py`）分数未变，证明本次改动没有意外改变已有输入的评分。
 
 ```bash
-git commit -m "chore: bump rule version and persist quote provenance"
+git commit -m "chore: add rule version v1.1 and single-source the default version"
 ```
 
 ### 任务 8：回归、联网冒烟与文档收尾
@@ -328,23 +338,23 @@ git commit -m "chore: bump rule version and persist quote provenance"
 **Interfaces:**
 - Produces: 默认跳过的联网冒烟测试；更新后的数据源文档。
 
-- [ ] **Step 1: 写入联网冒烟测试**
+- [x] **Step 1: 写入联网冒烟测试**
 
-`pytest.mark.skipif` 在缺少 `RUN_NETWORK_TESTS=1` 时跳过；断言 `AkshareDataSource.get_daily("600519", adjustment="forward")` 返回 ≥200 行且按日期升序，`get_daily_basic("600519")` 含 `pe_ttm`。标记为网络测试，不进默认 CI。
+新建 `tests/test_provider_smoke.py`（4 个用例，默认跳过，`RUN_NETWORK_TESTS=1` 且 `-m network` 启用）：AKShare 前复权 K 线可达且升序；AKShare 日估值含 `pe_ttm`/`pb` 且 `pe_lyr` 键存在；BaoStock 估值与 AKShare **数量级一致（5% 内）**；北交所被 BaoStock 显式拒绝、由 AKShare 正常服务。同时在 `pyproject.toml` 注册 `network` 标记。
 
-- [ ] **Step 2: 更新 README 的数据源章节**
+- [x] **Step 2: 更新 README 的数据源章节**
 
-记录：默认顺序仍为 `akshare,tushare_mcp,baostock`；AKShare 路径使用新浪源；BaoStock 不支持北交所；估值起点为 `max(2018-01-02, 上市日)`；腾讯源不用于前复权；仅个人研究用途与本地缓存，并注明数据来源与使用限制。同时把 `DATA_PROVIDER_ORDER`、`AKSHARE_ENABLED`、`TUSHARE_ENABLED`、`BAOSTOCK_ENABLED` 补进 README 的环境变量示例块（当前缺失）。
+新增「股票数据源」小节与 `DATA_PROVIDER_ORDER`/`AKSHARE_ENABLED`/`TUSHARE_ENABLED`/`BAOSTOCK_ENABLED`/`QUOTE_CACHE_*` 环境变量（此前这些键在 README 里**完全没有**）。记录：AKShare 走新浪源、东财接口被按 URL 过滤只作回退；腾讯源不参与前复权；前复权基准为新浪/BaoStock 且跨源比对用收益率；三条估值来源及各自限制（东财起点 2018、BaoStock 无北交所、Tushare 才提供股息率）；BaoStock 的北交所与已废止代码行为；缓存位置与 TTL；规则版本 v1.1 及其原因；以及**仅限个人研究、不得再分发**的使用限制（D7）。
 
-- [ ] **Step 3: 修正 p0 文档中的过期结论**
+- [x] **Step 3: 修正 p0 文档中的过期结论**
 
-改写 `docs/superpowers/plans/2026-09-11-stock-analysis-p0.md:169` 的「已知遗留」：把"AKShare 仍不提供日估值接口"改为指向本计划与 spec 的事实核查结论，并注明该结论曾引用的 `stock_a_indicator_lg` 已从 AKShare 1.18.94 删除。同时标注 `:146-151` 的 Step 7 提交清单已过期（`snapshot_builder.py` 依赖 `quality_gates.py`，按原清单提交会得到无法导入的模块），该批次已由 `437235e` 一并入库。
+改写 `2026-09-11-stock-analysis-p0.md:169` 的「已知遗留」：标注"AKShare 不提供日估值接口"**已作废**并说明原因是引用的接口被删除，指向本次的事实核查文档；并注明该文件 `:149` 的 Step 7 提交清单已过期（`snapshot_builder.py` 依赖同批次新增的 `quality_gates.py`，按原清单提交会得到无法导入的模块），该批次已随 `437235e` 入库。
 
-- [ ] **Step 4: 全量验证并提交**
+- [x] **Step 4: 全量验证并提交**
 
-运行：`python -m pytest -q`
-
-预期：全部通过（基线 182 passed，加上本次新增测试）。
+实际结果：
+- 默认全量：**226 passed, 4 skipped**（联网用例正确跳过）。
+- 显式启用联网：`RUN_NETWORK_TESTS=1 pytest -q -m network tests/test_provider_smoke.py` → **4 passed**（17.7s）。这是本次唯一的端到端证据：两条估值路径实测互校一致，北交所路由实测正确。
 
 ```bash
 git commit -m "test: add opt-in network smoke test and refresh data source docs"

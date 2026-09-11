@@ -172,6 +172,18 @@ POSTGRES_CONNECT_TIMEOUT=10
 # TUSHARE_MCP_URL=https://your-tushare-mcp-endpoint?token=your-token
 TUSHARE_MCP_TIMEOUT=30
 
+# 本地股票数据源：按顺序「按方法」降级
+DATA_PROVIDER_ORDER=akshare,tushare_mcp,baostock
+AKSHARE_ENABLED=true
+BAOSTOCK_ENABLED=true
+# Tushare 必须先配置 TUSHARE_MCP_URL 才会启用
+TUSHARE_ENABLED=true
+
+# 行情与估值本地缓存：默认锚定仓库根目录的 .cache/quotes，自定义请用绝对路径
+# QUOTE_CACHE_DIR=/abs/path/to/quotes
+# TTL 设为 0 表示关闭缓存
+QUOTE_CACHE_TTL_SECONDS=3600
+
 # 模型和工作流参数
 INTENT_MODEL_PROVIDER=qwen
 INTENT_MODEL=qwen-turbo
@@ -354,6 +366,17 @@ npm run build
 - PostgreSQL 模式下，`users` 是唯一用户主体表，`conversations`、`user_profiles`、`sessions` 和运行审计记录均通过 `customer_id` 关联到已注册用户，不再保留独立的 `customers` 主体表。
 - Tushare MCP 返回的是最近交易日数据，并非交易所盘中实时行情。
 
+### 股票数据源
+
+- 默认顺序为 `DATA_PROVIDER_ORDER=akshare,tushare_mcp,baostock`，并**按方法**降级：某个源未声明该能力（例如 AKShare 的交易日历）不会标记为“降级”，只有真实取数失败才会。`last_metadata` 里 `unsupported` 与 `failures` 是分开的两项。
+- AKShare 日线走新浪源 `stock_zh_a_daily`；东财的 `stock_zh_a_hist` 在部分网络环境下会被按 URL 过滤（TCP 与 TLS 正常但请求被直接关闭），同包内无法修复，因此只作回退。**腾讯源不参与前复权**：它的复权口径与新浪/BaoStock 不同（同一交易日收盘价 1444.42 vs 1435.70），混用会让回测不可复现。
+- 前复权基准口径为**新浪 / BaoStock**（两者逐字节一致）。跨源比对请比**区间收益率**，不要比绝对价格——复权锚点不同是合法差异。
+- 日估值来源：AKShare `stock_value_em`（东财；起点为 `max(2018-01-02, 上市日)`；**不含股息率**）、BaoStock `peTTM/pbMRQ`（免 token，仅沪深）、Tushare `daily_basic`（需 ≥2000 积分；是唯一提供股息率 `dv_ratio`/`dv_ttm` 的来源）。
+- BaoStock **不支持北交所**（`bj.` 报错、`sh.`/`sz.` 会静默返回 0 行），本仓库对北交所代码显式报错。已废止的 `43`/`83`/`87` 开头代码同样显式报错而**不做猜测映射**：末三位规则会把 `830799`（诺思兰德，现行为 `920047`）错指到另一家公司。
+- 行情与估值按 `(provider, code, 复权口径, 日期窗口)` 落盘缓存，默认 TTL 3600 秒，位于仓库根目录 `.cache/quotes`（`QUOTE_CACHE_TTL_SECONDS=0` 可关闭）。缓存写入失败只记告警，不影响取数。
+- 规则版本当前为 `research_rules/v1.1`：补上 PE/PB 后基本面评分由 5 项而非 3 项平均而成，口径变化必须换版本号，否则同一 `(theme, stock, rule_version, as_of)` 键上的 upsert 会覆盖旧口径的历史快照。旧版本 `research_rules/v1` 仍然保留，审计记录按其中记录的版本号精确重放。
+- **使用限制：** 这些第三方行情数据仅供个人研究使用，不得再分发；本地缓存亦仅供本机使用。
+
 ## 安全注意事项
 
 - 必须使用 HTTPS 或受信任的内网传输真实登录令牌。
@@ -378,3 +401,9 @@ npm run build
 ### Tushare MCP 或行情数据不可用
 
 确认 `TUSHARE_MCP_URL` 包含有效端点和 token，并检查 `TUSHARE_MCP_TIMEOUT`。数据源返回的是最近交易日数据，不保证是交易所盘中实时行情。
+
+若 **K 线为空**：先确认 AKShare 的新浪源接口可达（`ak.stock_zh_a_daily`）。东财的 K 线接口在部分网络环境下会被按 URL 过滤，属于环境问题，换 header、换镜像域名都无效。
+
+若 **估值缺失**：确认 `ak.stock_value_em` 或 BaoStock 是否可达，并查看快照的限制项——缺少 PE/PB 现在会以 `fundamental_missing:pe_ttm` 这样的**逐字段**原因码记录，而不是静默降级。注意北交所与已废止代码会被显式拒绝，那属于预期行为。
+
+若 **本地缓存干扰排查**：把 `QUOTE_CACHE_TTL_SECONDS` 设为 `0` 关闭缓存，或删除仓库根目录下的 `.cache/quotes`。

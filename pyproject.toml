@@ -60,3 +60,6 @@ include = ["finance_agent*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "network: 需要真实第三方接口的冒烟测试（默认跳过，设置 RUN_NETWORK_TESTS=1 启用）",
+]
