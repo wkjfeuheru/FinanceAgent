@@ -10,13 +10,58 @@ from finance_agent.data.normalization import (
     normalize_basic_records,
     normalize_daily_records,
     normalize_trade_cal_records,
+    normalize_valuation_records,
 )
 from finance_agent.data.providers import ProviderUnavailableError, UnsupportedProviderCapability
+from finance_agent.data.quote_cache import read as cache_read
+from finance_agent.data.quote_cache import write as cache_write
+
+# 估值字段在 adjustflag=3/2/1 三种口径下数值完全相同（实测），因为它们是按
+# 不复权价计算的，与复权口径无关。因此这里固定用 3（不复权），并与行情请求分离。
+_VALUATION_FIELDS = "date,peTTM,pbMRQ,psTTM,pcfNcfTTM"
+_VALUATION_KEYS = ("pe_ttm", "pb", "ps_ttm")
 
 
 def _date(value: str, fallback: datetime) -> str:
     """将日期转换为 BaoStock 所需的 YYYY-MM-DD 格式。"""
     return value or fallback.strftime("%Y-%m-%d")
+
+
+def _has_valuation(row: dict[str, Any]) -> bool:
+    """判断该行是否含真实估值数值。
+
+    BaoStock 在停牌或无数据的交易日会返回空串。若不过滤，``_latest_daily_record``
+    取到的"最新一根"可能全是空值，估值看起来仍然缺失。
+    """
+    for key in _VALUATION_KEYS:
+        value = row.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            float(value)
+        except (TypeError, ValueError):
+            continue
+        return True
+    return False
+
+
+def _coerce_valuation(row: dict[str, Any]) -> dict[str, Any]:
+    """把估值字段转成数值。
+
+    BaoStock 的 socket 协议把所有字段返回为**字符串**（``"18.0"``），而 AKShare
+    返回 float。同一能力在两个 provider 之间形状不一致会直接泄漏到报价契约里
+    （``quote["pe"]`` 变成字符串），因此在适配器出口统一。
+    """
+    coerced = dict(row)
+    for key in _VALUATION_KEYS:
+        value = coerced.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            coerced[key] = float(value)
+        except (TypeError, ValueError):
+            pass
+    return coerced
 
 
 class BaostockDataSource:
@@ -93,8 +138,39 @@ class BaostockDataSource:
             self.bs.logout()
 
     def get_daily_basic(self, stock_code: str, start_date: str = "", end_date: str = "") -> list[dict[str, Any]]:
-        """BaoStock 不提供与 Tushare 对齐的日估值接口。"""
-        raise UnsupportedProviderCapability("BaoStock 不支持统一日估值接口")
+        """获取日估值指标（peTTM/pbMRQ/psTTM），免 token 的第二路估值来源。
+
+        BaoStock 的估值字段可以与行情**在同一次请求**里返回，但这里只取估值，
+        以保持与其它 provider 的能力边界一致。估值字段在三种复权口径下数值完全
+        相同，故固定 ``adjustflag="3"``。
+
+        注意 ``frequency`` 只能是 ``d``：周线/月线带估值字段会被服务端硬拒
+        （``error_code=10004012``「周线指标参数传入错误:peTTM」）。
+        """
+        symbol = baostock_symbol(stock_code)
+        now = datetime.now()
+        cache_key = ("baostock", symbol, start_date, end_date)
+        cached = cache_read("valuation", cache_key)
+        if cached:
+            return cached
+        self._login()
+        try:
+            result = self.bs.query_history_k_data_plus(
+                symbol,
+                _VALUATION_FIELDS,
+                start_date=_date(start_date, now - timedelta(days=365)),
+                end_date=_date(end_date, now),
+                frequency="d",
+                adjustflag="3",
+            )
+            normalized = normalize_valuation_records(self._query(result))
+        finally:
+            self.bs.logout()
+        rows = [_coerce_valuation(row) for row in normalized if _has_valuation(row)]
+        if not rows:
+            raise ProviderUnavailableError(f"BaoStock 未取到 {symbol} 的估值数据")
+        cache_write("valuation", cache_key, rows)
+        return rows
 
     def get_financial_indicator(self, stock_code: str) -> list[dict[str, Any]]:
         """获取 BaoStock 财务指标。"""
