@@ -336,7 +336,8 @@ class AkshareDataSource:
         record = {
             "as_of": as_of,
             "channels": channels,
-            "note": "当日快照；历史净流入因数据源披露口径变更自2024-09起停更，本接口不提供历史序列。",
+            "note": "自2024-08起监管调整，北向实时净买额不再披露（数据源该列恒为0）；"
+                    "历史净流入序列亦自2024-09停更。本接口只提供当日通道快照与成分涨跌家数。",
         }
         cache_write("northbound", cache_key, record)
         return record

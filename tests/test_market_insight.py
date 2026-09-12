@@ -96,13 +96,13 @@ def test_capital_flow_mode_renders_channels_and_disclosure(monkeypatch):
         "as_of": "2026-09-11",
         "channels": [
             {"board": "沪股通", "direction": "northbound", "net_buy_yi": 5.2,
-             "advancing": 203, "declining": 1425},
+             "advancing": 203, "declining": 1425, "disclosed": True},
             {"board": "深股通", "direction": "northbound", "net_buy_yi": 12.5,
-             "advancing": 231, "declining": 1633},
+             "advancing": 231, "declining": 1633, "disclosed": True},
         ],
         "net_buy_yi_total": 17.7,
         "limitations": [],
-        "note": "当日快照；历史净流入自2024-09起停更。",
+        "note": "自2024-08起监管调整，北向实时净买额不再披露。",
     })
 
     state = MarketInsightAgent().invoke({
@@ -113,8 +113,31 @@ def test_capital_flow_mode_renders_channels_and_disclosure(monkeypatch):
     content = state["intent_results"]["market_insight"]["content"]
     assert "沪股通" in content and "5.20 亿元" in content
     assert "北向合计净买额：17.70 亿元" in content
-    assert "停更" in content          # 数据边界必须披露
+    assert "不再披露" in content          # 数据边界必须披露
     assert state["market_insight"]["mode"] == "capital_flow"
+
+
+def test_capital_flow_shows_undisclosed_instead_of_zero(monkeypatch):
+    """未披露的通道不得渲染成 '0.00 亿元'，否则会被误读为零净买入。"""
+    monkeypatch.setattr(market_insight_module, "get_northbound_data", lambda: {
+        "as_of": "2026-09-11",
+        "channels": [
+            {"board": "沪股通", "direction": "northbound", "net_buy_yi": 0.0,
+             "advancing": 203, "declining": 1425, "disclosed": False},
+        ],
+        "net_buy_yi_total": None,
+        "limitations": [],
+        "note": "自2024-08起监管调整，北向实时净买额不再披露。",
+    })
+
+    state = MarketInsightAgent().invoke({
+        "requirement": "北向资金", "current_task_intent": "market_insight",
+        "task_context": {"execution_mode": "capital_flow"}, "intent_results": {},
+    })
+
+    content = state["intent_results"]["market_insight"]["content"]
+    assert "未披露" in content
+    assert "0.00 亿元" not in content
 
 
 def test_partial_failures_are_disclosed_not_faked(monkeypatch):

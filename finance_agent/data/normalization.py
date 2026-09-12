@@ -371,6 +371,11 @@ def normalize_northbound_records(payload: Any) -> list[dict[str, Any]]:
             "advancing": int(_as_number(unified.get("advancing")) or 0),
             "declining": int(_as_number(unified.get("declining")) or 0),
         }
+        # 自 2024-08 起因监管调整，北向实时净买额不再披露；数据源仍返回该列但恒为
+        # 0，同时当日资金余额也归零。若把 0 当作"零净买入"会误导，故显式标记未披露。
+        channel["disclosed"] = not (
+            channel["net_buy_yi"] == 0 and channel["fund_inflow_yi"] == 0
+        )
         if channel["board"]:
             channels.append(channel)
     return channels

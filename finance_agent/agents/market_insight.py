@@ -179,10 +179,14 @@ class MarketInsightAgent(ProceduralAgent):
             return ""
         lines = ["### 北向资金" + (f"（{as_of}）" if as_of else "")]
         for channel in channels:
+            if channel.get("disclosed") is False:
+                amount = "未披露"
+            else:
+                amount = f"{_num(channel.get('net_buy_yi'))} 亿元"
             lines.append(
-                f"- {channel.get('board')}：当日成交净买额 "
-                f"{_num(channel.get('net_buy_yi'))} 亿元（成分上涨 "
-                f"{_num(channel.get('advancing'))} 家，下跌 {_num(channel.get('declining'))} 家）"
+                f"- {channel.get('board')}：当日成交净买额 {amount}"
+                f"（成分上涨 {_num(channel.get('advancing'))} 家，"
+                f"下跌 {_num(channel.get('declining'))} 家）"
             )
         total = data.get("net_buy_yi_total")
         if total is not None:

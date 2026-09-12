@@ -97,10 +97,25 @@ def test_normalize_breadth_record_returns_none_without_advancing_declining():
     assert normalize_breadth_record("not-a-list") is None
 
 
-def test_normalize_northbound_keeps_northbound_channels_only():
+def test_normalize_northbound_marks_undisclosed_zero_flow():
+    """北向实时净买额自 2024-08 起不再披露（数据源恒返回 0），必须标记未披露。"""
     payload = [
         {"交易日": "2026-09-11", "类型": "沪港通", "板块": "沪股通", "资金方向": "北向",
          "成交净买额": 0.0, "资金净流入": 0.0, "上涨数": 203, "下跌数": 1425},
+        {"交易日": "2026-09-11", "类型": "深港通", "板块": "深股通", "资金方向": "北向",
+         "成交净买额": 12.5, "资金净流入": 88.0, "上涨数": 231, "下跌数": 1633},
+    ]
+
+    channels = normalize_northbound_records(payload)
+
+    assert channels[0]["disclosed"] is False
+    assert channels[1]["disclosed"] is True
+
+
+def test_normalize_northbound_keeps_northbound_channels_only():
+    payload = [
+        {"交易日": "2026-09-11", "类型": "沪港通", "板块": "沪股通", "资金方向": "北向",
+         "成交净买额": 5.2, "资金净流入": 10.0, "上涨数": 203, "下跌数": 1425},
         {"交易日": "2026-09-11", "类型": "沪港通", "板块": "港股通(沪)", "资金方向": "南向",
          "成交净买额": 31.9, "资金净流入": 420.0, "上涨数": 164, "下跌数": 480},
         {"交易日": "2026-09-11", "类型": "深港通", "板块": "深股通", "资金方向": "北向",
@@ -111,7 +126,7 @@ def test_normalize_northbound_keeps_northbound_channels_only():
 
     assert [channel["board"] for channel in channels] == ["沪股通", "深股通"]
     assert all(channel["direction"] == "northbound" for channel in channels)
-    assert channels[0]["net_buy_yi"] == 0.0
+    assert channels[0]["net_buy_yi"] == 5.2
     assert channels[1]["fund_inflow_yi"] == 88.0
     assert channels[0]["as_of"] == "2026-09-11"
 

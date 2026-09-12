@@ -116,8 +116,9 @@ def get_northbound_data() -> dict[str, Any]:
         snapshot = {}
     channels = list((snapshot or {}).get("channels", []) or [])
     net_total = None
-    if channels:
-        values = [channel.get("net_buy_yi") for channel in channels]
+    disclosed = [channel for channel in channels if channel.get("disclosed")]
+    if disclosed:
+        values = [channel.get("net_buy_yi") for channel in disclosed]
         if all(isinstance(value, (int, float)) for value in values):
             net_total = round(sum(values), 2)
     return {
