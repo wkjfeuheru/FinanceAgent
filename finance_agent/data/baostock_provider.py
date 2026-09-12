@@ -5,10 +5,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
-from finance_agent.data.board_codes import baostock_symbol
+from finance_agent.data.board_codes import baostock_symbol, canonical_index
 from finance_agent.data.normalization import (
     normalize_basic_records,
     normalize_daily_records,
+    normalize_index_daily_records,
     normalize_trade_cal_records,
     normalize_valuation_records,
 )
@@ -189,3 +190,43 @@ class BaostockDataSource:
             return normalize_trade_cal_records(self._query(result))
         finally:
             self.bs.logout()
+
+    def get_index_daily(
+        self,
+        index_symbol: str,
+        start_date: str = "",
+        end_date: str = "",
+    ) -> list[dict[str, Any]]:
+        """获取指数日线（免 token 的指数第二来源，实测 2026-09-12 可用）。"""
+        symbol = canonical_index(index_symbol)
+        # canonical_index 出口是 sh000001；BaoStock 用 sh.000001。
+        baostock_symbol_form = f"{symbol[:2]}.{symbol[2:]}"
+        now = datetime.now()
+        cache_key = ("baostock", symbol, start_date, end_date)
+        cached = cache_read("index_daily", cache_key)
+        if cached:
+            return cached
+        self._login()
+        try:
+            result = self.bs.query_history_k_data_plus(
+                baostock_symbol_form,
+                "date,open,high,low,close,volume,amount,pctChg",
+                start_date=_date(start_date, now - timedelta(days=365)),
+                end_date=_date(end_date, now),
+                frequency="d",
+            )
+            rows = normalize_index_daily_records(self._query(result))
+        finally:
+            self.bs.logout()
+        if not rows:
+            raise ProviderUnavailableError(f"BaoStock 未取到指数 {symbol} 的日线数据")
+        cache_write("index_daily", cache_key, rows)
+        return rows
+
+    def get_market_breadth(self) -> Any:
+        """BaoStock 不提供市场宽度快照。"""
+        raise UnsupportedProviderCapability("BaoStock 不提供市场宽度接口")
+
+    def get_northbound_flow(self) -> Any:
+        """BaoStock 不提供北向资金数据。"""
+        raise UnsupportedProviderCapability("BaoStock 不提供北向资金接口")

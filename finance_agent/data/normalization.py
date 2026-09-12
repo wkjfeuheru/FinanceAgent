@@ -84,6 +84,33 @@ TRADE_CAL_ALIASES: dict[str, tuple[str, ...]] = {
     "is_open": ("is_open", "is_trading_day", "交易状态"),
 }
 
+# 统一指数日线路径：与 DAILY_ALIASES 相同的统一字段（新浪指数源 date/volume）。
+INDEX_DAILY_ALIASES: dict[str, tuple[str, ...]] = DAILY_ALIASES
+
+# 乐咕市场宽度的中文标签 → 统一计数键。
+BREADTH_LABELS: dict[str, str] = {
+    "上涨": "advancing",
+    "下跌": "declining",
+    "涨停": "limit_up",
+    "跌停": "limit_down",
+    "平盘": "flat",
+    "停牌": "suspended",
+    "活跃度": "activity",
+    "统计日期": "as_of",
+}
+
+# 东财北向汇总的中文标签 → 统一通道键。
+NORTHBOUND_LABELS: dict[str, str] = {
+    "交易日": "as_of",
+    "类型": "connect_type",
+    "板块": "board",
+    "资金方向": "direction",
+    "成交净买额": "net_buy_yi",
+    "资金净流入": "fund_inflow_yi",
+    "上涨数": "advancing",
+    "下跌数": "declining",
+}
+
 _LIST_KEYS = ("data", "items", "results", "list", "records")
 
 
@@ -248,16 +275,123 @@ def normalize_trade_cal_records(payload: Any) -> Any:
     return _normalize(payload, TRADE_CAL_ALIASES, date_key="cal_date")
 
 
+def normalize_index_daily_records(payload: Any) -> Any:
+    """统一指数日线记录（trade_date/open/high/low/close/vol/amount）。"""
+    return _normalize(payload, INDEX_DAILY_ALIASES, date_key="trade_date")
+
+
+def _as_number(value: Any) -> float | None:
+    """把数值或带百分号的文本转为 float；不可解析时返回 None。"""
+    if _is_missing(value):
+        return None
+    if isinstance(value, (int, float)):
+        return None if (isinstance(value, float) and isnan(value)) else float(value)
+    text = str(value).strip().replace(",", "").replace("%", "")
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def normalize_breadth_record(payload: Any) -> dict[str, Any] | None:
+    """把乐咕两列宽表（项目/数值）转为统一宽度快照。
+
+    原始形态是 ``[(“上涨”, 604), (“活跃度”, “11.57%”), (“统计日期”, “2026-09-11 15:00”)]``；
+    出口为 ``advancing/declining/limit_up/limit_down/flat/suspended``（家数，int）
+    与 ``activity``（百分比数值）、``as_of``（ISO 日期文本）。
+    """
+    rows = payload
+    if isinstance(payload, dict):
+        for key in _LIST_KEYS:
+            if isinstance(payload.get(key), list):
+                rows = payload[key]
+                break
+        else:
+            rows = None
+    if not isinstance(rows, list):
+        return None
+    lookup: dict[str, Any] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        items = list(row.values())
+        if len(items) < 2:
+            continue
+        label, value = str(items[0]).strip(), items[1]
+        if label:
+            lookup[label] = value
+    if not lookup:
+        return None
+    record: dict[str, Any] = {}
+    for source, target in BREADTH_LABELS.items():
+        if source not in lookup:
+            continue
+        if target == "as_of":
+            record["as_of"] = _iso_date(str(lookup[source]).split(" ")[0])
+        else:
+            numeric = _as_number(lookup[source])
+            if numeric is not None:
+                record[target] = numeric
+    for key in ("advancing", "declining", "limit_up", "limit_down", "flat", "suspended"):
+        record[key] = int(record.get(key) or 0)
+    if not any(record.get(key) for key in ("advancing", "declining")):
+        return None
+    return record
+
+
+def normalize_northbound_records(payload: Any) -> list[dict[str, Any]]:
+    """把东财北向汇总表转为统一通道记录（金额单位：亿元）。
+
+    只保留 ``资金方向 == 北向`` 的通道（沪股通/深股通）；南向通道不进北向快照。
+    """
+    rows = payload
+    if isinstance(payload, dict):
+        for key in _LIST_KEYS:
+            if isinstance(payload.get(key), list):
+                rows = payload[key]
+                break
+    if not isinstance(rows, list):
+        return []
+    channels: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        unified: dict[str, Any] = {}
+        for source, target in NORTHBOUND_LABELS.items():
+            if source in row:
+                unified[target] = row[source]
+        if str(unified.get("direction", "")).strip() != "北向":
+            continue
+        channel = {
+            "board": str(unified.get("board", "")).strip(),
+            "direction": "northbound",
+            "as_of": _iso_date(unified.get("as_of")),
+            "net_buy_yi": _as_number(unified.get("net_buy_yi")),
+            "fund_inflow_yi": _as_number(unified.get("fund_inflow_yi")),
+            "advancing": int(_as_number(unified.get("advancing")) or 0),
+            "declining": int(_as_number(unified.get("declining")) or 0),
+        }
+        if channel["board"]:
+            channels.append(channel)
+    return channels
+
+
 __all__ = [
     "BASIC_ALIASES",
+    "BREADTH_LABELS",
     "DAILY_ALIASES",
     "FINANCIAL_ALIASES",
     "FINANCIAL_LABEL_PATTERNS",
+    "INDEX_DAILY_ALIASES",
+    "NORTHBOUND_LABELS",
     "TRADE_CAL_ALIASES",
     "VALUATION_ALIASES",
     "normalize_basic_records",
+    "normalize_breadth_record",
     "normalize_daily_records",
     "normalize_financial_records",
+    "normalize_index_daily_records",
+    "normalize_northbound_records",
     "normalize_trade_cal_records",
     "normalize_valuation_records",
 ]

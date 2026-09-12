@@ -128,6 +128,23 @@ class ProviderManager:
         """获取交易日历。"""
         return self._call("get_trade_cal", start_date, end_date)
 
+    def get_index_daily(
+        self,
+        index_symbol: str,
+        start_date: str = "",
+        end_date: str = "",
+    ) -> Any:
+        """获取指数日线（指数符号须带市场前缀，如 ``sh000001``）。"""
+        return self._call("get_index_daily", index_symbol, start_date, end_date)
+
+    def get_market_breadth(self) -> Any:
+        """获取市场宽度（涨跌家数/涨跌停/活跃度，最近交易日快照）。"""
+        return self._call("get_market_breadth")
+
+    def get_northbound_flow(self) -> Any:
+        """获取北向资金当日通道快照（金额单位：亿元）。"""
+        return self._call("get_northbound_flow")
+
 
 _manager_instance: ProviderManager | None = None
 _manager_lock = threading.Lock()

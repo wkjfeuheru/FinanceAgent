@@ -52,6 +52,23 @@ class StockDataProvider(Protocol):
         """获取交易日历。"""
         ...
 
+    def get_index_daily(
+        self,
+        index_symbol: str,
+        start_date: str = "",
+        end_date: str = "",
+    ) -> Any:
+        """获取指数日线行情（指数符号须带市场前缀，如 ``sh000001``）。"""
+        ...
+
+    def get_market_breadth(self) -> Any:
+        """获取市场宽度（涨跌家数/涨跌停/活跃度，最近交易日快照）。"""
+        ...
+
+    def get_northbound_flow(self) -> Any:
+        """获取北向资金当日通道快照（金额单位：亿元）。"""
+        ...
+
 
 class UnsupportedProviderCapability(ProviderError):
     """Provider 不支持请求的能力。"""

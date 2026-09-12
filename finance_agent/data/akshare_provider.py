@@ -17,11 +17,14 @@ import time
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
-from finance_agent.data.board_codes import ensure_current_code, sina_symbol
+from finance_agent.data.board_codes import canonical_index, ensure_current_code, sina_symbol
 from finance_agent.data.normalization import (
     normalize_basic_records,
+    normalize_breadth_record,
     normalize_daily_records,
     normalize_financial_records,
+    normalize_index_daily_records,
+    normalize_northbound_records,
     normalize_valuation_records,
 )
 from finance_agent.data.providers import ProviderUnavailableError, UnsupportedProviderCapability
@@ -249,3 +252,91 @@ class AkshareDataSource:
     def get_trade_cal(self, start_date: str = "", end_date: str = "") -> list[dict[str, Any]]:
         """获取交易日历；AKShare 适配器暂不声明该能力。"""
         raise UnsupportedProviderCapability("AKShare 当前未提供统一交易日历接口")
+
+    def get_index_daily(
+        self,
+        index_symbol: str,
+        start_date: str = "",
+        end_date: str = "",
+    ) -> list[dict[str, Any]]:
+        """获取指数日线（新浪源 ``stock_zh_index_daily``）。
+
+        实测 2026-09-12：上证/深证成指/创业板指/科创50/沪深300 均可取。
+        东财 ``stock_zh_index_spot_em`` 在本网络环境被按 URL 过滤（与东财 K 线
+        同因），因此只走新浪源。
+        """
+        symbol = canonical_index(index_symbol)
+        cache_key = ("akshare", symbol, start_date, end_date)
+        cached = cache_read("index_daily", cache_key)
+        if cached:
+            return cached
+        fetch = getattr(self.ak, "stock_zh_index_daily", None)
+        if not callable(fetch):
+            raise UnsupportedProviderCapability("AKShare 该版本未提供 stock_zh_index_daily 接口")
+        try:
+            rows = normalize_index_daily_records(_records(fetch(symbol=symbol)))
+        except Exception as exc:  # provider 边界统一处理第三方异常
+            raise ProviderUnavailableError(f"AKShare 取指数 {symbol} 日线失败: {exc}") from exc
+        start = _iso_bound(start_date)
+        end = _iso_bound(end_date)
+        if start or end:
+            rows = [
+                row for row in rows
+                if (not start or str(row.get("trade_date", "")) >= start)
+                and (not end or str(row.get("trade_date", "")) <= end)
+            ]
+        if not rows:
+            raise ProviderUnavailableError(f"AKShare 未取到指数 {symbol} 的日线数据")
+        cache_write("index_daily", cache_key, rows)
+        return rows
+
+    def get_market_breadth(self) -> dict[str, Any]:
+        """获取市场宽度（乐咕 ``stock_market_activity_legu``：涨跌家数/涨跌停/活跃度）。
+
+        实测 2026-09-12：返回两列宽表（项目/数值），统计日期为最近交易日 15:00。
+        """
+        fetch = getattr(self.ak, "stock_market_activity_legu", None)
+        if not callable(fetch):
+            raise UnsupportedProviderCapability("AKShare 该版本未提供 stock_market_activity_legu 接口")
+        cache_key = ("akshare", "breadth")
+        cached = cache_read("breadth", cache_key)
+        if cached:
+            return cached
+        try:
+            record = normalize_breadth_record(_records(fetch()))
+        except Exception as exc:
+            raise ProviderUnavailableError(f"AKShare 取市场宽度失败: {exc}") from exc
+        if not record:
+            raise ProviderUnavailableError("AKShare 市场宽度返回空数据")
+        cache_write("breadth", cache_key, record)
+        return record
+
+    def get_northbound_flow(self) -> dict[str, Any]:
+        """获取北向资金当日通道快照（东财 ``stock_hsgt_fund_flow_summary_em``）。
+
+        实测 2026-09-12：返回沪股通/深股通（北向）与港股通（南向）当日净买额
+        （单位亿元）与成分涨跌家数；本方法只保留北向通道。
+        历史净流入自 2024-09 起因披露口径变更停更，因此**只提供当日快照**，
+        不提供历史序列。
+        """
+        fetch = getattr(self.ak, "stock_hsgt_fund_flow_summary_em", None)
+        if not callable(fetch):
+            raise UnsupportedProviderCapability("AKShare 该版本未提供 stock_hsgt_fund_flow_summary_em 接口")
+        cache_key = ("akshare", "northbound")
+        cached = cache_read("northbound", cache_key)
+        if cached:
+            return cached
+        try:
+            channels = normalize_northbound_records(_records(fetch()))
+        except Exception as exc:
+            raise ProviderUnavailableError(f"AKShare 取北向资金失败: {exc}") from exc
+        if not channels:
+            raise ProviderUnavailableError("AKShare 北向资金返回空数据")
+        as_of = next((channel["as_of"] for channel in channels if channel.get("as_of")), "")
+        record = {
+            "as_of": as_of,
+            "channels": channels,
+            "note": "当日快照；历史净流入因数据源披露口径变更自2024-09起停更，本接口不提供历史序列。",
+        }
+        cache_write("northbound", cache_key, record)
+        return record

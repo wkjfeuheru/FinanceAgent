@@ -88,9 +88,59 @@ def baostock_symbol(value: str) -> str:
     return f"{market}.{code}"
 
 
+# ── 指数符号命名空间 ──────────────────────────────────────────────────────────
+# 指数与股票共用 6 位数字形态（指数 000001 vs 股票 000001 平安银行），必须
+# 由显式前缀区分：sh000001/sz399300 这类带市场前缀的写法才视为指数，
+# 纯数字一律走股票链，绝不猜测。
+
+#: 主要指数的规范符号 → 中文名（新浪源可直接消费 sh000001 形态）。
+INDEX_SYMBOLS: dict[str, str] = {
+    "sh000001": "上证指数",
+    "sz399001": "深证成指",
+    "sz399006": "创业板指",
+    "sh000688": "科创50",
+    "sh000300": "沪深300",
+    "sh000905": "中证500",
+    "sh000852": "中证1000",
+}
+
+
+def is_index_symbol(value: str) -> bool:
+    """判断是否为带市场前缀的指数符号（``sh000001`` / ``sh.000001`` / ``SH000001``）。"""
+    text = str(value or "").strip().lower()
+    for prefix in ("sh", "sz"):
+        if text.startswith(prefix):
+            digits = text[len(prefix):].lstrip(".")
+            return len(digits) == 6 and digits.isdigit()
+    return False
+
+
+def canonical_index(value: str) -> str:
+    """把指数写法归一为 ``sh000001`` 形态；非指数符号时抛错。
+
+    兼容 ``sh000001`` / ``sh.000001`` / ``000001.SH`` / 中文名（"上证指数"）。
+    """
+    text = str(value or "").strip().lower()
+    for name, symbol in INDEX_SYMBOLS.items():
+        if text == name or text == str(INDEX_SYMBOLS[name]):
+            return name
+    if text.endswith((".sh", ".sz")):
+        text = text[-2:] + text[:6].replace(".", "")
+        if is_index_symbol(text):
+            return text
+    if is_index_symbol(text):
+        return text.replace(".", "")
+    raise UnsupportedProviderCapability(
+        f"无法识别的指数符号：{value}（请使用 sh000001 这类带市场前缀的写法或内置指数名）"
+    )
+
+
 __all__ = [
+    "INDEX_SYMBOLS",
     "baostock_symbol",
+    "canonical_index",
     "ensure_current_code",
+    "is_index_symbol",
     "is_legacy_bj",
     "market_of",
     "normalize_code",
