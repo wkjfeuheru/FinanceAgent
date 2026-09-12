@@ -23,6 +23,7 @@ class TaskKind(str, Enum):
     """任务类型，对应各专业 Agent 的业务边界。"""
 
     STOCK_ANALYSIS = "stock_analysis"
+    MARKET_INSIGHT = "market_insight"
     ASSET_ALLOCATION = "asset_allocation"
     PRODUCT_ANALYSIS = "product_analysis"
     CASUAL_CHAT = "casual_chat"
@@ -34,7 +35,8 @@ class TaskKind(str, Enum):
 class IntentKind(str, Enum):
     """用户请求的业务意图。"""
 
-    MARKET_QUERY = "market_query"
+    MARKET_INSIGHT = "market_insight"
+    STOCK_ANALYSIS = "stock_analysis"
     STOCK_RECOMMENDATION = "stock_recommendation"
     ASSET_ALLOCATION = "asset_allocation"
     PRODUCT_ANALYSIS = "product_analysis"

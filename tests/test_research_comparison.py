@@ -96,7 +96,7 @@ def test_stock_agent_publishes_two_conclusions_and_run_level_request():
     state = agent.invoke({
         "requirement": "比较600519和600036哪个好",
         "resolved_stocks": [{"code": "600519"}, {"code": "600036"}],
-        "user_profile": {}, "intent_results": {}, "current_task_intent": "market_query",
+        "user_profile": {}, "intent_results": {}, "current_task_intent": "stock_analysis",
     })
 
     assert len(state["analysis_results"]) == 2
@@ -114,7 +114,7 @@ def _audit_state() -> tuple[dict, dict]:
     state = agent.invoke({
         "requirement": "比较600519和600036哪个好",
         "resolved_stocks": [{"code": "600519"}, {"code": "600036"}],
-        "user_profile": {}, "intent_results": {}, "current_task_intent": "market_query",
+        "user_profile": {}, "intent_results": {}, "current_task_intent": "stock_analysis",
         "run_id": "run-1", "trace_id": "trace-1",
         "customer_id": "CUST001", "thread_id": "conv-1",
     })

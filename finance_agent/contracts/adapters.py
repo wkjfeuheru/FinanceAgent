@@ -9,7 +9,8 @@ from finance_agent.contracts.schema.models import DispatchPlan, Task
 
 
 _EXPERT_BY_INTENT = {
-    IntentKind.MARKET_QUERY: "stock_analysis",
+    IntentKind.MARKET_INSIGHT: "market_insight",
+    IntentKind.STOCK_ANALYSIS: "stock_analysis",
     IntentKind.STOCK_RECOMMENDATION: "stock_analysis",
     IntentKind.ASSET_ALLOCATION: "asset_allocation",
     IntentKind.PRODUCT_ANALYSIS: "product_analysis",
@@ -47,7 +48,7 @@ def normalize_dispatch_plan(
         ))
     stock_tasks = [
         task.task_id for task in tasks
-        if task.intent in {IntentKind.MARKET_QUERY, IntentKind.STOCK_RECOMMENDATION}
+        if task.intent in {IntentKind.STOCK_ANALYSIS, IntentKind.STOCK_RECOMMENDATION}
     ]
     for task in tasks:
         if task.intent is IntentKind.ASSET_ALLOCATION and stock_tasks:

@@ -13,10 +13,10 @@ from finance_agent.orchestrator.scheduler import (
 def _task(task_id="task-1", depends_on=None):
     return Task(
         task_id=task_id,
-        intent=IntentKind.MARKET_QUERY,
+        intent=IntentKind.STOCK_ANALYSIS,
         expert_name="stock_analysis",
         requirement="分析600519",
-        execution_mode="security_analysis",
+        execution_mode="stock_analysis",
         depends_on=list(depends_on or []),
     )
 

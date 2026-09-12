@@ -25,7 +25,8 @@ def _fact_dict(fact: FactSnapshot | dict[str, Any]) -> dict[str, Any]:
 def _facts_for_task(state: dict[str, Any], task: Task) -> list[dict[str, Any]]:
     facts = [_fact_dict(item) for item in state.get("facts", []) or []]
     domains = {
-        "market_query": {"market", "fundamental", "technical"},
+        "market_insight": {"market"},
+        "stock_analysis": {"market", "fundamental", "technical"},
         "stock_recommendation": {"market", "fundamental", "technical"},
         "asset_allocation": {"market", "fundamental", "technical", "allocation"},
         "product_analysis": {"product"},

@@ -40,11 +40,15 @@ _INTENT_CLASSIFIER_PROMPT = """你是金融工作流的多意图分类器，只�
 “最近AI行业有什么值得投资的股票，为我推荐几个”只能输出 stock_recommendation，execution_mode=candidate_search。
 
 允许的意图与 execution_mode：
-- market_query: security_analysis | market_overview
-- stock_recommendation: candidate_search | security_comparison
+- market_insight: market_overview
+- stock_analysis: stock_analysis
+- stock_recommendation: candidate_search | stock_comparison
 - asset_allocation: allocation
 - product_analysis: product_analysis
 - casual_chat: conversation
+
+market_insight 只回答大盘/指数/市场整体问题（如“今天大盘怎么样”），绝不输出个股结论或推荐；
+stock_analysis 只回答具体个股的基本面/技术面/行情；stock_recommendation 负责选股与多股比较。
 
 每个意图必须包含 intent、query、confidence、reason、evidence、execution_mode、requires_slot_extraction。
 evidence 必须逐字摘自 current_message，不能来自上下文。query 只包含该意图对应的当前轮子请求。
@@ -55,8 +59,9 @@ pending_clarifications 仅用于理解用户对上一轮反问的回复。若用
 只输出 JSON 对象：{"intents": [...], "finance_related": true}。"""
 
 _CLASSIFIER_MODES = {
-    "market_query": {"security_analysis", "market_overview"},
-    "stock_recommendation": {"candidate_search", "security_comparison"},
+    "market_insight": {"market_overview"},
+    "stock_analysis": {"stock_analysis"},
+    "stock_recommendation": {"candidate_search", "stock_comparison"},
     "asset_allocation": {"allocation"},
     "product_analysis": {"product_analysis"},
     "casual_chat": {"conversation"},
@@ -241,10 +246,11 @@ class DeepSeekIntentClassifier:
         raise error
 
 
-_INTENTS = ("market_query", "stock_recommendation", "asset_allocation", "product_analysis", "casual_chat")
+_INTENTS = ("market_insight", "stock_analysis", "stock_recommendation", "asset_allocation", "product_analysis", "casual_chat")
 _EXECUTION_MODES = {
-    "market_query": {"security_analysis": True, "market_overview": False},
-    "stock_recommendation": {"candidate_search": False, "security_comparison": True},
+    "market_insight": {"market_overview": False},
+    "stock_analysis": {"stock_analysis": True},
+    "stock_recommendation": {"candidate_search": False, "stock_comparison": True},
     "asset_allocation": {"allocation": True},
     "product_analysis": {"product_analysis": True},
     "casual_chat": {"conversation": False},
@@ -269,7 +275,7 @@ def normalize_intent_item(
     if mode not in _EXECUTION_MODES[intent]:
         mode = (
             "unsupported"
-            if intent in {"market_query", "stock_recommendation"}
+            if intent in {"stock_analysis", "stock_recommendation"}
             else next(iter(_EXECUTION_MODES[intent]))
         )
     return {
@@ -486,7 +492,7 @@ class ManagerAgent(ProceduralAgent):
                 return response
         results = state.get("intent_results", {}) or {}
         sections = []
-        for intent in ("casual_chat", "market_query", "stock_recommendation", "product_analysis", "asset_allocation"):
+        for intent in ("casual_chat", "market_insight", "stock_analysis", "stock_recommendation", "product_analysis", "asset_allocation"):
             result = results.get(intent, {})
             if not isinstance(result, dict):
                 continue

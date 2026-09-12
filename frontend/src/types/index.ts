@@ -75,6 +75,7 @@ export interface ChatResponse {
   allocation_result: AllocationResult
   debate_result: Record<string, any>
   product_analysis?: Record<string, any>
+  market_insight?: Record<string, any>
   compliance_result: Record<string, any>
   conversation_id: string
 }

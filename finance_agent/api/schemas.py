@@ -60,6 +60,7 @@ class ChatResponse(BaseModel):
     debate_result: dict[str, Any] = Field(default_factory=dict, description="辩论结果")
     compliance_result: dict[str, Any] = Field(default_factory=dict, description="合规审查结果")
     product_analysis: dict[str, Any] | None = Field(default=None, description="产品解读结果")
+    market_insight: dict[str, Any] = Field(default_factory=dict, description="市场洞察结果")
     conversation_id: str = ""
     tasks: list[dict[str, Any]] = Field(default_factory=list)
     task_results: dict[str, Any] = Field(default_factory=dict)
@@ -98,6 +99,8 @@ def to_chat_response(result: ResponseEnvelope | Mapping[str, Any] | ChatResponse
                 payload["allocation_result"] = data
                 if "debate" in data:
                     payload["debate_result"] = data["debate"]
+            elif expert_result.expert_name == "market_insight":
+                payload["market_insight"] = data.get("market_insight", data)
             elif expert_result.expert_name == "product_analysis":
                 payload["product_analysis"] = data
         return ChatResponse.model_validate(payload)

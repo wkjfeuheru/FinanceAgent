@@ -41,6 +41,7 @@ BASE_SCHEMA_SQL = _load_sql("001_base_schema.sql")
 AGENT_RUNTIME_SCHEMA_SQL = _load_sql("002_agent_runtime_schema.sql")
 IDENTITY_MIGRATION_SQL = _load_sql("003_identity_migration.sql")
 RESEARCH_GOVERNANCE_SCHEMA_SQL = _load_sql("004_research_governance.sql")
+THEME_REGISTRY_SCHEMA_SQL = _load_sql("005_theme_registry.sql")
 
 
 def runtime_schema_jsonb_fields() -> dict[str, str]:

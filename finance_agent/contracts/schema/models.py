@@ -117,7 +117,8 @@ class ExpertResult(_ContractModel):
         """为旧结果补充可推导的意图，避免历史调用方立即失效。"""
         if self.intent is None:
             mapping = {
-                "stock_analysis": IntentKind.MARKET_QUERY,
+                "market_insight": IntentKind.MARKET_INSIGHT,
+                "stock_analysis": IntentKind.STOCK_ANALYSIS,
                 "asset_allocation": IntentKind.ASSET_ALLOCATION,
                 "product_analysis": IntentKind.PRODUCT_ANALYSIS,
                 "casual_chat": IntentKind.CASUAL_CHAT,

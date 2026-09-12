@@ -231,9 +231,19 @@ def test_langgraph_routes_expert_result_into_manager_synthesis(monkeypatch):
     system.audit = type("_NoopAudit", (), {"is_available": lambda self: False})()
     system._trace_agent = lambda state, name: events.append(name)
     system._emit_progress = lambda *args, **kwargs: None
-    monkeypatch.setattr(system.manager, "dispatch_tasks", lambda state: [{
-        "intent": "casual_chat", "expert": "casual_chat", "requirement": "你好",
-    }])
+
+    def fake_dispatch(state):
+        """真正写入 tasks：新图由 plan_tasks 消费 tasks，不再有旧式逐专家回退。"""
+        from finance_agent.contracts.adapters import dispatch_plan_to_legacy, normalize_dispatch_plan
+        plan = normalize_dispatch_plan(
+            [{"intent": "casual_chat", "query": "你好", "confidence": 0.99,
+              "execution_mode": "conversation", "evidence": "你好"}],
+            "你好",
+        )
+        state["tasks"] = plan.tasks
+        return dispatch_plan_to_legacy(plan)
+
+    monkeypatch.setattr(system.manager, "dispatch_tasks", fake_dispatch)
     system.casual_chat_agent.invoke = lambda state: {
         **state,
         "intent_results": {"casual_chat": {"status": "success", "content": "你好，我是投顾助手。"}},
@@ -251,11 +261,8 @@ def test_langgraph_routes_expert_result_into_manager_synthesis(monkeypatch):
     assert result["agent_response"].startswith("你好")
 
 
-def test_legacy_dispatch_without_tasks_routes_and_audits_expert(monkeypatch):
-    """兼容路径（只有 task_dispatch、没有 tasks）必须能执行并写入审计。
-
-    该分支曾引用未定义的 ``expert_status``，一旦被触发就会抛 NameError。
-    """
+def test_no_tasks_routes_straight_to_synthesis_without_experts(monkeypatch):
+    """无 tasks（未分派）时直接进入合成，不执行任何专家。"""
     from langgraph.checkpoint.memory import MemorySaver
     from finance_agent.orchestrator.orchestrator import AdvisorSystem
 
@@ -265,14 +272,7 @@ def test_legacy_dispatch_without_tasks_routes_and_audits_expert(monkeypatch):
     system.stock_agent = object()
     system.allocation_agent = object()
     system.product_agent = object()
-    system.casual_chat_agent = type(
-        "FakeCasual", (), {
-            "invoke": lambda self, state: {
-                **state,
-                "intent_results": {"casual_chat": {"status": "success", "content": "你好"}},
-            },
-        },
-    )()
+    system.casual_chat_agent = object()
     system.slot_extractor = type("Slots", (), {"extract": lambda self, state: state})()
     import threading
     system._progress_context = type("Context", (), {})()
@@ -284,40 +284,27 @@ def test_legacy_dispatch_without_tasks_routes_and_audits_expert(monkeypatch):
     system._stop_requests = {}
     system._active_runs = {}
     system._stop_lock = threading.Lock()
-    audited: list[tuple[str, str]] = []
-
-    class _RecordingAudit:
-        def is_available(self):
-            return True
-
-        def upsert_expert_result(self, run_id, trace_id, result):
-            audited.append((result.expert_name, result.status.value))
-
-    system.audit = _RecordingAudit()
+    system.audit = type("_NoopAudit", (), {"is_available": lambda self: False})()
     system._trace_agent = lambda *args, **kwargs: None
     system._emit_progress = lambda *args, **kwargs: None
-    # 只提供旧式分派列表，不设置 state["tasks"]，强制走兼容专家节点。
-    monkeypatch.setattr(system.manager, "dispatch_tasks", lambda state: [{
-        "intent": "casual_chat", "expert": "casual_chat", "requirement": "你好",
-    }])
-    monkeypatch.setattr(system.manager, "synthesize_response", lambda state: "你好")
+    monkeypatch.setattr(system.manager, "dispatch_tasks", lambda state: [])
+    monkeypatch.setattr(system.manager, "synthesize_response", lambda state: "请补充信息")
 
     graph = system._build_graph()
     result = graph.invoke(
-        {"user_message": "你好", "run_id": "run-1", "trace_id": "trace-1",
-         "completed_experts": [], "intent_results": {}},
-        config={"configurable": {"thread_id": "legacy-chain-test"}},
+        {"user_message": "嗯", "completed_experts": [], "intent_results": {}},
+        config={"configurable": {"thread_id": "no-task-test"}},
     )
 
-    assert result["completed_experts"] == ["casual_chat"]
-    assert audited == [("casual_chat", "success")]
+    assert result["agent_response"] == "请补充信息"
+    assert not result.get("task_results")
 
 
 def test_manager_synthesis_combines_expert_outputs():
     manager = ManagerAgent()
     state = {
         "intent_results": {
-            "market_query": {"status": "success", "content": "股票分析结果"},
+            "stock_analysis": {"status": "success", "content": "股票分析结果"},
             "asset_allocation": {"status": "success", "content": "配置结果"},
         }
     }
@@ -340,8 +327,8 @@ def test_task_batch_executes_same_expert_for_distinct_intents(monkeypatch):
     system.manager._intent_classifier = FakeClassifier({
         "finance_related": True,
         "intents": [
-            {"intent": "market_query", "query": "分析600519", "confidence": 0.99,
-             "execution_mode": "security_analysis", "evidence": "分析600519"},
+            {"intent": "stock_analysis", "query": "分析600519", "confidence": 0.99,
+             "execution_mode": "stock_analysis", "evidence": "分析600519"},
             {"intent": "stock_recommendation", "query": "推荐AI股票", "confidence": 0.99,
              "execution_mode": "candidate_search", "evidence": "推荐AI股票"},
         ],
@@ -350,6 +337,10 @@ def test_task_batch_executes_same_expert_for_distinct_intents(monkeypatch):
 
     class FakeAgent:
         agent_name = "stock_analysis"
+
+        def plan(self, state):
+            """两个股票意图都不带代码，走 defer 让 DAG 逐 task 执行。"""
+            return {"kind": "defer"}
 
         def invoke(self, state):
             calls.append(state["current_task_intent"])
@@ -389,7 +380,7 @@ def test_task_batch_executes_same_expert_for_distinct_intents(monkeypatch):
         config={"configurable": {"thread_id": "task-batch-test"}},
     )
 
-    assert sorted(calls) == ["market_query", "stock_recommendation"]
+    assert sorted(calls) == ["stock_analysis", "stock_recommendation"]
     assert set(result["task_results"]) == {"task-1", "task-2"}
-    assert result["task_results"]["task-1"].intent is IntentKind.MARKET_QUERY
+    assert result["task_results"]["task-1"].intent is IntentKind.STOCK_ANALYSIS
     assert result["task_results"]["task-2"].intent is IntentKind.STOCK_RECOMMENDATION

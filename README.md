@@ -31,6 +31,7 @@ Supervisor（任务规划）
    +--> 股票识别与校验
    +--> Data Fetch（Tushare MCP 数据获取）
    +--> Stock Analysis（基本面 + 技术面分析）
+   +--> Market Insight（市场洞察，大盘概览数据待接入）
    +--> Asset Allocation（资产配置）
    +--> Compliance（合规审查）
    |
@@ -38,7 +39,9 @@ Supervisor（任务规划）
 最终回答
 ```
 
-Supervisor 会根据用户意图选择所需节点，并非每次请求都会执行完整流程。
+Supervisor 会根据用户意图选择所需节点，并非每次请求都会执行完整流程。多标的请求（选股推荐、
+股票比较）会按标的并行取数并逐只给出独立结论。`Market Insight` 只回答市场整体问题，不输出
+个股结论或推荐；当前尚未接入指数/市场宽度数据源，故暂为诚实的降级说明。
 
 ## 技术栈
 

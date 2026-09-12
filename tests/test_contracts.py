@@ -31,10 +31,10 @@ def test_task_contract_preserves_distinct_same_expert_intents():
 
     plan = normalize_dispatch_plan([
         {
-            "intent": "market_query",
+            "intent": "stock_analysis",
             "query": "分析贵州茅台",
             "confidence": 0.99,
-            "execution_mode": "security_analysis",
+            "execution_mode": "stock_analysis",
         },
         {
             "intent": "stock_recommendation",
@@ -46,7 +46,7 @@ def test_task_contract_preserves_distinct_same_expert_intents():
 
     assert [task.task_id for task in plan.tasks] == ["task-1", "task-2"]
     assert [task.intent for task in plan.tasks] == [
-        IntentKind.MARKET_QUERY,
+        IntentKind.STOCK_ANALYSIS,
         IntentKind.STOCK_RECOMMENDATION,
     ]
     assert [task.expert_name for task in plan.tasks] == [
@@ -65,15 +65,15 @@ def test_response_envelope_exposes_run_status_tasks_results_and_warnings():
         run_status=RunStatus.PARTIAL,
         tasks=[Task(
             task_id="task-1",
-            intent=IntentKind.MARKET_QUERY,
+            intent=IntentKind.STOCK_ANALYSIS,
             expert_name="stock_analysis",
             requirement="分析600519",
-            execution_mode="security_analysis",
+            execution_mode="stock_analysis",
             status=TaskStatus.SUCCESS,
         )],
         results=[ExpertResult(
             task_id="task-1",
-            intent=IntentKind.MARKET_QUERY,
+            intent=IntentKind.STOCK_ANALYSIS,
             expert_name="stock_analysis",
             status=ExpertStatus.SUCCESS,
             summary="完成",

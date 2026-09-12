@@ -1,6 +1,8 @@
 """确定性分析请求解析器测试。"""
 
-from finance_agent.research.request_parser import parse_analysis_request
+import pytest
+
+from finance_agent.research.request_parser import UnknownThemeError, parse_analysis_request
 
 
 def test_slots_win_over_message_regex_for_comparison_and_indicators():
@@ -8,7 +10,7 @@ def test_slots_win_over_message_regex_for_comparison_and_indicators():
     request = parse_analysis_request(
         "比较茅台和招行的MACD",
         resolved_stocks=[{"code": "600519"}, {"code": "600036"}],
-        intent_slots={"market_query": {"indicators": ["MACD"]}},
+        intent_slots={"stock_analysis": {"indicators": ["MACD"]}},
         user_profile={},
     )
 
@@ -54,15 +56,42 @@ def test_explicit_theme_id_wins_without_stock_code():
     assert request.theme_id == "ai_compute"
 
 
-def test_unknown_theme_returns_clear_error():
-    try:
+def test_unknown_theme_raises_typed_error_carrying_theme_text():
+    """未注册主题抛可携带文本的类型化错误，供上层改用候选搜索。"""
+    with pytest.raises(UnknownThemeError) as excinfo:
         parse_analysis_request(
             "推荐新能源主题股票",
             resolved_stocks=[],
             intent_slots={},
             user_profile={},
         )
-    except ValueError as exc:
-        assert "主题" in str(exc)
-    else:
-        raise AssertionError("未知主题应返回明确的主题澄清错误")
+
+    assert "主题" in str(excinfo.value)
+    assert excinfo.value.theme_text
+
+
+def test_unknown_theme_slot_is_ignored_when_codes_present():
+    """有明确股票代码时，未注册的主题文本不应阻断个股分析。"""
+    request = parse_analysis_request(
+        "分析600519",
+        resolved_stocks=[],
+        intent_slots={"stock_analysis": {"themes": ["新能源"]}},
+        user_profile={},
+    )
+
+    assert request.kind.value == "single_stock"
+    assert request.theme_id is None
+    assert request.stock_codes == ["600519"]
+
+
+def test_slot_themes_key_resolves_registered_theme():
+    """槽位 themes 键（自由文本）经注册表解析为主题筛选。"""
+    request = parse_analysis_request(
+        "给我推荐",
+        resolved_stocks=[],
+        intent_slots={"stock_recommendation": {"themes": ["人工智能"]}},
+        user_profile={},
+    )
+
+    assert request.kind.value == "theme_screening"
+    assert request.theme_id == "ai_compute"

@@ -162,6 +162,7 @@ AGENT_TEMPERATURES = {
     "slot_extraction": 0.1, # 需求字段抽取：低温保证抽取准确
     "fundamental": 0.3,      # 基本面分析：适度温度保证分析深度
     "stock_analysis": 0.3,   # 股票综合分析：适度温度保证分析深度与决策灵活性
+    "market_insight": 0.2,   # 市场洞察：低温保证市场级表述稳定
     "allocation": 0.2,        # 资产配置：低温保证计算严谨
     "debate_bull": DEBATE_BULL_TEMPERATURE,       # 看多分析
     "debate_bear": DEBATE_BEAR_TEMPERATURE,      # 看空分析

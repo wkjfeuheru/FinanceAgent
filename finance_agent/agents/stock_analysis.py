@@ -11,13 +11,14 @@ from typing import Any
 
 from finance_agent.agents.base import AgentProtocol
 from finance_agent.orchestrator.tools.stockdata import fetch_stock_data, search_candidates
-from finance_agent.research.contracts import Action, AnalysisRequest
+from finance_agent.research.contracts import Action, AnalysisKind, AnalysisRequest
 from finance_agent.research.legacy_adapter import project_legacy_many
 from finance_agent.research.pipeline import ResearchPipeline
-from finance_agent.research.request_parser import parse_analysis_request
+from finance_agent.research.request_parser import UnknownThemeError, parse_analysis_request
 from finance_agent.research.rule_engine import RuleEngine
 from finance_agent.research.snapshot_builder import production_builder
 from finance_agent.research.screener import ThemeScreener
+from finance_agent.research.theme_registry import ThemeRegistry, production_theme_registry
 from finance_agent.research.theme_repository import PostgresThemeRepository
 
 
@@ -54,6 +55,7 @@ class StockAnalysisAgent(AgentProtocol):
         *,
         pipeline: ResearchPipeline | None = None,
         theme_screener: ThemeScreener | None = None,
+        theme_registry: ThemeRegistry | None = None,
     ):
         # checkpointer 仅为旧编排构造签名保留，研究专家自身不持有会话状态。
         del checkpointer
@@ -63,6 +65,12 @@ class StockAnalysisAgent(AgentProtocol):
             rule_engine=RuleEngine.default(),
         )
         self._theme_screener = theme_screener
+        self._theme_registry = theme_registry
+
+    def _registry(self) -> ThemeRegistry:
+        if self._theme_registry is None:
+            self._theme_registry = production_theme_registry()
+        return self._theme_registry
 
     def _get_theme_screener(self) -> ThemeScreener:
         if self._theme_screener is None:
@@ -123,72 +131,100 @@ class StockAnalysisAgent(AgentProtocol):
             result.narrative or f"研究结论：{result.action.value}。" for result in results
         )
 
+    def _resolve_request(self, state: dict[str, Any], message: str) -> tuple[AnalysisRequest | None, dict[str, Any] | None]:
+        """把状态解析为研究请求；无法解析时返回结构化错误，不抛内部异常。"""
+        profile = state.get("user_profile", {}) or {}
+        try:
+            request = parse_analysis_request(
+                message,
+                resolved_stocks=state.get("resolved_stocks", []) or [],
+                intent_slots=state.get("intent_slots", {}) or {},
+                user_profile=profile,
+                theme_registry=self._registry(),
+            )
+        except UnknownThemeError as exc:
+            # 未注册主题：改用该主题文本做候选搜索；无候选再澄清，不泄露内部异常。
+            codes = self._resolve_candidate_codes(exc.theme_text)
+            if not codes:
+                return None, {
+                    "content": f"主题筛选暂不可用：{exc.theme_text}",
+                    "status": "degraded",
+                    "clarification": (
+                        f"未找到与「{exc.theme_text}」匹配的候选股票，请补充主题或直接提供股票代码。"
+                    ),
+                }
+            return self._request_from_codes(state, profile, codes), None
+        except ValueError as exc:
+            can_discover_candidates = (
+                str(state.get("current_task_intent", "")) == "stock_recommendation"
+                and "单股分析必须且只能包含一只股票" in str(exc)
+            )
+            if not can_discover_candidates:
+                return None, {"content": f"股票研究暂不可用：{exc}", "status": "degraded", "clarification": None}
+            codes = self._resolve_candidate_codes(message)
+            if not codes:
+                return None, {
+                    "content": "股票研究暂不可用：未找到匹配的候选股票。",
+                    "status": "degraded",
+                    "clarification": None,
+                }
+            return self._request_from_codes(state, profile, codes), None
+        if request.kind.value == "theme_screening":
+            return request, None
+        if not request.stock_codes:
+            return None, {"content": "股票研究暂不可用：未识别到股票代码", "status": "degraded", "clarification": None}
+        return request, None
+
+    @staticmethod
+    def _request_from_codes(state: dict[str, Any], profile: dict[str, Any], codes: list[str]) -> AnalysisRequest:
+        """把候选/多标的结果规范为运行级请求（多标的按比较形态承载，逐只出结论）。"""
+        kind = AnalysisKind.SINGLE_STOCK if len(codes) == 1 else AnalysisKind.COMPARISON
+        return AnalysisRequest(
+            kind=kind,
+            stock_codes=codes,
+            profile_complete=bool(
+                str(profile.get("risk_preference", "")).strip()
+                and str(profile.get("holding_period", "")).strip()
+            ),
+        )
+
+    def plan(self, state: dict[str, Any]) -> dict[str, Any]:
+        """把状态解析为可扇出的执行计划，不执行分析、不取数。
+
+        返回 ``{"kind": "fanout", "request": {...}}``（逐标的扇出）、
+        ``{"kind": "defer"}``（主题筛选交给 task DAG）或
+        ``{"kind": "error", "content": ..., "status": ..., "clarification": ...}``。
+        """
+        message = str(state.get("requirement", "") or state.get("user_message", ""))
+        request, error = self._resolve_request(state, message)
+        if error is not None:
+            return {"kind": "error", **error}
+        assert request is not None
+        if request.kind.value == "theme_screening":
+            return {"kind": "defer"}
+        return {"kind": "fanout", "request": request.model_dump(mode="json")}
+
     def invoke(self, state: dict[str, Any]) -> dict[str, Any]:
         """解析一次状态并写回新旧两套结果，不保存本次调用数据。"""
         message = str(state.get("requirement", "") or state.get("user_message", ""))
+        request, error = self._resolve_request(state, message)
+        if error is not None:
+            return self._failed(state, error)
+        assert request is not None
+        return self.run_resolved(state, request)
+
+    def run_resolved(self, state: dict[str, Any], request: AnalysisRequest) -> dict[str, Any]:
+        """对**已解析**请求执行研究（主题筛选或逐标的批量），写回兼容字段。
+
+        图级逐标的扇出先把数据取好再汇入本方法，因此这里对整批请求只构建
+        一次快照，跨标的门禁（报告期混用）语义保持不变。
+        """
         profile = state.get("user_profile", {}) or {}
         stock_data = state.get("stock_data", {}) or {}
 
         try:
-            try:
-                request = parse_analysis_request(
-                    message,
-                    resolved_stocks=state.get("resolved_stocks", []) or [],
-                    intent_slots=state.get("intent_slots", {}) or {},
-                    user_profile=profile,
-                )
-            except ValueError as exc:
-                can_discover_candidates = (
-                    str(state.get("current_task_intent", "")) == "stock_recommendation"
-                    and "单股分析必须且只能包含一只股票" in str(exc)
-                )
-                if not can_discover_candidates:
-                    raise
-                codes = self._resolve_candidate_codes(message)
-                if not codes:
-                    raise
-                state["resolved_stocks"] = [{"code": code} for code in codes]
-                request = parse_analysis_request(
-                    message,
-                    resolved_stocks=state["resolved_stocks"],
-                    intent_slots=state.get("intent_slots", {}) or {},
-                    user_profile=profile,
-                )
             if request.kind.value == "theme_screening":
-                screening = self._get_theme_screener().screen(request, profile)
-                payload = {
-                    "status": screening.status,
-                    "personalization_status": screening.personalization_status,
-                    "candidates": [candidate.__dict__ for candidate in screening.ranked_candidates],
-                    "pending_leads": screening.pending_leads,
-                    "request": request.model_dump(mode="json"),
-                    "active_members": screening.active_members,
-                    "exclusions": screening.exclusions,
-                }
-                state["theme_screening"] = payload
-                state["theme_screening_status"] = screening.status
-                state["theme_candidates"] = payload["candidates"]
-                state["pending_leads"] = screening.pending_leads
-                state["personalization_status"] = screening.personalization_status
-                state["stock_analysis"] = {}
-                state["technical_analysis"] = {}
-                state["analysis_results"] = [
-                    item.model_dump(mode="json") for item in screening.analysis_results
-                ]
-                if screening.facts:
-                    existing = state.get("facts", []) or []
-                    existing_ids = {fact.fact_id for fact in existing}
-                    state["facts"] = existing + [
-                        fact for fact in screening.facts if fact.fact_id not in existing_ids
-                    ]
-                content = (
-                    "主题候选研究已完成。"
-                    if screening.status == "complete"
-                    else f"主题候选暂不可完整生成：{screening.status}。"
-                )
-                state["agent_response"] = content
-                self._write_intent_result(state, content, "success" if screening.status == "complete" else "degraded")
-                return state
+                return self._run_theme_screening(state, request, profile)
             if not request.stock_codes:
                 raise ValueError("未识别到股票代码")
             if not stock_data and not self._injected_pipeline:
@@ -200,17 +236,11 @@ class StockAnalysisAgent(AgentProtocol):
             else:
                 results, facts = [pipeline.analyze(request, user_profile=profile)], []
         except Exception as exc:
-            state["stock_analysis"] = {}
-            state["technical_analysis"] = {}
-            state["analysis_results"] = []
-            if "主题" in str(exc):
-                state["clarification_question"] = str(exc)
-                content = f"主题筛选暂不可用：{exc}"
-            else:
-                content = f"股票研究暂不可用：{exc}"
-            self._write_intent_result(state, content, "degraded")
-            state["agent_response"] = content
-            return state
+            return self._failed(state, {
+                "content": f"股票研究暂不可用：{exc}",
+                "status": "degraded",
+                "clarification": str(exc) if "主题" in str(exc) else None,
+            })
 
         projected = project_legacy_many(results)
         for code, entry in projected["stock_analysis"].items():
@@ -233,11 +263,64 @@ class StockAnalysisAgent(AgentProtocol):
         self._write_intent_result(state, content, self._status(results))
         return state
 
+    def _run_theme_screening(
+        self, state: dict[str, Any], request: AnalysisRequest, profile: dict[str, Any],
+    ) -> dict[str, Any]:
+        """主题筛选：只使用已审核有效成员，产出结构化候选与待核验线索。"""
+        screening = self._get_theme_screener().screen(request, profile)
+        payload = {
+            "status": screening.status,
+            "personalization_status": screening.personalization_status,
+            "candidates": [candidate.__dict__ for candidate in screening.ranked_candidates],
+            "pending_leads": screening.pending_leads,
+            "request": request.model_dump(mode="json"),
+            "active_members": screening.active_members,
+            "exclusions": screening.exclusions,
+        }
+        state["theme_screening"] = payload
+        state["theme_screening_status"] = screening.status
+        state["theme_candidates"] = payload["candidates"]
+        state["pending_leads"] = screening.pending_leads
+        state["personalization_status"] = screening.personalization_status
+        state["stock_analysis"] = {}
+        state["technical_analysis"] = {}
+        state["analysis_results"] = [
+            item.model_dump(mode="json") for item in screening.analysis_results
+        ]
+        if screening.facts:
+            existing = state.get("facts", []) or []
+            existing_ids = {fact.fact_id for fact in existing}
+            state["facts"] = existing + [
+                fact for fact in screening.facts if fact.fact_id not in existing_ids
+            ]
+        content = (
+            "主题候选研究已完成。"
+            if screening.status == "complete"
+            else f"主题候选暂不可完整生成：{screening.status}。"
+        )
+        state["agent_response"] = content
+        self._write_intent_result(state, content, "success" if screening.status == "complete" else "degraded")
+        return state
+
+    @staticmethod
+    def _failed(state: dict[str, Any], error: dict[str, Any]) -> dict[str, Any]:
+        """统一的失败/降级写回；澄清问题与用户文案分离，不泄露内部异常。"""
+        state["stock_analysis"] = {}
+        state["technical_analysis"] = {}
+        state["analysis_results"] = []
+        clarification = error.get("clarification")
+        if clarification:
+            state["clarification_question"] = clarification
+        content = str(error.get("content", "股票研究暂不可用。"))
+        StockAnalysisAgent._write_intent_result(state, content, str(error.get("status", "degraded")))
+        state["agent_response"] = content
+        return state
+
     @staticmethod
     def _write_intent_result(state: dict[str, Any], content: str, status: str) -> None:
         payload = {"status": status, "content": content}
         intent = str(state.get("current_task_intent", "")).strip()
-        targets = [intent] if intent in {"market_query", "stock_recommendation"} else ["market_query"]
+        targets = [intent] if intent in {"stock_analysis", "stock_recommendation"} else ["stock_analysis"]
         results = state.setdefault("intent_results", {})
         for target in targets:
             results[target] = payload.copy()

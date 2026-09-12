@@ -106,10 +106,15 @@ def run_task_dag(
     max_retries: int = 2,
     timeout_seconds: float,
     deadline_seconds: float,
+    initial_results: dict[str, ExpertResult] | None = None,
 ) -> dict[str, ExpertResult]:
-    """按依赖层执行任务；当前层的独立任务并行执行。"""
-    pending = {task.task_id: task for task in tasks}
-    results: dict[str, ExpertResult] = {}
+    """按依赖层执行任务；当前层的独立任务并行执行。
+
+    ``initial_results`` 允许把已完成的（例如逐标的扇出聚合出的）结果作为
+    依赖满足条件注入，使下游任务不会误判为依赖缺失。
+    """
+    results: dict[str, ExpertResult] = dict(initial_results or {})
+    pending = {task.task_id: task for task in tasks if task.task_id not in results}
     while pending:
         blocked = [
             task for task in pending.values()

@@ -170,12 +170,12 @@ def test_stock_agent_projects_critical_result_as_degraded():
         "intent_slots": {},
         "user_profile": {},
         "intent_results": {},
-        "current_task_intent": "market_query",
+        "current_task_intent": "stock_analysis",
     }
 
     result = agent.invoke(state)
 
-    assert result["intent_results"]["market_query"]["status"] == "degraded"
+    assert result["intent_results"]["stock_analysis"]["status"] == "degraded"
     assert result["stock_analysis"]["600519"]["rating"] == "数据不足"
     assert result["analysis_results"][0]["rule_version"] == "research_rules/v1"
 
@@ -187,7 +187,7 @@ def test_stock_agent_publishes_pipeline_facts_for_audit():
         "resolved_stocks": [{"code": "600519"}],
         "user_profile": {},
         "intent_results": {},
-        "current_task_intent": "market_query",
+        "current_task_intent": "stock_analysis",
     }
 
     result = agent.invoke(state)
@@ -266,11 +266,18 @@ def test_stock_agent_reports_theme_coverage_shortage():
     assert result["theme_screening"]["candidates"] == []
 
 
-def test_stock_agent_returns_theme_clarification_for_unknown_theme():
+def test_stock_agent_returns_clarification_when_unknown_theme_has_no_candidates(monkeypatch):
+    """未注册主题改用候选搜索；无候选时澄清，且不泄露内部异常。"""
+    class EmptySearch:
+        def invoke(self, _payload):
+            return []
+
+    monkeypatch.setattr("finance_agent.agents.stock_analysis.search_candidates", EmptySearch())
     agent = StockAnalysisAgent(pipeline=_pipeline(), theme_screener=ThemeScreener(_theme_repo(5), ThemeGateway()))
     result = agent.invoke({
         "requirement": "推荐新能源主题股票", "resolved_stocks": [], "intent_slots": {},
         "user_profile": {}, "intent_results": {}, "current_task_intent": "stock_recommendation",
     })
-    assert "主题" in result["clarification_question"]
+    assert "新能源" in result["clarification_question"]
     assert "股票研究暂不可用" not in result["agent_response"]
+    assert "validation error" not in result["agent_response"]

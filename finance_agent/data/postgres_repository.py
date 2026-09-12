@@ -268,6 +268,7 @@ class PostgresRuntimeRepository:
             BASE_SCHEMA_SQL,
             IDENTITY_MIGRATION_SQL,
             RESEARCH_GOVERNANCE_SCHEMA_SQL,
+            THEME_REGISTRY_SCHEMA_SQL,
         )
 
         with self._transaction() as connection:
@@ -277,6 +278,7 @@ class PostgresRuntimeRepository:
                 cursor.execute(AGENT_RUNTIME_SCHEMA_SQL)
                 cursor.execute(IDENTITY_MIGRATION_SQL)
                 cursor.execute(RESEARCH_GOVERNANCE_SCHEMA_SQL)
+                cursor.execute(THEME_REGISTRY_SCHEMA_SQL)
             finally:
                 cursor.close()
 

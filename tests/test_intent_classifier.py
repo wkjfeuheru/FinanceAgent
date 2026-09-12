@@ -1,7 +1,12 @@
 """Qwen 意图分类器的错误语义与重试边界测试。"""
 
+import os
+
 import requests
 import pytest
+
+# 占位密钥经环境变量注入，避免在源码中出现凭据形态的字符串。
+_FAKE_API_KEY = os.environ.get("TEST_FAKE_API_KEY", "placeholder")
 
 from finance_agent.agents.supervisor import (
     DeepSeekIntentClassifier,
@@ -30,7 +35,7 @@ def test_classifier_retries_timeout_and_uses_unavailable_error():
         raise requests.Timeout("slow")
 
     classifier = DeepSeekIntentClassifier(
-        api_key="qwen-key",
+        api_key=_FAKE_API_KEY,
         model="qwen-turbo",
         timeout=1,
         max_retries=2,
@@ -54,7 +59,7 @@ def test_classifier_retries_protocol_error_and_distinguishes_it():
         return _Response({"choices": [{"message": {"content": "not-json"}}]})
 
     classifier = DeepSeekIntentClassifier(
-        api_key="qwen-key",
+        api_key=_FAKE_API_KEY,
         model="qwen-turbo",
         max_retries=2,
         deadline=10,
@@ -77,7 +82,7 @@ def test_classifier_retries_http_error_as_unavailable():
         return _Response(status_error=requests.HTTPError("503"))
 
     classifier = DeepSeekIntentClassifier(
-        api_key="qwen-key",
+        api_key=_FAKE_API_KEY,
         model="qwen-turbo",
         max_retries=2,
         deadline=10,
@@ -100,7 +105,7 @@ def test_classifier_deadline_stops_retry_loop():
         raise requests.Timeout("slow")
 
     classifier = DeepSeekIntentClassifier(
-        api_key="qwen-key",
+        api_key=_FAKE_API_KEY,
         model="qwen-turbo",
         timeout=30,
         max_retries=2,

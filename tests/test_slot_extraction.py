@@ -8,8 +8,16 @@ import json
 
 import pytest
 
+from finance_agent.contracts.adapters import dispatch_plan_to_legacy, normalize_dispatch_plan
 from finance_agent.orchestrator import slots
 from finance_agent.orchestrator.tools import stockdata
+
+
+def _dispatch_with_tasks(state, raw_intents):
+    """供图级测试：写入真实 tasks（新图由 plan_tasks 消费），并返回旧式分派。"""
+    plan = normalize_dispatch_plan(raw_intents, state.get("user_message", ""))
+    state["tasks"] = plan.tasks
+    return dispatch_plan_to_legacy(plan)
 
 BASICS = [
     {"ts_code": "600519.SH", "name": "贵州茅台", "industry": "白酒"},
@@ -91,10 +99,10 @@ def test_negation_extracted_as_excluded():
     assert "不要" not in themes
 
 
-def test_market_query_resolves_name_to_stock_codes(stock_index):
+def test_stock_analysis_resolves_name_to_stock_codes(stock_index):
     resolved = slots._resolve_slots(
-        "market_query",
-        slots._deterministic_extract("我分析一下贵州茅台最近的行情和基本面", "market_query"),
+        "stock_analysis",
+        slots._deterministic_extract("我分析一下贵州茅台最近的行情和基本面", "stock_analysis"),
         {},
     )
     assert resolved["stock_codes"] == ["600519"]
@@ -102,10 +110,10 @@ def test_market_query_resolves_name_to_stock_codes(stock_index):
     assert resolved["_required_missing"] is False
 
 
-def test_market_query_missing_required_flagged(stock_index):
+def test_stock_analysis_missing_required_flagged(stock_index):
     resolved = slots._resolve_slots(
-        "market_query",
-        slots._deterministic_extract("分析一下大盘情绪", "market_query"),
+        "stock_analysis",
+        slots._deterministic_extract("分析一下大盘情绪", "stock_analysis"),
         {},
     )
     assert resolved["_required_missing"] is True
@@ -117,14 +125,14 @@ def test_extract_populates_resolved_stocks(stock_index):
         "user_message": "我分析一下贵州茅台最近的行情和基本面",
         "memory_context": "",
         "task_dispatch": [{
-            "intent": "market_query", "expert": "stock_analysis",
+            "intent": "stock_analysis", "expert": "stock_analysis",
             "requirement": "我分析一下贵州茅台最近的行情和基本面",
         }],
         "intent_slots": {},
     }
     out = extractor.extract(state)
     assert out["resolved_stocks"] == [{"code": "600519", "name": "贵州茅台"}]
-    assert out["intent_slots"]["market_query"]["stock_codes"] == ["600519"]
+    assert out["intent_slots"]["stock_analysis"]["stock_codes"] == ["600519"]
     assert out["task_dispatch"]  # 仍派单给 stock_analysis
     assert not out.get("clarification_question")
 
@@ -135,13 +143,13 @@ def test_extract_prunes_and_clarifies_when_required_missing(stock_index):
         "user_message": "分析一下市场情绪",
         "memory_context": "",
         "task_dispatch": [{
-            "intent": "market_query", "expert": "stock_analysis", "requirement": "分析一下市场情绪",
+            "intent": "stock_analysis", "expert": "stock_analysis", "requirement": "分析一下市场情绪",
         }],
         "intent_slots": {},
     }
     out = extractor.extract(state)
     assert out["task_dispatch"] == []  # 已剔除
-    assert out["intent_slots"]["market_query"]["_required_missing"] is True
+    assert out["intent_slots"]["stock_analysis"]["_required_missing"] is True
     assert "股票名称" in out["clarification_question"]
 
 
@@ -155,7 +163,7 @@ def test_extract_ambiguity_raises_clarification(stock_index):
     state = {
         "user_message": "您提到的平安怎么样",
         "memory_context": "",
-        "task_dispatch": [{"intent": "market_query", "expert": "stock_analysis", "requirement": "平安怎么样"}],
+        "task_dispatch": [{"intent": "stock_analysis", "expert": "stock_analysis", "requirement": "平安怎么样"}],
         "intent_slots": {},
     }
     out = extractor.extract(state)
@@ -248,11 +256,15 @@ def test_graph_wires_slots_to_stock_agent(monkeypatch):
     captured = {}
 
     class FakeStockAgent:
+        def plan(self, state):
+            """已解析出具体标的时走 defer，由 DAG 逐 task 交给 invoke。"""
+            return {"kind": "defer"}
+
         def invoke(self, state):
             captured["resolved_stocks"] = state.get("resolved_stocks", [])
             response = "已完成 1 只股票的分析：- 600519 评级：推荐（90分）"
             state["agent_response"] = response
-            state.setdefault("intent_results", {})["market_query"] = {
+            state.setdefault("intent_results", {})["stock_analysis"] = {
                 "status": "success", "content": response,
             }
             state["stock_analysis"] = {
@@ -281,11 +293,13 @@ def test_graph_wires_slots_to_stock_agent(monkeypatch):
     system.audit = type("_NoopAudit", (), {"is_available": lambda self: False})()
     system._trace_agent = lambda state, name: None
     system._emit_progress = lambda *a, **k: None
-    monkeypatch.setattr(system.manager, "dispatch_tasks", lambda state: [{
-        "intent": "market_query", "expert": "stock_analysis",
-        "requirement": "我分析一下贵州茅台最近的行情和基本面",
-        "execution_mode": "security_analysis",
-    }])
+    monkeypatch.setattr(system.manager, "dispatch_tasks", lambda state: _dispatch_with_tasks(
+        state, [{
+            "intent": "stock_analysis", "query": "我分析一下贵州茅台最近的行情和基本面",
+            "confidence": 0.99, "execution_mode": "stock_analysis",
+            "evidence": "我分析一下贵州茅台最近的行情和基本面",
+        }],
+    ))
     monkeypatch.setattr(
         system.manager, "synthesize_response",
         lambda state: state.get("agent_response", "") + "\n\n### 风险提示",

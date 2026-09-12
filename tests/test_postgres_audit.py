@@ -166,11 +166,11 @@ def test_task_result_keeps_research_rule_and_snapshot_fact_ids():
     system = object.__new__(AdvisorSystem)
     task = Task(
         task_id="task-1",
-        intent=IntentKind.MARKET_QUERY,
+        intent=IntentKind.STOCK_ANALYSIS,
         expert_name="stock_analysis",
     )
     state = {
-        "intent_results": {"market_query": {"status": "success", "content": "完成"}},
+        "intent_results": {"stock_analysis": {"status": "success", "content": "完成"}},
         "analysis_results": [{
             "rule_version": "research_rules/v1",
             "evidence_ids": ["stock_snapshot:600519:fixture"],
@@ -221,7 +221,7 @@ def test_audit_manifest_written_by_stock_agent_can_be_replayed():
     ))
     state = agent.invoke({
         "requirement": "分析600519", "resolved_stocks": [{"code": "600519"}],
-        "user_profile": {}, "intent_results": {}, "current_task_intent": "market_query",
+        "user_profile": {}, "intent_results": {}, "current_task_intent": "stock_analysis",
         "run_id": "run-1", "trace_id": "trace-1", "customer_id": "CUST001", "thread_id": "conv-1",
     })
 

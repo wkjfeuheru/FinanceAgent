@@ -67,7 +67,7 @@ def _codes_from_text(message: str) -> List[str]:
 
 # ── 各意图的槽位 schema ─────────────────────────────────────────────────────────
 _INTENT_SLOT_SCHEMAS: Dict[str, Dict[str, Any]] = {
-    "market_query": {
+    "stock_analysis": {
         "title": "行情/个股分析",
         "slots": [
             {"key": _SLOT_NAMES, "type": "name_list", "required": False,
@@ -116,6 +116,7 @@ _INTENT_SLOT_SCHEMAS: Dict[str, Dict[str, Any]] = {
              "desc": "用户想了解/对比的金融产品名称"},
         ],
     },
+    "market_insight": {"title": "市场洞察", "slots": []},
     "casual_chat": {"title": "闲聊", "slots": []},
 }
 
@@ -385,7 +386,7 @@ def _deterministic_extract(message: str, intent: str) -> Dict[str, Any]:
     codes = _codes_from_text(message)
     excluded = _extract_negated_names(message)
 
-    if intent == "market_query":
+    if intent == "stock_analysis":
         if codes:
             slots[_SLOT_CODES] = codes
         else:
@@ -455,7 +456,7 @@ def _resolve_slots(intent: str, raw: Dict[str, Any], prior: Dict[str, Any]) -> D
     - ``_excluded_codes``：排除的代码列表
     - ``_resolved``：解析出的 [{code, name}]（供写回 resolved_stocks）
     - ``_ambiguity``：歧义项列表 [{name, candidates}]
-    - ``_required_missing``：必填槽位缺失标记（当前仅 market_query 的代码）
+    - ``_required_missing``：必填槽位缺失标记（当前仅 stock_analysis 的代码）
     """
     merged = _merge_slots(prior, raw)
 
@@ -489,9 +490,9 @@ def _resolve_slots(intent: str, raw: Dict[str, Any], prior: Dict[str, Any]) -> D
         "_resolved": resolved_entries,
         "_ambiguity": ambiguous,
     }
-    if intent in {"market_query", "stock_recommendation"} and _as_text_list(merged.get(_SLOT_NAMES)):
+    if intent in {"stock_analysis", "stock_recommendation"} and _as_text_list(merged.get(_SLOT_NAMES)):
         result[_SLOT_NAMES] = _as_text_list(merged.get(_SLOT_NAMES))
-    if intent == "market_query":
+    if intent == "stock_analysis":
         result["analysis_type"] = _choice(merged.get("analysis_type"), ["fundamental", "technical", "both"], "both")
         result["_required_missing"] = bool(not codes and not names)
     elif intent == "stock_recommendation":
@@ -597,18 +598,16 @@ class SlotExtractor:
             entries = resolved.get("_resolved") or []
             ambigs = resolved.get("_ambiguity") or []
 
-            if intent in {"market_query", "stock_recommendation"}:
+            if intent in {"stock_analysis", "stock_recommendation"}:
                 for entry in entries:
                     if entry["code"] not in _excluded_codes and entry["code"] not in [
                         r["code"] for r in resolved_stocks
                     ]:
                         resolved_stocks.append(entry)
-                if intent == "market_query" and resolved.get("_required_missing"):
-                    # 仅"个股分析"要求个股代码；"市场概览"无需具体标的
-                    mode = str(item.get("execution_mode", "")).strip()
-                    if mode != "market_overview":
-                        pruned_intents.append(intent)
-                        clarification.append("请提供需要分析的股票名称或6位代码。")
+                if intent == "stock_analysis" and resolved.get("_required_missing"):
+                    # 个股分析必须提供标的；市场概览已独立为 market_insight，不走此意图。
+                    pruned_intents.append(intent)
+                    clarification.append("请提供需要分析的股票名称或6位代码。")
                 for a in ambigs:
                     candidates = a.get("candidates", "多个标的")
                     clarification.append(
