@@ -287,7 +287,9 @@ async def list_registered_themes(http_request: Request) -> list[ThemeRegistryEnt
     return [
         ThemeRegistryEntry(
             theme_id=entry.theme_id, display_name=entry.display_name,
-            aliases=list(entry.aliases), active=entry.active,
+            aliases=list(entry.aliases),
+            representative_codes=list(entry.representative_codes),
+            active=entry.active,
         )
         for entry in get_theme_registry().list_themes()
     ]
@@ -305,17 +307,23 @@ async def upsert_registered_theme(
     aliases = list(dict.fromkeys(
         alias.strip() for alias in payload.aliases if alias.strip()
     ))
+    representative_codes = list(dict.fromkeys(
+        code.strip() for code in payload.representative_codes if code.strip()
+    ))
     entry = get_theme_registry().upsert(
         _ThemeEntry(
             theme_id=theme_id,
             display_name=payload.display_name.strip(),
             aliases=aliases,
+            representative_codes=representative_codes,
             active=payload.active,
         )
     )
     return ThemeRegistryEntry(
         theme_id=entry.theme_id, display_name=entry.display_name,
-        aliases=list(entry.aliases), active=entry.active,
+        aliases=list(entry.aliases),
+        representative_codes=list(entry.representative_codes),
+        active=entry.active,
     )
 
 

@@ -204,6 +204,7 @@ class ThemeRegistryUpsertRequest(BaseModel):
     theme_id: str = Field(..., min_length=1, max_length=128)
     display_name: str = Field(..., min_length=1, max_length=128)
     aliases: list[str] = Field(default_factory=list)
+    representative_codes: list[str] = Field(default_factory=list)
     active: bool = True
 
 
@@ -211,4 +212,5 @@ class ThemeRegistryEntry(BaseModel):
     theme_id: str
     display_name: str
     aliases: list[str] = Field(default_factory=list)
+    representative_codes: list[str] = Field(default_factory=list)
     active: bool = True

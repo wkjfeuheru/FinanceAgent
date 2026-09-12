@@ -176,33 +176,34 @@ def test_comparison_yields_independent_conclusions_per_stock():
 
 # ── 子路径 3：选股推荐（候选发现） ─────────────────────────────────────────────
 #
-# 现状（2026-09-12 实测）：候选发现对"行业/主题关键词"无结果。根因是
-# ``get_stock_basic`` 在默认 AKShare 配置下只返回 ``code`` + ``name``，5562 行中
-# 0 行含 ``industry``；而关键词匹配正是依赖 ``industry``。因此只有"直接点名股票"
-# 能命中，任何行业词（消费/白酒/新能源）都返回空，最终回落到澄清。
-# 下面第一个用例锁定"必须诚实澄清、不泄露内部异常"（当前正确行为）；
-# 第二个用例断言期望行为并以 xfail 记录该缺口。
+# 候选发现是「主题代表股 → 关键词搜索」两段式。默认 AKShare 股票列表不含
+# ``industry``，行业/主题口语词（消费）靠字段匹配命不中，因此代表股在注册表中
+# 显式维护——下面用例即验证该路径真实可用。
 
 def test_candidate_search_without_match_asks_for_clarification():
     system = _build_system()
     _classify_as(system, [{
-        "intent": "stock_recommendation", "query": "推荐几个消费龙头股",
+        "intent": "stock_recommendation", "query": "推荐几个完全未登记的主题股",
         "confidence": 0.99, "execution_mode": "candidate_search",
-        "evidence": "推荐几个消费龙头股",
+        "evidence": "推荐几个完全未登记的主题股",
     }])
-    result = _run(system, "推荐几个消费龙头股", "e2e-candidates-clarify")
+    result = _run(system, "推荐几个完全未登记的主题股", "e2e-candidates-clarify")
 
     response = result.get("agent_response", "")
     assert "validation error" not in response, "候选发现不得回落成单股校验错误"
     assert "补充主题" in response or "股票代码" in response
 
 
-@pytest.mark.xfail(
-    reason="行业/主题关键词候选发现依赖 industry，而 AKShare 股票列表不含该字段（见模块顶部说明）",
-    strict=False,
-)
-def test_candidate_recommendation_analyzes_discovered_stocks():
+def test_candidate_recommendation_uses_registered_representative_codes():
+    """注册"消费"代表股后，"推荐几个消费龙头股"应产出逐只结论。"""
+    from finance_agent.research.theme_registry import InMemoryThemeRegistry, ThemeEntry
+
+    registry = InMemoryThemeRegistry([
+        ThemeEntry(theme_id="consumer", display_name="消费", aliases=["消费龙头", "消费股"],
+                   representative_codes=["600519", "000858", "600887"]),
+    ])
     system = _build_system()
+    system.stock_agent = StockAnalysisAgent(theme_registry=registry)
     _classify_as(system, [{
         "intent": "stock_recommendation", "query": "推荐几个消费龙头股",
         "confidence": 0.99, "execution_mode": "candidate_search",
@@ -211,7 +212,7 @@ def test_candidate_recommendation_analyzes_discovered_stocks():
     result = _run(system, "推荐几个消费龙头股", "e2e-candidates")
 
     codes = [item["request"]["stock_codes"][0] for item in result["analysis_results"]]
-    assert codes, "推荐应产出至少一只候选的结论"
+    assert set(codes) == {"600519", "000858", "600887"}, "代表股应逐只产出结论"
     assert set(_actions(result)) <= _ALLOWED_ACTIONS
 
 

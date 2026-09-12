@@ -33,3 +33,34 @@ def test_builtin_registry_covers_ai_compute_aliases():
 
     assert registry.resolve("人工智能") == "ai_compute"
     assert registry.resolve("AI") == "ai_compute"
+    # 内置主题带代表股，供候选发现直接使用。
+    assert registry.resolve("算力") == "ai_compute"
+    entry = registry.match_in_text("推荐人工智能主题股票")
+    assert entry is not None and entry.representative_codes
+
+
+def test_match_in_text_prefers_longest_name():
+    registry = InMemoryThemeRegistry([
+        ThemeEntry(theme_id="ai_compute", display_name="AI", aliases=["人工智能"]),
+        ThemeEntry(theme_id="new_energy", display_name="新能源", aliases=["锂电"]),
+    ])
+
+    assert registry.match_in_text("推荐几个新能源龙头") is not None
+    assert registry.match_in_text("推荐几个新能源龙头").theme_id == "new_energy"
+    assert registry.match_in_text("完全不相关的问题") is None
+
+
+def test_representative_codes_round_trip_and_deactivate_keeps_them():
+    registry = InMemoryThemeRegistry()
+    registry.upsert(ThemeEntry(
+        theme_id="consumer", display_name="消费",
+        aliases=["消费龙头"], representative_codes=["600519", "000858"],
+    ))
+
+    entry = registry.match_in_text("推荐几个消费龙头股")
+    assert entry is not None
+    assert entry.representative_codes == ["600519", "000858"]
+
+    assert registry.deactivate("consumer") is True
+    assert registry.resolve("消费") is None
+    assert registry.match_in_text("推荐几个消费龙头股") is None

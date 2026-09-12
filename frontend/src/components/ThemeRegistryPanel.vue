@@ -9,7 +9,7 @@ const loading = ref(false)
 const authorized = ref(false)
 const saving = ref(false)
 
-const form = ref({ theme_id: '', display_name: '', aliases: '', active: true })
+const form = ref({ theme_id: '', display_name: '', aliases: '', representative_codes: '', active: true })
 
 async function load() {
   loading.value = true
@@ -30,6 +30,11 @@ function parseAliases(text: string): string[] {
   return text.split(/[,，、\s]+/).map(item => item.trim()).filter(Boolean)
 }
 
+/** 代表股只接受 6 位 A 股代码，非法项直接丢弃（避免写入无效候选）。 */
+function parseCodes(text: string): string[] {
+  return parseAliases(text).filter(item => /^\d{6}$/.test(item))
+}
+
 async function save() {
   const theme_id = form.value.theme_id.trim()
   const display_name = form.value.display_name.trim()
@@ -43,6 +48,7 @@ async function save() {
       theme_id,
       display_name,
       aliases: parseAliases(form.value.aliases),
+      representative_codes: parseCodes(form.value.representative_codes),
       active: form.value.active,
     })
     const index = entries.value.findIndex(item => item.theme_id === saved.theme_id)
@@ -61,12 +67,13 @@ function edit(entry: ThemeRegistryEntry) {
     theme_id: entry.theme_id,
     display_name: entry.display_name,
     aliases: entry.aliases.join('、'),
+    representative_codes: entry.representative_codes.join('、'),
     active: entry.active,
   }
 }
 
 function reset() {
-  form.value = { theme_id: '', display_name: '', aliases: '', active: true }
+  form.value = { theme_id: '', display_name: '', aliases: '', representative_codes: '', active: true }
 }
 
 async function deactivate(entry: ThemeRegistryEntry) {
@@ -100,12 +107,13 @@ onMounted(load)
       </div>
       <span class="entry-count">{{ entries.length }}</span>
     </div>
-    <p class="registry-note">用户自由文本主题经此表映射为 theme_id；未登记主题将改走候选搜索。</p>
+    <p class="registry-note">用户自由文本主题经此表映射为 theme_id；代表股用于"推荐几个消费龙头股"这类行业/主题词的候选发现。</p>
 
     <div class="registry-form">
       <el-input v-model="form.theme_id" placeholder="theme_id（如 new_energy）" aria-label="主题标识" />
       <el-input v-model="form.display_name" placeholder="显示名称（如 新能源）" aria-label="显示名称" />
       <el-input v-model="form.aliases" placeholder="别名，用顿号或逗号分隔" aria-label="别名" />
+      <el-input v-model="form.representative_codes" placeholder="代表股代码（6位，逗号分隔，如 600519、000858）" aria-label="代表股" />
       <div class="form-actions">
         <el-button type="primary" :loading="saving" @click="save">保存</el-button>
         <el-button plain @click="reset">清空</el-button>
@@ -119,6 +127,7 @@ onMounted(load)
         <span class="theme-id">{{ entry.theme_id }}</span>
       </div>
       <p class="aliases">{{ entry.aliases.length ? entry.aliases.join('、') : '无别名' }}</p>
+      <p class="aliases">代表股：{{ entry.representative_codes.length ? entry.representative_codes.join('、') : '未设置' }}</p>
       <div class="registry-actions">
         <el-button size="small" plain @click="edit(entry)">编辑</el-button>
         <el-button size="small" type="danger" plain @click="deactivate(entry)">停用</el-button>

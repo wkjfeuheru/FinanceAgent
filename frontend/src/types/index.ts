@@ -119,6 +119,7 @@ export interface ThemeRegistryEntry {
   theme_id: string
   display_name: string
   aliases: string[]
+  representative_codes: string[]
   active: boolean
 }
 
@@ -126,6 +127,7 @@ export interface ThemeRegistryUpsertRequest {
   theme_id: string
   display_name: string
   aliases: string[]
+  representative_codes: string[]
   active: boolean
 }
 

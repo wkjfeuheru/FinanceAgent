@@ -91,9 +91,17 @@ class StockAnalysisAgent(AgentProtocol):
         ]
 
     def _resolve_candidate_codes(self, user_message: str) -> list[str]:
-        """候选发现仍可使用外部数据，但发现结果必须经过同一研究流水线。"""
+        """候选发现：主题代表股优先，其次名称/行业关键词搜索。
+
+        默认 AKShare 股票列表不含 ``industry``，行业/主题口语词（"消费""白酒"）
+        无法靠字段匹配命中；因此在主题注册表中显式维护的代表股先行，
+        再由 ``search_candidates`` 处理"直接点名股票"等情形。
+        """
         if not user_message.strip():
             return []
+        representative = self._representative_codes(user_message)
+        if representative:
+            return representative
         try:
             raw = search_candidates.invoke({"user_query": user_message, "max_results": 5})
             candidates = json.loads(raw) if isinstance(raw, str) else raw
@@ -106,6 +114,16 @@ class StockAnalysisAgent(AgentProtocol):
             for item in candidates
             if isinstance(item, dict) and item.get("code")
         ))[:5]
+
+    def _representative_codes(self, user_message: str) -> list[str]:
+        """命中注册主题则返回其代表股；未命中或读路径不可用时返回空列表。"""
+        try:
+            entry = self._registry().match_in_text(user_message)
+        except Exception:  # noqa: BLE001 - 注册表不可用不得阻断候选发现
+            return []
+        if entry is None:
+            return []
+        return list(dict.fromkeys(entry.representative_codes))[:5]
 
     def _pipeline_for_state(self, stock_data: dict[str, Any]) -> ResearchPipeline:
         if self._injected_pipeline:
@@ -266,8 +284,29 @@ class StockAnalysisAgent(AgentProtocol):
     def _run_theme_screening(
         self, state: dict[str, Any], request: AnalysisRequest, profile: dict[str, Any],
     ) -> dict[str, Any]:
-        """主题筛选：只使用已审核有效成员，产出结构化候选与待核验线索。"""
-        screening = self._get_theme_screener().screen(request, profile)
+        """主题筛选：只使用已审核有效成员，产出结构化候选与待核验线索。
+
+        退回代表股的两个条件（都要求注册表已登记代表股）：
+        - 治理库不可用（未配置 PostgreSQL，筛选器无法构造）；
+        - 该主题**尚未有任何已审核有效成员**。
+        代表股未经主题审核，因此按普通研究结论呈现并明确标注来源，
+        绝不让它们冒充已审核的主题成员；若已有成员但覆盖不足，如实报告短缺。
+        """
+        try:
+            screening = self._get_theme_screener().screen(request, profile)
+        except Exception as exc:  # noqa: BLE001 - 治理库不可用时退回代表股
+            fallback = self._representative_request(request)
+            if fallback is None:
+                return self._failed(state, {
+                    "content": f"主题筛选暂不可用：{exc}", "status": "degraded", "clarification": None,
+                })
+            return self._representative_response(state, request, fallback)
+
+        if screening.status == "insufficient_active_coverage" and not screening.active_members:
+            fallback = self._representative_request(request)
+            if fallback is not None:
+                return self._representative_response(state, request, fallback)
+
         payload = {
             "status": screening.status,
             "personalization_status": screening.personalization_status,
@@ -301,6 +340,45 @@ class StockAnalysisAgent(AgentProtocol):
         state["agent_response"] = content
         self._write_intent_result(state, content, "success" if screening.status == "complete" else "degraded")
         return state
+
+    def _representative_response(
+        self, state: dict[str, Any], request: AnalysisRequest, fallback: AnalysisRequest,
+    ) -> dict[str, Any]:
+        """以主题代表股出研究结论，并明确标注其未经主题审核。"""
+        result_state = self.run_resolved(state, fallback)
+        result_state["agent_response"] = (
+            f"该主题暂无已审核有效成员，以下为「{request.theme_id}」的代表股研究结论"
+            f"（未经主题审核，仅供参考）：\n{result_state.get('agent_response', '')}"
+        )
+        result_state["theme_screening"] = {
+            "status": "representative_fallback",
+            "personalization_status": "research_candidate",
+            "candidates": [], "pending_leads": [],
+            "request": request.model_dump(mode="json"),
+            "active_members": [], "exclusions": [],
+        }
+        result_state["theme_screening_status"] = "representative_fallback"
+        self._write_intent_result(result_state, result_state["agent_response"], "success")
+        return result_state
+
+    def _representative_request(self, request: AnalysisRequest) -> AnalysisRequest | None:
+        """取该主题注册的代表股，构造逐只出结论的研究请求；未注册则返回 None。"""
+        theme_id = request.theme_id
+        if not theme_id:
+            return None
+        try:
+            entries = self._registry().list_themes()
+        except Exception:  # noqa: BLE001
+            return None
+        entry = next((item for item in entries if item.theme_id == theme_id), None)
+        codes = list(entry.representative_codes) if entry is not None else []
+        if not codes:
+            return None
+        kind = AnalysisKind.SINGLE_STOCK if len(codes) == 1 else AnalysisKind.COMPARISON
+        return AnalysisRequest(
+            kind=kind, stock_codes=codes,
+            indicators=list(request.indicators), profile_complete=request.profile_complete,
+        )
 
     @staticmethod
     def _failed(state: dict[str, Any], error: dict[str, Any]) -> dict[str, Any]:

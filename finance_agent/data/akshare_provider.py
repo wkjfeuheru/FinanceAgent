@@ -239,8 +239,24 @@ class AkshareDataSource:
         return rows
 
     def get_financial_indicator(self, stock_code: str) -> list[dict[str, Any]]:
-        """获取 AKShare 财务指标。"""
-        frame = self.ak.stock_financial_analysis_indicator(symbol=str(stock_code).split(".")[0])
+        """获取 AKShare 财务指标。
+
+        必须显式传 ``start_year``：该接口默认 ``start_year='1900'``，实测（2026-09-12）
+        此时服务端返回 **0 行**，会让基本面评分静默退化为中性分。取近三年即可覆盖
+        研究层所需的最近报告期与披露日。
+        """
+        fetch = getattr(self.ak, "stock_financial_analysis_indicator", None)
+        if not callable(fetch):
+            raise UnsupportedProviderCapability(
+                "AKShare 该版本未提供 stock_financial_analysis_indicator 接口"
+            )
+        code = str(stock_code).split(".")[0]
+        start_year = str(datetime.now().year - 2)
+        try:
+            frame = fetch(symbol=code, start_year=start_year)
+        except TypeError:
+            # 兼容旧版本签名（无 start_year 参数）。
+            frame = fetch(symbol=code)
         # 新浪源返回中文指标名（净资产收益率(%)/主营业务收入增长率(%)/...），
         # 统一为 roe/or_yoy/netprofit_yoy 后研究层才能生成基本面评分。
         return normalize_financial_records(_records(frame))

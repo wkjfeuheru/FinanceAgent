@@ -50,6 +50,18 @@ def test_akshare_daily_valuation_is_reachable():
     assert "pe_lyr" in latest
 
 
+def test_akshare_financial_indicator_returns_metrics():
+    """财务指标必须非空：默认 start_year 会让该接口返回 0 行，使基本面评分退化。"""
+    from finance_agent.data.akshare_provider import AkshareDataSource
+
+    rows = AkshareDataSource().get_financial_indicator("600519")
+
+    assert rows, "财务指标不得为空，否则基本面评分退化"
+    latest = rows[-1]
+    assert latest.get("end_date"), "必须带报告期"
+    assert any(latest.get(key) is not None for key in ("roe", "or_yoy", "netprofit_yoy"))
+
+
 def test_baostock_valuation_agrees_with_akshare_on_magnitude():
     """两条估值路径互校。
 

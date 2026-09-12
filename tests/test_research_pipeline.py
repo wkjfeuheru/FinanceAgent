@@ -1,5 +1,6 @@
 """无状态研究流水线与旧状态投影测试。"""
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
@@ -281,3 +282,36 @@ def test_stock_agent_returns_clarification_when_unknown_theme_has_no_candidates(
     assert "新能源" in result["clarification_question"]
     assert "股票研究暂不可用" not in result["agent_response"]
     assert "validation error" not in result["agent_response"]
+
+
+def test_representative_codes_take_priority_over_keyword_search(monkeypatch):
+    """主题代表股优先于关键词搜索：命中"消费"后不再调用 search_candidates。"""
+    from finance_agent.research.theme_registry import InMemoryThemeRegistry, ThemeEntry
+
+    class ForbiddenSearch:
+        def invoke(self, _payload):
+            raise AssertionError("命中代表股时不应再做关键词搜索")
+
+    monkeypatch.setattr("finance_agent.agents.stock_analysis.search_candidates", ForbiddenSearch())
+    registry = InMemoryThemeRegistry([
+        ThemeEntry(theme_id="consumer", display_name="消费",
+                   aliases=["消费龙头"], representative_codes=["600519", "000858"]),
+    ])
+    agent = StockAnalysisAgent(pipeline=_pipeline(), theme_registry=registry)
+
+    assert agent._resolve_candidate_codes("推荐几个消费龙头股") == ["600519", "000858"]
+
+
+def test_keyword_search_used_when_no_theme_matches(monkeypatch):
+    """未命中任何主题时回退到关键词搜索（名称直击仍有效）。"""
+    from finance_agent.research.theme_registry import InMemoryThemeRegistry
+
+    class FakeSearch:
+        def invoke(self, _payload):
+            return json.dumps([{"code": "600519", "name": "贵州茅台"}])
+
+    monkeypatch.setattr("finance_agent.agents.stock_analysis.search_candidates", FakeSearch())
+    agent = StockAnalysisAgent(pipeline=_pipeline(), theme_registry=InMemoryThemeRegistry())
+
+    assert agent._resolve_candidate_codes("分析一下贵州茅台") == ["600519"]
+
