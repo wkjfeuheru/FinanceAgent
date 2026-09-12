@@ -126,6 +126,10 @@ _INTENT_SLOT_SCHEMAS: Dict[str, Dict[str, Any]] = {
              "desc": "用户明确给出的金融产品代码（如基金代码110011），不作为股票代码处理"},
             {"key": "product_names", "type": "text_list", "required": False,
              "desc": "用户想了解/对比的金融产品名称"},
+            {"key": "risk_preference", "type": "text", "required": False,
+             "desc": "用户风险偏好，如 稳健/保守/进取；用于产品适配判断"},
+            {"key": "holding_period", "type": "text", "required": False,
+             "desc": "用户持有期限，如 1年/6个月；用于产品适配判断"},
         ],
     },
     "market_insight": {"title": "市场洞察", "slots": []},
@@ -371,9 +375,47 @@ def _extract_risk(message: str) -> Optional[str]:
     return None
 
 
+_CN_DIGITS = {"零": 0, "一": 1, "两": 2, "二": 2, "三": 3, "四": 4,
+              "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+# 无需数字的常用期限说法（下游 normalize_horizon 可直接识别）。
+_HORIZON_WORDS = ("长期", "中期", "短期", "半年")
+
+
+def _cn_number(text: str) -> Optional[int]:
+    """把常见中文数字（一/二/…/十二/二十四）转为整数；无法解析返回 None。"""
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    if not all(ch in _CN_DIGITS for ch in text):
+        return None
+    if "十" not in text:
+        # 单纯数字串，如"一二"（不常见）按逐位拼接处理
+        value = 0
+        for ch in text:
+            value = value * 10 + _CN_DIGITS[ch]
+        return value
+    left, _, right = text.partition("十")
+    tens = _CN_DIGITS[left] if left else 1
+    ones = _CN_DIGITS[right] if right else 0
+    return tens * 10 + ones
+
+
 def _extract_horizon(message: str) -> Optional[str]:
-    m = re.search(r"(\d+)\s*(天|周|个月|月|年)", message)
-    return "".join(m.groups()) if m else None
+    """抽取持有期限，覆盖阿拉伯数字与常见中文说法（一年/半年/长期）。
+
+    中文口语里"持有一年""半年"远比"持有 1 年"常见；只认阿拉伯数字会让
+    资产配置与产品适配的画像长期拿不到期限。
+    """
+    m = re.search(r"(\d+|[零一两二三四五六七八九十]+)\s*(天|周|个月|月|年)", message)
+    if m:
+        number = _cn_number(m.group(1))
+        if number is not None:
+            return f"{number}{m.group(2)}"
+    for word in _HORIZON_WORDS:
+        if word in message:
+            return word
+    return None
 
 
 def _extract_negated_names(message: str) -> List[str]:
@@ -389,11 +431,57 @@ def _extract_negated_names(message: str) -> List[str]:
     return out
 
 
+# 产品名抽取的噪声前缀：中文无分词，请求短语会被贪婪正则一起吃进产品名，
+# 例如"帮我看看华夏成长基金"整串被当作产品名。这里按前缀反复剥离。
+# 长度降序剥离，避免短词先截断长词（如"请"截断"请分析"）。
+_PRODUCT_NAME_NOISE = (
+    "帮我看看", "帮我推荐", "帮我查查", "帮我", "给我推荐", "给我看看", "给我",
+    "我想了解", "我想知道", "我想", "请问", "请帮我", "请分析", "请对比", "请",
+    "看看", "了解", "分析一下", "对比一下", "比较一下", "分析", "对比", "比较",
+    "推荐几只", "推荐几个", "推荐", "了解一下",
+    "哪些", "什么", "几只", "几个", "一些", "一只", "一支", "一下", "怎么样", "如何",
+)
+
+_PRODUCT_SUFFIXES = ("基金", "ETF", "etf", "债基", "指数", "产品")
+
+
+def _strip_product_noise(token: str) -> str:
+    """反复剥离请求噪声前缀与连词，返回候选产品名。"""
+    text = token.strip()
+    changed = True
+    while changed and text:
+        changed = False
+        for noise in sorted(_PRODUCT_NAME_NOISE, key=len, reverse=True):
+            if text.startswith(noise):
+                text = text[len(noise):].strip()
+                changed = True
+                break
+        else:
+            for sep in ("和", "与", "及", "、"):
+                if text.startswith(sep):
+                    text = text[len(sep):].strip()
+                    changed = True
+                    break
+    return text
+
+
 def _candidate_product_names(message: str) -> List[str]:
+    """从消息中抽取产品名候选，剥离请求噪声并剔除只剩类型词的空壳。
+
+    仅保留"类型词之前仍有实际名称"的候选：``推荐几只基金`` 不应产出产品名，
+    而 ``华夏成长基金``（剥离后仍含"华夏成长"）才是有效候选。
+    """
     if not message:
         return []
     parts = re.findall(r"[\u4e00-\u9fa5A-Za-z0-9]{2,12}(?:基金|ETF|债基|指数|产品)", message)
-    return list(dict.fromkeys(parts))[:5]
+    cleaned: List[str] = []
+    for raw in parts:
+        name = _strip_product_noise(raw)
+        suffix = next((s for s in _PRODUCT_SUFFIXES if name.endswith(s)), None)
+        if suffix is None or len(name) <= len(suffix):
+            continue
+        cleaned.append(name)
+    return list(dict.fromkeys(cleaned))[:5]
 
 
 def _deterministic_extract(message: str, intent: str) -> Dict[str, Any]:
@@ -436,6 +524,13 @@ def _deterministic_extract(message: str, intent: str) -> Dict[str, Any]:
         products = _candidate_product_names(message)
         if products:
             slots["product_names"] = products
+        # 产品适配判断需要画像：与资产配置用同一套确定性抽取。
+        risk = _extract_risk(message)
+        if risk:
+            slots["risk_preference"] = risk
+        horizon = _extract_horizon(message)
+        if horizon:
+            slots["holding_period"] = horizon
 
     return _normalize_raw({"slots": slots, "negatives": {}, "cleared": [], "ambiguity": [], "missing": []})
 
@@ -528,6 +623,10 @@ def _resolve_slots(intent: str, raw: Dict[str, Any], prior: Dict[str, Any]) -> D
             _as_product_code_list(merged.get(_SLOT_PRODUCT_CODES))
         ))[:10]
         result["product_names"] = _as_text_list(merged.get("product_names"))
+        # 画像字段与资产配置同义：产品适配判断需要风险偏好与持有期限。
+        for field in ("risk_preference", "holding_period"):
+            if merged.get(field) not in (None, ""):
+                result[field] = merged[field]
 
     return result
 
@@ -647,6 +746,11 @@ class SlotExtractor:
                     resolved.get(_SLOT_PRODUCT_CODES)
                 )
                 slots_by_intent[intent]["product_names"] = _as_text_list(resolved.get("product_names"))
+                # 产品请求也可能携带画像：与资产配置一致地回填缺失画像，
+                # 否则产品适配判断对本轮请求永远不可用。
+                for field in ("risk_preference", "holding_period"):
+                    if resolved.get(field) not in (None, ""):
+                        profile_from_slots.setdefault(field, resolved[field])
 
         state["intent_slots"] = slots_by_intent
         if resolved_stocks:

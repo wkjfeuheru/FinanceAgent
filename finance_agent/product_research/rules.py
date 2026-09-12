@@ -41,6 +41,11 @@ def normalize_profile_risk(value: Any) -> str | None:
 
 
 def normalize_horizon(value: Any) -> str | None:
+    """把持有期限归一为 short/medium/long；无法识别返回 None。
+
+    除固定说法外，也按数量级判定：≥1 年 → long，≥6 个月 → medium，
+    其余月/周/天 → short。避免"3年""18个月"这类常见表述被当作未识别。
+    """
     raw = str(value or "").strip().lower().replace(" ", "")
     aliases = {
         "short": "short", "短期": "short", "3个月": "short", "三个月": "short",
@@ -49,8 +54,17 @@ def normalize_horizon(value: Any) -> str | None:
     }
     if raw in aliases:
         return aliases[raw]
-    if re.fullmatch(r"(?:1[2-9]|[2-9]\d)个月", raw):
-        return "long"
+    years = re.fullmatch(r"(\d+)年", raw)
+    if years:
+        return "long" if int(years.group(1)) >= 1 else None
+    months = re.fullmatch(r"(\d+)个月", raw)
+    if months:
+        count = int(months.group(1))
+        if count >= 12:
+            return "long"
+        return "medium" if count >= 6 else "short"
+    if re.fullmatch(r"\d+(?:周|天)", raw):
+        return "short"
     return None
 
 

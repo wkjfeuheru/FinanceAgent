@@ -304,12 +304,24 @@ class AdvisorSystem:
                     evidence_ids.append(evidence_id)
         return list(dict.fromkeys([*evidence_ids, fact_id]))
 
+    # 意图级状态 → 专家结果状态的映射。此前只识别 degraded，任何其它非 success
+    # 文案（例如产品专家的 failed）都会被报成 SUCCESS，使崩溃看起来像成功。
+    _INTENT_STATUS_TO_EXPERT = {
+        "success": ExpertStatus.SUCCESS,
+        "degraded": ExpertStatus.DEGRADED,
+        "failed": ExpertStatus.FAILED,
+        "error": ExpertStatus.FAILED,
+        "timeout": ExpertStatus.TIMEOUT,
+        "blocked": ExpertStatus.FAILED,
+        "cancelled": ExpertStatus.CANCELLED,
+    }
+
     def _make_task_result(self, state: Dict[str, Any], task: Any, expert: str) -> ExpertResult:
         """从兼容专家状态构造严格的 task 级结果。"""
         intent = task.intent.value if task.intent else ""
         intent_result = (state.get("intent_results", {}) or {}).get(intent, {})
         status_name = str(intent_result.get("status", "success"))
-        status = ExpertStatus.DEGRADED if status_name == "degraded" else ExpertStatus.SUCCESS
+        status = self._INTENT_STATUS_TO_EXPERT.get(status_name, ExpertStatus.SUCCESS)
         fact_ids = self._capture_task_facts(state, task)
         return ExpertResult(
             task_id=task.task_id,

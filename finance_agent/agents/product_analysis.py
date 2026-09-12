@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timezone
 from typing import Any
@@ -10,6 +11,8 @@ from finance_agent.agents.base import AgentProtocol
 from finance_agent.contracts import FactSnapshot
 from finance_agent.product_research.contracts import ProductResearchRequest, ProductResearchResult
 from finance_agent.product_research.pipeline import ProductResearchPipeline
+
+logger = logging.getLogger(__name__)
 
 
 class _LazyProductLookup:
@@ -154,7 +157,11 @@ class ProductAnalysisAgent(AgentProtocol):
         """执行一次产品研究，不读取或写入 ReAct 会话状态。"""
         try:
             result = self._pipeline.analyze(self._request(state))
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - 失败只给固定文案，细节进日志
+            # 异常原文可能含连接串/校验细节，不得进入用户可见报告。
+            logger.exception(
+                "产品研究失败 requirement=%s", state.get("requirement") or state.get("user_message"),
+            )
             state["product_analysis"] = {
                 "schema_version": "product_research.v1",
                 "type": self._kind(str(state.get("user_message", ""))),
@@ -165,7 +172,7 @@ class ProductAnalysisAgent(AgentProtocol):
                 "data_quality": "critical_missing",
                 "personalization_status": "research_candidate",
                 "ambiguities": [],
-                "report": f"产品研究暂不可用：{exc}",
+                "report": "产品研究暂不可用，请稍后重试。",
             }
             state["agent_response"] = state["product_analysis"]["report"]
             state.setdefault("intent_results", {})["product_analysis"] = {
