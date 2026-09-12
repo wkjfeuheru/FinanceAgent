@@ -108,9 +108,13 @@ class ResearchPipeline:
 
     @staticmethod
     def _evidence_for(security: SecuritySnapshot, facts: list[FactSnapshot]) -> list[FactSnapshot]:
-        """只引用该标的自己的证据事实；无匹配时退回整轮事实。"""
-        owned = [fact for fact in facts if fact.payload.get("code") == security.code]
-        return owned or list(facts)
+        """只引用该标的自己的证据事实；无匹配时返回空。
+
+        曾经无匹配就退回**整轮**事实，会让该标的的结论引用其他标的的证据，
+        污染逐标的归属与审计重放关联（比较请求下尤其明显）。宁可证据为空，
+        也不张冠李戴。
+        """
+        return [fact for fact in facts if fact.payload.get("code") == security.code]
 
     def _build_result(
         self,

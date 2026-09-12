@@ -48,7 +48,7 @@ def test_rule_version_is_in_assessment():
 
     assessment = RuleEngine.default().evaluate(snapshot, snapshot.request)
 
-    assert assessment.rule_version == "research_rules/v1.1"
+    assert assessment.rule_version == "research_rules/v1.2"
 
 
 def test_previous_rule_version_still_loads_for_replay():

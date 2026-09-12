@@ -48,11 +48,17 @@ class DeterministicAssessment:
 _RULE_FILES = {
     "research_rules/v1": "v1.json",
     "research_rules/v1.1": "v1.1.json",
+    "research_rules/v1.2": "v1.2.json",
 }
 
 # 当前默认版本。这里是唯一真源——此前默认值重复声明在 load_rules 的参数、
 # refresh 的服务默认值与 snapshot_builder 的常量三处，容易各自漂移。
-CURRENT_RULES_VERSION = "research_rules/v1.1"
+#
+# v1.2 口径变化：适配度（suitability）在缺值时不再默认 50.0。此前画像完整的请求
+# 会被静默注入一个中性适配度并计入加权总分，等于**凭空造分**、可能改变关注/观望
+# 结论；现在缺值即排除该项，只按实际可计算的三项加权。口径变化必须换版本号，
+# 否则同一 `(theme_id, stock_code, rule_version, as_of)` 键上的 upsert 会覆盖旧口径快照。
+CURRENT_RULES_VERSION = "research_rules/v1.2"
 
 
 def load_rules(version: str = CURRENT_RULES_VERSION) -> dict[str, Any]:
@@ -163,9 +169,15 @@ class RuleEngine:
         request: AnalysisRequest,
         indicators: dict[str, Any],
     ) -> float | None:
+        """适配度：仅在画像完整且**确有**适配度指标时才计分。
+
+        曾经在缺值时默认 50.0——那是凭空造出的中性分并会进入加权总分，
+        可改变关注/观望结论。现在缺值即返回 None，由 ``_weighted_total``
+        排除该项，只按实际可计算的项加权。
+        """
         if not request.profile_complete:
             return None
-        return _bounded_score(indicators.get("suitability_score", 50.0))
+        return _bounded_score(indicators.get("suitability_score"))
 
     @staticmethod
     def _personalization_status(request: AnalysisRequest) -> str:

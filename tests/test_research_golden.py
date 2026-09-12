@@ -48,7 +48,7 @@ def test_complete_fixture_is_watch_and_replayable():
     second = _result("complete_600519.json")
 
     assert first.action.value == "关注"
-    assert first.rule_version == "research_rules/v1.1"
+    assert first.rule_version == "research_rules/v1.2"
     assert first.data_quality == "complete"
     # 评分必须由夹具里的原始财务/行情字段推导，而不是夹具直接给出的评分。
     assert first.scores["fundamental"] == 80.0

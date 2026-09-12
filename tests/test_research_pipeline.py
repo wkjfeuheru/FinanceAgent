@@ -102,7 +102,7 @@ def test_pipeline_keeps_structured_action_separate_from_narrative():
 
     assert result.action.value == "关注"
     assert result.report_mode == "template_fallback"
-    assert result.rule_version == "research_rules/v1.1"
+    assert result.rule_version == "research_rules/v1.2"
     assert result.personalization_status == "research_candidate"
     assert "关注" in result.narrative
 

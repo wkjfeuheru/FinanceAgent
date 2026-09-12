@@ -108,6 +108,22 @@ def _with_cross_reasons(quality: DataQuality, reasons: list[str]) -> DataQuality
     )
 
 
+def _with_warnings(quality: DataQuality, warnings: list[str]) -> DataQuality:
+    """把披露性原因并入快照级 warnings（不升级为关键缺失）。
+
+    用于"结论仍成立、但证据边界需披露"的情形（例如评估时点不可重放）：
+    若误并入 ``missing_critical``，会阻断结论输出，属于过度反应。
+    """
+    if not warnings:
+        return quality
+    merged = list(dict.fromkeys([*quality.warnings, *warnings]))
+    return DataQuality(
+        status=quality.status if quality.missing_critical else "warning",
+        missing_critical=list(quality.missing_critical),
+        warnings=merged,
+    )
+
+
 def _without_volatile(record: Any) -> Any:
     """剔除随抓取时刻变化的字段，供证据摘要使用。"""
     if not isinstance(record, dict):
@@ -162,7 +178,7 @@ class SnapshotBuilder:
         request: AnalysisRequest,
     ) -> tuple[MarketDataSnapshot, list[FactSnapshot]]:
         raw_by_code = {code: self._fetch(code) for code in request.stock_codes}
-        evaluated_at = self._resolve_evaluated_at(raw_by_code)
+        evaluated_at, evaluated_at_source = self._resolve_evaluated_at(raw_by_code)
 
         built = [
             self._build_security(code, raw_by_code[code], evaluated_at)
@@ -173,6 +189,11 @@ class SnapshotBuilder:
             item.security.code: item.report_period for item in built if item.report_period
         })
         quality = _with_cross_reasons(quality, cross_reasons)
+        # 评估时点若只能取墙钟（无任何 fetched_at），结论不可确定性重放。
+        # 这一点必须**显式披露**，不能静默默认——否则同一份输入会得到
+        # 不同的事实 ID 与可能不同的新鲜度判定。
+        if evaluated_at_source == "wallclock":
+            quality = _with_warnings(quality, ["evaluated_at_unavailable"])
 
         snapshot = MarketDataSnapshot(
             request=request,
@@ -181,7 +202,8 @@ class SnapshotBuilder:
         )
         facts = [
             self._make_fact(item, evaluated_at=evaluated_at, request=request,
-                            cross_reasons=cross_reasons, snapshot_status=quality.status)
+                            cross_reasons=cross_reasons, snapshot_status=quality.status,
+                            evaluated_at_source=evaluated_at_source)
             for item in built
         ]
         return snapshot, facts
@@ -194,13 +216,15 @@ class SnapshotBuilder:
             return {"error": str(exc)}
         return raw if isinstance(raw, dict) else {"error": "网关返回非对象数据"}
 
-    def _resolve_evaluated_at(self, raw_by_code: dict[str, Any]) -> datetime:
-        """评估时点 = 各数据项抓取时刻的最大值；缺失时用当前时间。
+    def _resolve_evaluated_at(self, raw_by_code: dict[str, Any]) -> tuple[datetime, str]:
+        """评估时点 = 各数据项抓取时刻的最大值，返回 ``(时点, 来源)``。
 
-        评估时点必须随快照一起记录，否则重放会因“当前时间”漂移而得到不同结论。
+        来源为 ``"fetch"``（取自真实 ``fetched_at``，可确定性重放）或
+        ``"wallclock"``（无任何 ``fetched_at`` 可用，只能取当前时间——此时结论
+        **不可重放**，调用方必须披露）。绝不静默把墙钟当作权威评估时点。
         """
         if self._evaluated_at is not None:
-            return self._evaluated_at
+            return self._evaluated_at, "injected"
         moments = [
             moment
             for raw in raw_by_code.values()
@@ -208,7 +232,9 @@ class SnapshotBuilder:
             if isinstance(raw, dict) and isinstance(raw.get(key), dict)
             and (moment := _parse_datetime(raw[key].get("fetched_at"))) is not None
         ]
-        return max(moments) if moments else datetime.now(timezone.utc)
+        if moments:
+            return max(moments), "fetch"
+        return datetime.now(timezone.utc), "wallclock"
 
     def _build_security(
         self,
@@ -320,8 +346,13 @@ class SnapshotBuilder:
         request: AnalysisRequest,
         cross_reasons: list[str],
         snapshot_status: str,
+        evaluated_at_source: str = "fetch",
     ) -> FactSnapshot:
-        """生成可重放事实：完整原始输入 + 评估时点 + 逐项溯源 + 内容摘要 ID。"""
+        """生成可重放事实：完整原始输入 + 评估时点 + 逐项溯源 + 内容摘要 ID。
+
+        评估时点来源会写入``provenance``：``wallclock`` 表示该记录**不可确定性
+        重放**（无任何 fetched_at），重放方据此可判定证据不足而不是误报不一致。
+        """
         security = built.security
         # 完整保存网关原始返回（含取数失败时的 error 字段），重放才能复现同一次判定。
         evidence_inputs = _without_volatile(built.raw) if isinstance(built.raw, dict) else {}
@@ -343,6 +374,7 @@ class SnapshotBuilder:
             "history_adjustment": security.history.get("adjustment") if isinstance(security.history, dict) else None,
             # 以下字段是审计重放输入：完整原始取数字段、评估时点与逐项溯源。
             "evaluated_at": evaluated_at.isoformat(),
+            "evaluated_at_source": evaluated_at_source,
             "request": request.model_dump(mode="json"),
             "cross_security_reasons": list(cross_reasons),
             "inputs": evidence_inputs,
