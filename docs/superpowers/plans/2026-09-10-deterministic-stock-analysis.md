@@ -1,5 +1,11 @@
 # 确定性股票分析实施计划
 
+> **状态：已实施完成（2026-09 复核）。** 复选框未回填、保持原样作为历史记录；
+> 实际进度以 git 历史为准（`0465b16` 等）。全部任务 1–5 的产物已存在并入库：
+> `finance_agent/research/`（contracts/request_parser/snapshot_builder/rules/rule_engine/
+> pipeline/narrative/legacy_adapter）及对应测试。后续修订见
+> `2026-09-11-stock-analysis-p0.md` 与 `2026-09-11-stock-analysis-p1-p2.md`。
+
 > **供智能代理执行：** 必须使用子技能 `superpowers:subagent-driven-development`（推荐）或 `superpowers:executing-plans`，逐项实施本计划。所有步骤使用复选框（`- [ ]`）跟踪。
 
 **目标：** 用确定性、可审计的单股分析与股票比较流水线替换有状态的 ReAct 股票专家；迁移期间保持当前聊天 API 兼容。

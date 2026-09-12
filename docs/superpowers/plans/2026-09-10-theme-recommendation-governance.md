@@ -1,5 +1,13 @@
 # 主题推荐治理实施计划
 
+> **状态：已实施完成（2026-09 复核）。** 复选框未回填、保持原样作为历史记录；
+> 实际进度以 git 历史为准（`6631fd6`、`6e18fc2`、`57d5e0f` 等）。全部任务 1–5
+> 的产物已存在并入库：`sql/004_research_governance.sql`、`research/theme_models.py`、
+> `theme_repository.py`、`theme_discovery.py`、`screener.py`、`refresh.py`、`backtest.py`、
+> admin 审核路由与 `ThemeReviewQueue.vue`，及对应测试。主题注册表（名称→theme_id）
+> 于 2026-09-12 另立（`sql/005_theme_registry.sql`），见
+> `2026-09-12-stock-analysis-routing-fixes.md`。
+
 > **供智能代理执行：** 必须使用子技能 `superpowers:subagent-driven-development`（推荐）或 `superpowers:executing-plans`，逐项实施本计划。所有步骤使用复选框（`- [ ]`）跟踪。
 
 **目标：** 在确定性研究流水线之上，构建可审计的 PostgreSQL 主题候选池、Provider 驱动的候选发现、管理员审核、确定性主题筛选和研究运行记录。

@@ -112,13 +112,17 @@
 
 ## 遗留决策与已知限制
 
-- **规则版本（已裁决）**：保持 `research_rules/v1` —— 新鲜度门禁本就声明在 v1（只是未实现），
-  实现它属于补齐 v1，其余新键为 warning 语义、不改既有评分数值。
-  ⚠️ 并行计划 `2026-09-11-data-source-coverage-p0.md` 的 **D13 要求 bump `rule_version`**，
-  与本裁决冲突：**以本裁决为准，D13 需相应修改**，否则 task 7 会覆盖该决定。
-- **AKShare 部署**：AKShare 不提供日估值接口与披露日期，因此纯 AKShare 部署下
-  `data_quality` 恒为 `warning`（含 `valuation_metrics_missing`、
-  `fundamental_disclosure_date_missing`），结论不受阻但不再显示 `complete`。
+- **规则版本（实际结果，2026-09-12 勘误）**：本文件最初裁决"保持 `research_rules/v1`，
+  D13 需相应修改"。**该裁决已被推翻**：并行计划 `2026-09-11-data-source-coverage-p0.md`
+  的 task 7 实际发布了 `research_rules/v1.1`（补上 PE/PB 后基本面评分由 5 项而非 3 项
+  平均而成，口径变化必须换版本号，否则同一 `(theme, stock, rule_version, as_of)` 键上的
+  upsert 会覆盖旧口径历史快照）。当前生效版本见 `finance_agent/research/rule_engine.py`
+  的 `CURRENT_RULES_VERSION`；旧版本 `v1` 保留用于按记录版本号精确重放。
+- **AKShare 部署（2026-09-12 勘误）**：~~AKShare 不提供日估值接口~~——该结论已作废。
+  AKShare 1.18.94 起 `stock_value_em` 按股票代码提供日频估值（PE(TTM)/PE(静)/PB/PS/
+  总市值/流通市值，起点 `max(2018-01-02, 上市日)`），已由数据源覆盖计划接入并实测
+  （2111 行 × 13 列）。披露日期仍缺失，纯 AKShare 部署下 `data_quality` 仍为 `warning`
+  （含 `fundamental_disclosure_date_missing`），但估值字段不再缺失。
 - **日历降级**：Provider 日历不可用时按工作日估算，长假附近可能把有效数据判为陈旧
   （会同时给出 `trading_calendar_unavailable` 提示）。
 - **短期记忆体积**：`handle_message` 返回的 facts 仍会随 `memory.update_recent_summary`
