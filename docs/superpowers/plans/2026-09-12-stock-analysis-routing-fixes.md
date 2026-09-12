@@ -86,4 +86,11 @@
 
 ## 遗留（不在本次）
 
-真实指数/市场宽度数据（新 provider 能力 + `board_codes` 指数符号）；`market_insight` 的 `sentiment`/`capital_flow`；`themes` 表 admin API/前端；北向数据；文档债（P1/P2 计划仍称保持 `research_rules/v1`，实际已发布 `v1.1`）。
+~~真实指数/市场宽度数据（新 provider 能力 + `board_codes` 指数符号）；`market_insight` 的
+`sentiment`/`capital_flow`；`themes` 表 admin API/前端；北向数据；文档债（P1/P2 计划仍称保持
+`research_rules/v1`，实际已发布 `v1.1`）。~~
+
+**（2026-09-12 后续，全部已闭环）** 以上各项均已由后续提交交付：
+`2026-09-12-market-insight-data.md`（指数/宽度/资金面三模式 + themes admin API/前端 + 北向披露）、
+`2026-09-12-industry-and-disclosure-date.md`（行业字段与披露日），规则版本现为 `research_rules/v1.2`。
+本文件仅作为当时的路由修复记录保留。

@@ -59,6 +59,9 @@ def _build_system() -> AdvisorSystem:
     system = object.__new__(AdvisorSystem)
     system.checkpointer = MemorySaver()
     system.manager = ManagerAgent()
+    # 注意：注入 pipeline 是为了离线可比；但它会让专家跳过取数，
+    # 因此 `stock_analysis.basic_info` 不会出现（生产路径会合并）。
+    # 比较语义字段（结论/评分/证据ID）时应忽略该差异。
     system.stock_agent = StockAnalysisAgent(pipeline=ResearchPipeline(
         snapshot_builder=SnapshotBuilder(Gateway()), rule_engine=RuleEngine.default(),
     ))

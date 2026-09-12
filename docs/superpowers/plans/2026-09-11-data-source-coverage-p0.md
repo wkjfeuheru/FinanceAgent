@@ -40,7 +40,7 @@
 | D13 | bump `rule_version` 并把 `last_metadata.source` 落进 payload；**不**给快照主键加 provider 维度。 |
 | D14 | 网络型 provider 用「构造真实适配器后替换内部句柄」的桩（`provider.bs = StubBaostock()`），另加一个默认跳过的联网冒烟测试。 |
 | D15 | K 线主路径 → `stock_zh_a_daily`；`stock_zh_a_hist` 降为该适配器内回退；腾讯源不用。 |
-| D16 | 北交所进范围：`_code()` 对 BJ 前缀显式报错；`43`/`83` → `920` 重映射。 |
+| D16 | 北交所进范围：`_code()` 对 BJ 前缀显式报错；~~`43`/`83` → `920` 重映射~~ **（已推翻，见 Task 3 Step 4 偏差说明：改为显式报错、不做映射）**。 |
 | D17 | 加最小落盘缓存（键 `provider, code, adjust, start, end`）+ 退避，只覆盖 K 线与估值。 |
 | D18 | `_call` 把「未声明能力」记入独立的 `unsupported`，不参与 `degraded`。 |
 | D19 | `get_income` 归一化、AKShare `get_trade_cal` 不在本次范围。 |
@@ -365,7 +365,7 @@ git commit -m "test: add opt-in network smoke test and refresh data source docs"
 - **AKShare 未安装**：`ProviderManager._build_providers` 已捕获 `ImportError`，但仅在 INFO 级记录——静默降级。若 AKShare 缺席，估值仍可由 BaoStock 提供。
 - **BaoStock 与 AKShare 都缺席**：`get_daily_basic` 抛 `ProviderUnavailableError`，`stockdata.py:79-84` 的 best-effort 语义保证行情不受连累。
 - **北交所股票**：不会路由到 BaoStock；若 AKShare 也失败，得到显式的 `ProviderUnavailableError` 而不是空数据。
-- **`stock_value_em` 对已废止的 43/83 代码返回空**：重映射后应命中 `920` 代码；若重映射表构建失败，降级为原值并记 warning。
+- **`stock_value_em` 对已废止的 43/83 代码返回空**：**重映射已推翻**，`ensure_current_code()` 对这些前缀直接显式报错，不会进入取数路径；`stock_value_em` 的空返回只可能来自现行代码的缺失数据。
 - **新浪源封 IP**：退避 3 次仍失败时抛 `ProviderUnavailableError`，由 `_call` 继续降级到 BaoStock。
 - **缓存目录不可写**：`quote_cache.write` 失败只记 warning，不影响取数。
 

@@ -155,7 +155,8 @@ adjustflag=3/2/1 三种口径下 peTTM/pbMRQ/psTTM/pcfNcfTTM 全部非空且数�
 
 - BaoStock **完全不支持北交所**：`bj.430047` 报 `error_code=10004011 股票代码未识别sh、sz`；而 `sh.830799`/`sz.830799` 返回 `error_code=0` 但 **0 行**——静默空数据，最危险的失败方式。
 - 现有 `baostock_provider.py:20-25` 的 `_code()` 是「`6`/`68` 开头 → `sh`，其余 → `sz`」，对北交所代码会静默返回空。改为对 `43/83/87/92/920` 前缀**显式报错**，保证北交所永不被路由到 BaoStock。
-- `43`/`83` 开头是**已废止代码**：`ak.stock_info_bj_name_code()` 返回 343 行，**100% 为 `920` 前缀**，`830799`/`430047` 均已不在列。加 43/83→920 重映射，映射源优先用 `stock_info_bj_name_code()`（免 token），Tushare `stock_basic` 作为二期。
+- `43`/`83` 开头是**已废止代码**：`ak.stock_info_bj_name_code()` 返回 343 行，**100% 为 `920` 前缀**，`830799`/`430047` 均已不在列。~~加 43/83→920 重映射，映射源优先用 `stock_info_bj_name_code()`（免 token），Tushare `stock_basic` 作为二期。~~
+  **（2026-09-12 更正：重映射被实测推翻）** 免费数据源**不存在**旧→新代码对照表，且"取末三位"规则已被证伪——`830799`（诺思兰德）的现行代码是 `920047`，而 `920799` 是另一家公司。猜测映射会把用户导到错误的股票上，因此**当前实现是对这组前缀显式报错、不做任何映射**（`finance_agent/data/board_codes.py::ensure_current_code`）。
 
 ### 缓存与退避（最小版本）
 
@@ -180,7 +181,7 @@ adjustflag=3/2/1 三种口径下 peTTM/pbMRQ/psTTM/pcfNcfTTM 全部非空且数�
 
 1. 真实 `AkshareDataSource` 经 `stock_value_em` 取到估值后，`build_scores` 的基本面分数**确实包含** `pe_ttm` 与 `pb` 两项输入（这是本次缺口能藏这么久的漏洞所在，必须有断言）。
 2. `akshare_provider.get_daily(adjustment="forward")` 走 `stock_zh_a_daily` 并返回按日期升序的前复权记录。
-3. 北交所代码经 `BaostockDataSource` 得到显式错误而非空列表；`43`/`83` 前缀代码被重映射到 `920`。
+3. 北交所代码经 `BaostockDataSource` 得到显式错误而非空列表；`43`/`83` 前缀代码**被显式报错、不做重映射**（原计划的重映射经实测推翻，见 §"非目标"下方更正说明）。
 4. 缺少 PE/PB 时 `score_restrictions` 逐字段记录，且行动结论**不是**"数据不足"。
 5. `_call` 在 provider 未声明能力时不再置 `degraded: true`。
 6. 既有研究契约、流水线、主题筛选、审计重放与图路由测试继续通过。

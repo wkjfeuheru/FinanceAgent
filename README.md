@@ -5,8 +5,8 @@
 ## 功能特性
 
 - 多 Agent 工作流：由 Supervisor 规划并协调各专业 Agent。
-- A 股数据：通过 Tushare MCP 获取股票信息、最近交易日行情、历史 K 线和财务指标。
-- 可选数据源：配置 Tushare MCP URL 后，通过 Streamable HTTP 接入远程数据服务。
+- A 股数据：默认按 `DATA_PROVIDER_ORDER` 在 AKShare / Tushare MCP / BaoStock 之间按方法降级，获取股票信息、最近交易日行情、历史 K 线和财务指标。
+- 可选数据源：配置 `TUSHARE_MCP_URL` 后启用 Tushare MCP 作为其中一路（需 ≥2000 积分才能提供股息率）。
 - 智能选股：可选接入联网搜索，辅助识别行业、主题和股票名称。
 - 基本面与技术面分析：支持财务指标及 MACD、KDJ、RSI、BOLL、MA、WR 等指标。
 - 资产配置：计算收益率、波动率等指标并生成组合配置建议。
@@ -29,9 +29,9 @@ Supervisor（任务规划）
    |
    +--> Profile Extraction（投资画像提取）
    +--> 股票识别与校验
-   +--> Data Fetch（Tushare MCP 数据获取）
+   +--> Data Fetch（按 Provider 顺序降级取数）
    +--> Stock Analysis（基本面 + 技术面分析）
-   +--> Market Insight（市场洞察，大盘概览数据待接入）
+   +--> Market Insight（市场洞察：大盘/情绪/资金面）
    +--> Asset Allocation（资产配置）
    +--> Compliance（合规审查）
    |
@@ -286,6 +286,11 @@ npm run dev
 | `DELETE` | `/api/conversations/{customer_id}/{conversation_id}` | 删除会话 | 是，仅限本人 |
 | `POST` | `/api/reset/{customer_id}` | 重置用户会话 | 是，仅限本人 |
 | `POST` | `/api/admin/clear-records` | 清除记录 | 是，全部清除仅管理员 |
+| `GET` | `/api/admin/themes/{theme_id}/leads` | 查看主题待核验线索 | 是，仅管理员 |
+| `POST` | `/api/admin/theme-leads/{lead_id}/review` | 审核主题线索 | 是，仅管理员 |
+| `GET` | `/api/admin/themes` | 查看主题注册表 | 是，仅管理员 |
+| `POST` | `/api/admin/themes` | 新增/更新主题（名称、别名、代表股） | 是，仅管理员 |
+| `DELETE` | `/api/admin/themes/{theme_id}` | 停用主题（软删） | 是，仅管理员 |
 | `DELETE` | `/api/account` | 删除当前账户 | 是 |
 | `GET` | `/api/health` | 服务健康检查 | 否 |
 
@@ -382,7 +387,7 @@ npm run build
 - BaoStock **不支持北交所**（`bj.` 报错、`sh.`/`sz.` 会静默返回 0 行），本仓库对北交所代码显式报错。已废止的 `43`/`83`/`87` 开头代码同样显式报错而**不做猜测映射**：末三位规则会把 `830799`（诺思兰德，现行为 `920047`）错指到另一家公司。
 - 行情与估值按 `(provider, code, 复权口径, 日期窗口)` 落盘缓存，默认 TTL 3600 秒，位于仓库根目录 `.cache/quotes`（`QUOTE_CACHE_TTL_SECONDS=0` 可关闭）。缓存写入失败只记告警，不影响取数。
 - 行业与披露日来自东财业绩报表 `stock_yjbb_em`（按报告期，自动回退到最近已披露期）：行业为**申万二级**（如"白酒Ⅱ"）并与 A 股清单合并，供候选搜索的行业关键词匹配；披露日按报告期回填到财务指标。二者均为**补全信息**——取数失败时对应字段缺失、限制项如实呈现，不阻断分析。财务指标接口必须显式传 `start_year`，否则默认 `1900` 会返回 0 行并使基本面评分退化为中性分。
-- 规则版本当前为 `research_rules/v1.1`：补上 PE/PB 后基本面评分由 5 项而非 3 项平均而成，口径变化必须换版本号，否则同一 `(theme, stock, rule_version, as_of)` 键上的 upsert 会覆盖旧口径的历史快照。旧版本 `research_rules/v1` 仍然保留，审计记录按其中记录的版本号精确重放。
+- 规则版本当前为 `research_rules/v1.2`：**v1.2** 起适配度（suitability）在缺值时不再默认 50.0，改为排除该项按实际可算项加权（此前画像完整的请求会被静默注入中性适配度、可能改变结论）；**v1.1** 补上 PE/PB 后基本面评分由 5 项而非 3 项平均而成。口径变化必须换版本号，否则同一 `(theme, stock, rule_version, as_of)` 键上的 upsert 会覆盖旧口径的历史快照。旧版本 `v1`/`v1.1` 仍然保留，审计记录按其中记录的版本号精确重放。
 - **使用限制：** 这些第三方行情数据仅供个人研究使用，不得再分发；本地缓存亦仅供本机使用。
 
 ## 安全注意事项

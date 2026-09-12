@@ -18,10 +18,8 @@
 - 缺少可验证的原始数据时保持“数据不足”，不得生成占位评分或伪造结论。
 - 不修改 `AnalysisRequest` / `MarketDataSnapshot` 等冻结契约字段；新增信息只落在
   `FactSnapshot.payload` 与新模块内。
-- 规则版本：保持 `research_rules/v1`。新鲜度门禁原本就声明在 v1（只是未实现），
-  实现它属于补齐 v1；其余新键为披露性（warning）语义，不改变既有评分数值。
-  若需严格版本不可变，可改为 `research_rules/v2`（仅 `v1.json` 的 version 字符串
-  与测试引用需同步，见"遗留决策"）。
+- 规则版本：**本文件最初的"保持 `research_rules/v1`"设想已被推翻**（见文末"遗留决策与已知限制"）：
+  实际按口径变化逐次换版，当前为 `research_rules/v1.2`。旧版本保留用于精确重放。
 
 ## 决策与假设
 

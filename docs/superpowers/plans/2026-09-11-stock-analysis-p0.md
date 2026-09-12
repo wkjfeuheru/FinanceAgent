@@ -150,7 +150,9 @@ git add finance_agent/research/scoring.py finance_agent/research/snapshot_builde
 git commit -m "fix: derive deterministic research scores from raw data"
 ```
 
-**待办：** 本次未提交，工作区同时存在另一条未提交的主题发现改动，需一并确认后再提交。
+**已入库说明（2026-09-12 更正）：** 本步骤所列批次已随互咬基线快照 `437235e` 一并入库
+（清单本身已过期：`snapshot_builder.py` 依赖同批次新增的 `quality_gates.py`，按原清单提交会
+得到无法导入的模块，详见下方"另注"）。复选框保持未勾选，作为历史记录。
 
 ### Task 3: 生产取数字段归一化（Task 2 验收后发现的真实阻断）
 
