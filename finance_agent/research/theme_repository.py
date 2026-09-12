@@ -210,13 +210,17 @@ class PostgresThemeRepository:
             connection.close()
 
     def expire_stale_records(self, as_of: datetime) -> int:
+        pending_deadline = as_of - timedelta(days=30)
         connection = self._connection_factory()
         try:
             cursor = connection.cursor()
             try:
-                cursor.execute("""UPDATE finance.theme_memberships SET status = 'expired', updated_at = %s
-                    WHERE (status = 'pending' AND created_at < %s - interval '30 days')
-                       OR (status = 'active' AND evidence_expires_at <= %s)""", (as_of, as_of, as_of))
+                cursor.execute(
+                    """UPDATE finance.theme_memberships SET status = 'expired', updated_at = %s
+                       WHERE (status = 'pending' AND created_at < %s)
+                          OR (status = 'active' AND evidence_expires_at <= %s)""",
+                    (as_of, pending_deadline, as_of),
+                )
                 count = int(getattr(cursor, "rowcount", 0) or 0)
             finally:
                 cursor.close()
