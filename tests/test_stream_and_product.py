@@ -9,17 +9,20 @@ from finance_agent.contracts import ExpertResult, ExpertStatus, ResponseEnvelope
 from finance_agent.orchestrator.orchestrator import AdvisorSystem
 
 
-def test_product_agent_build_result_from_message_without_database():
+def test_product_agent_build_result_without_pipeline_output_is_empty_not_fabricated():
+    """无流水线结果时构造兼容空结果，绝不从消息正则伪造产品代码。"""
     agent = ProductAnalysisAgent()
-    agent._agent = None
     result = agent._build_result({
         "user_message": "请比较110011和000001基金",
         "agent_response": "产品库暂无该产品数据",
     })
 
     assert result["type"] == "comparison"
-    assert result["product_codes"] == ["110011", "000001"]
-    assert "产品库暂无该产品数据" in result["report"]
+    # 代码只能来自产品库解析；消息里的数字不得被当作已解析产品。
+    assert result["product_codes"] == []
+    assert result["products"] == []
+    assert result["data_quality"] == "critical_missing"
+    assert result["report"] == "产品库暂无该产品数据"
 
 
 def test_final_sse_event_keeps_legacy_response_shape():

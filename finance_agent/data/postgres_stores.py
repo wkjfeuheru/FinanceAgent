@@ -13,7 +13,7 @@ import secrets
 import time
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
 
 TOKEN_TTL_SECONDS = 7 * 24 * 3600
@@ -449,6 +449,16 @@ class PostgresAuthStore(_PostgresBaseStore):
 class PostgresProductLibrary(_PostgresBaseStore):
     """产品库的 PostgreSQL 存储。"""
 
+    def query_by_codes(self, codes: list[str]) -> list[dict[str, Any]]:
+        """按代码批量读取产品，保留输入顺序并忽略未找到的代码。"""
+        normalized = list(dict.fromkeys(str(code).strip() for code in codes if str(code).strip()))
+        products: list[dict[str, Any]] = []
+        for code in normalized:
+            product = self.query_by_code(code)
+            if product is not None:
+                products.append(product)
+        return products
+
     def query_by_code(self, code: str) -> dict[str, Any] | None:
         self._ensure_schema()
         with self._transaction() as connection:
@@ -482,6 +492,29 @@ class PostgresProductLibrary(_PostgresBaseStore):
                 cursor.close()
         return result
 
+    def search_by_name(self, name: str) -> list[dict[str, Any]]:
+        """返回名称模糊匹配的全部产品候选，供上层处理歧义。
+
+        刻意**不**加 ``LIMIT 1``：静默取第一条会让用户拿到不相关的产品且无从察觉，
+        由调用方（解析器）在多个候选时给出澄清。
+        """
+        keyword = str(name).strip()
+        if not keyword:
+            return []
+        self._ensure_schema()
+        with self._transaction() as connection:
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    "SELECT code, name, type, scale FROM finance.products WHERE name LIKE %s ORDER BY code",
+                    (f"%{keyword}%",),
+                )
+                rows = cursor.fetchall()
+                result = _dict_rows(cursor, rows)
+            finally:
+                cursor.close()
+        return result
+
     def list_products(self, product_type: str = "fund") -> list[dict[str, Any]]:
         self._ensure_schema()
         with self._transaction() as connection:
@@ -505,10 +538,11 @@ class PostgresProductLibrary(_PostgresBaseStore):
         fields = (
             "code", "name", "type", "establish_date", "scale", "manager", "company",
             "management_fee", "custody_fee", "subscription_fee", "redemption_fee",
-            "risk_level", "investment_target", "investment_strategy",
+            "risk_level", "recommended_holding_period", "investment_target", "investment_strategy",
         )
         text_defaults = {"name", "type", "establish_date", "manager", "company",
-                         "redemption_fee", "risk_level", "investment_target", "investment_strategy"}
+                         "redemption_fee", "risk_level", "recommended_holding_period",
+                         "investment_target", "investment_strategy"}
         values = [data.get(f, "" if f in text_defaults else None) for f in fields]
         values[0] = code
         values[1] = str(values[1]).strip()
@@ -581,7 +615,25 @@ class PostgresProductLibrary(_PostgresBaseStore):
                 cursor.close()
         return count > 0
 
+    @staticmethod
+    def _freshness(as_of: str, max_age_days: int) -> str:
+        """按截止日期判断区块新鲜度；无法解析时保守返回 unknown。"""
+        if not as_of:
+            return "unknown"
+        try:
+            parsed = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return "unknown"
+        return "stale" if datetime.now(timezone.utc) - parsed > timedelta(days=max_age_days) else "fresh"
+
     def _build_product(self, cursor: Any, row: Any) -> dict[str, Any]:
+        from finance_agent.config import (
+            PRODUCT_HOLDINGS_FRESHNESS_DAYS,
+            PRODUCT_PERFORMANCE_FRESHNESS_DAYS,
+        )
+
         product = _dict_rows(cursor, [row])[0]
         cursor.execute(
             "SELECT stock_name, stock_code, weight, rank, report_date FROM finance.product_holdings WHERE product_code = %s ORDER BY rank, id",
@@ -598,12 +650,21 @@ class PostgresProductLibrary(_PostgresBaseStore):
         fee_fields = ("management_fee", "custody_fee", "subscription_fee", "redemption_fee")
         fee = {field: product.pop(field, None) for field in fee_fields}
         holdings_list = _dict_rows(cursor, holdings)
+        # 逐区块标注来源、截止日期与新鲜度：产品结论只能建立在可溯源的事实上。
+        basic_info = {**product, "source": "postgresql", "as_of": "", "freshness": "unknown"}
+        holdings_as_of = max((str(item.get("report_date") or "") for item in holdings_list), default="")
+        performance_data = _dict_rows(cursor, [performance])[0] if performance else {}
+        performance_as_of = str(performance_data.get("update_date") or "")
         return {
-            "basic_info": product,
+            "basic_info": basic_info,
             "holdings": {
                 "top10": holdings_list[:10],
                 "concentration": sum((h.get("weight") or 0) for h in holdings_list[:10]),
+                "source": "postgresql",
+                "as_of": holdings_as_of,
+                "freshness": self._freshness(holdings_as_of, PRODUCT_HOLDINGS_FRESHNESS_DAYS),
             },
-            "performance": _dict_rows(cursor, [performance])[0] if performance else {},
+            "performance": {**performance_data, "source": "postgresql", "as_of": performance_as_of,
+                            "freshness": self._freshness(performance_as_of, PRODUCT_PERFORMANCE_FRESHNESS_DAYS)},
             "fee": fee,
         }

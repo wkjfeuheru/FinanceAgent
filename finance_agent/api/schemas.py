@@ -102,7 +102,9 @@ def to_chat_response(result: ResponseEnvelope | Mapping[str, Any] | ChatResponse
             elif expert_result.expert_name == "market_insight":
                 payload["market_insight"] = data.get("market_insight", data)
             elif expert_result.expert_name == "product_analysis":
-                payload["product_analysis"] = data
+                # 专家结果可能把产品 payload 嵌在 product_analysis 键下，也可能是扁平结构。
+                nested = data.get("product_analysis")
+                payload["product_analysis"] = nested if isinstance(nested, dict) else data
         return ChatResponse.model_validate(payload)
     return ChatResponse.model_validate(dict(result))
 

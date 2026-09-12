@@ -74,10 +74,49 @@ export interface ChatResponse {
   pending_leads?: ThemeLead[]
   allocation_result: AllocationResult
   debate_result: Record<string, any>
-  product_analysis?: Record<string, any>
+  product_analysis?: ProductAnalysisPayload
   market_insight?: Record<string, any>
   compliance_result: Record<string, any>
   conversation_id: string
+}
+
+/** 产品专家确定性研究结果；保留索引签名以兼容历史字典响应。 */
+export interface ProductAnalysisPayload {
+  schema_version?: string
+  type?: 'single' | 'question' | 'deep_dive' | 'comparison' | (string & {})
+  product_codes?: string[]
+  products?: ProductAssessmentPayload[]
+  assessments?: ProductAssessmentPayload[]
+  evidence_ids?: string[]
+  data_quality?: 'complete' | 'warning' | 'critical_missing' | (string & {})
+  personalization_status?: 'personalized' | 'research_candidate' | (string & {})
+  ambiguities?: string[]
+  report?: string
+  [key: string]: any
+}
+
+export interface ProductAssessmentPayload {
+  code: string
+  name?: string
+  risk_level?: string | null
+  risk_source?: string
+  suitability_status?: 'matched' | 'unmatched' | 'unavailable' | 'not_evaluated' | (string & {})
+  suitability_reasons?: string[]
+  usable_for_comparison?: boolean
+  missing_fields?: string[]
+  restrictions?: string[]
+  evidences?: Record<string, ProductFieldEvidencePayload>
+  [key: string]: any
+}
+
+export interface ProductFieldEvidencePayload {
+  field: string
+  value?: any
+  source?: string
+  as_of?: string
+  freshness?: 'fresh' | 'stale' | 'unknown' | (string & {})
+  fact_id?: string
+  [key: string]: any
 }
 
 /** 已计算的确定性研究结论；与待核验线索分离。 */

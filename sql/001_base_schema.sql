@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS finance.products (
     subscription_fee double precision,
     redemption_fee varchar(64) NOT NULL DEFAULT '',
     risk_level varchar(32) NOT NULL DEFAULT '',
+    recommended_holding_period varchar(32) NOT NULL DEFAULT '',
     investment_target text NOT NULL DEFAULT '',
     investment_strategy text NOT NULL DEFAULT ''
 );

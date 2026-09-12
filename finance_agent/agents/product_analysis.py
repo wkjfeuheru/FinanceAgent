@@ -1,88 +1,187 @@
-"""金融产品解读专家。"""
+"""确定性金融产品研究专家。"""
 
 from __future__ import annotations
 
-import json
 import re
-from typing import Any, Dict
+from datetime import datetime, timezone
+from typing import Any
 
-from langchain_core.messages import ToolMessage
-
-from finance_agent.agents.base import ReActAgent
-from finance_agent.config import safe_parse_json
-from finance_agent.orchestrator.tools.database import list_products, query_product
-
-
-_PRODUCT_ANALYSIS_PROMPT = """你是金融产品解读专家，专注于基金、ETF等金融产品的事实性分析。
-
-你必须先通过 query_product 或 list_products 查询产品库，再基于工具返回的数据回答。
-用户要求深度分析时，输出产品概况、投资策略、业绩表现、风险特征四部分；
-用户要求比较时，按收益、风险、费率、规模横向比较并说明适用场景；
-用户询问持仓、经理、费率或申赎规则时，只回答产品库中已有事实。
-产品库没有数据时，明确说明“产品库暂无该产品数据”；数据字段缺失时明确说明暂无该数据，绝不编造。
-使用正式、专业的中文。"""
+from finance_agent.agents.base import AgentProtocol
+from finance_agent.contracts import FactSnapshot
+from finance_agent.product_research.contracts import ProductResearchRequest, ProductResearchResult
+from finance_agent.product_research.pipeline import ProductResearchPipeline
 
 
-class ProductAnalysisAgent(ReActAgent):
-    """通过产品库工具完成单产品解读、多产品比较和具体问答。"""
+class _LazyProductLookup:
+    """延迟创建 PostgreSQL 产品库，避免专家初始化阶段强制要求数据库配置。"""
+
+    def __init__(self) -> None:
+        self._library = None
+
+    def _get_library(self):
+        if self._library is None:
+            from finance_agent.data.product_library import get_product_library
+
+            self._library = get_product_library()
+        return self._library
+
+    def query_by_codes(self, codes: list[str]) -> list[dict[str, Any]]:
+        return self._get_library().query_by_codes(codes)
+
+    def search_by_name(self, name: str) -> list[dict[str, Any]]:
+        return self._get_library().search_by_name(name)
+
+
+class ProductAnalysisAgent(AgentProtocol):
+    """把编排状态转换为确定性产品研究结果，并保留旧状态投影。"""
 
     agent_name = "product_analysis"
-    max_reasoning_steps = 6
-    per_invoke_timeout = 60.0
 
-    def _get_tools(self) -> list:
-        """返回产品库查询工具，供 ReAct 模型自主规划调用。"""
-        return [query_product, list_products]
+    def __init__(self, checkpointer: Any = None, *, pipeline: Any = None):
+        # 保留旧编排器的构造签名；确定性专家不持有检查点或会话状态。
+        del checkpointer
+        self._pipeline = pipeline or ProductResearchPipeline(_LazyProductLookup())
 
-    def _get_system_prompt(self) -> str:
-        """返回产品解读专家的系统提示词。"""
-        return _PRODUCT_ANALYSIS_PROMPT
-
-    def invoke(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """执行产品解读，并将文本结果和结构化产品数据写回状态。"""
-        result = super().invoke(state)
-        state["product_analysis"] = self._build_result(state)
-        response = str(state.get("agent_response", "")).strip()
-        state.setdefault("intent_results", {})["product_analysis"] = {
-            "status": "success" if response else "degraded",
-            "content": response,
-        }
-        return result
-
-    def _build_result(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """从最近一次 ReAct 消息中提取产品数据并判定分析类型。"""
-        message = str(state.get("user_message", ""))
-        response = str(state.get("agent_response", ""))
+    @staticmethod
+    def _kind(message: str) -> str:
         if any(word in message for word in ("对比", "比较", "哪个好", "区别")):
-            result_type = "comparison"
-        elif any(word in message for word in ("深度", "全面", "透视", "分析")):
-            result_type = "deep_dive"
-        else:
-            result_type = "question"
+            return "comparison"
+        if any(word in message for word in ("深度", "全面", "透视", "分析")):
+            return "deep_dive"
+        return "question"
 
-        products: list[dict[str, Any]] = []
-        if self._agent is not None:
-            try:
-                thread_id = state.get("thread_id", "default")
-                snapshot = self.agent.get_state({"configurable": {"thread_id": thread_id}})
-                messages = snapshot.values.get("messages", []) if snapshot else []
-                for item in messages:
-                    if isinstance(item, ToolMessage) and item.name == "query_product":
-                        data = safe_parse_json(str(item.content), {})
-                        if isinstance(data, dict) and "error" not in data:
-                            products.append(data)
-            except Exception:
-                products = []
+    @staticmethod
+    def _codes_from_message(message: str) -> list[str]:
+        return list(dict.fromkeys(re.findall(r"(?<!\d)\d{6}(?!\d)", message)))
 
-        codes = re.findall(r"(?<!\d)\d{6}(?!\d)", message)
-        if not products and codes:
-            products = [{"basic_info": {"code": code}} for code in dict.fromkeys(codes)]
-        return {
-            "type": result_type,
-            "product_codes": [item.get("basic_info", {}).get("code", "") for item in products],
-            "products": products,
-            "report": response,
+    @staticmethod
+    def _slots(state: dict[str, Any]) -> dict[str, Any]:
+        context = state.get("task_context", {}) or {}
+        context_slots = context.get("slots", {}) if isinstance(context, dict) else {}
+        intent_slots = state.get("intent_slots", {}) or {}
+        product_slots = intent_slots.get("product_analysis", {}) if isinstance(intent_slots, dict) else {}
+        merged = dict(product_slots) if isinstance(product_slots, dict) else {}
+        if isinstance(context_slots, dict):
+            merged.update(context_slots)
+        return merged
+
+    def _request(self, state: dict[str, Any]) -> ProductResearchRequest:
+        context = state.get("task_context", {}) or {}
+        message = str(
+            state.get("requirement", "")
+            or state.get("user_message", "")
+            or (context.get("requirement", "") if isinstance(context, dict) else "")
+        )
+        slots = self._slots(state)
+        codes = [str(item).strip() for item in slots.get("product_codes", []) or [] if str(item).strip()]
+        if not codes:
+            codes = self._codes_from_message(message)
+        names = [str(item).strip() for item in slots.get("product_names", []) or [] if str(item).strip()]
+        context_profile = context.get("user_profile", {}) if isinstance(context, dict) else {}
+        profile = dict(context_profile) if isinstance(context_profile, dict) else {}
+        state_profile = state.get("user_profile", {}) or {}
+        if isinstance(state_profile, dict):
+            profile.update(state_profile)
+        return ProductResearchRequest(
+            kind=self._kind(message),
+            product_codes=codes,
+            product_names=names,
+            profile=profile,
+        )
+
+    @staticmethod
+    def _payload(result: ProductResearchResult) -> dict[str, Any]:
+        payload = result.model_dump(mode="json")
+        if not payload["evidence_ids"]:
+            payload["evidence_ids"] = list(dict.fromkeys(
+                evidence.fact_id
+                for assessment in result.assessments
+                for evidence in assessment.evidences.values()
+            ))
+        payload["type"] = result.kind
+        payload["products"] = [item.model_dump(mode="json") for item in result.assessments]
+        return payload
+
+    @staticmethod
+    def _write_facts(state: dict[str, Any], result: ProductResearchResult) -> None:
+        existing = list(state.get("facts", []) or [])
+        existing_ids = {
+            item.fact_id if isinstance(item, FactSnapshot) else item.get("fact_id")
+            for item in existing
+            if isinstance(item, FactSnapshot) or isinstance(item, dict)
         }
+        for assessment in result.assessments:
+            for evidence in assessment.evidences.values():
+                if evidence.fact_id in existing_ids:
+                    continue
+                existing.append(FactSnapshot(
+                    fact_id=evidence.fact_id,
+                    domain="product",
+                    source=evidence.source,
+                    fetched_at=datetime.now(timezone.utc),
+                    payload={
+                        "product_code": assessment.code,
+                        "product_name": assessment.name,
+                        "field": evidence.field,
+                        "value": evidence.value,
+                        "as_of": evidence.as_of,
+                        "freshness": evidence.freshness,
+                    },
+                ))
+                existing_ids.add(evidence.fact_id)
+        state["facts"] = existing
+
+    def _build_result(self, state: dict[str, Any]) -> dict[str, Any]:
+        """返回已有产品结果或构造无事实的兼容空结果。"""
+        current = state.get("product_analysis")
+        if isinstance(current, dict) and current:
+            return dict(current)
+        message = str(state.get("user_message", ""))
+        return {
+            "schema_version": "product_research.v1",
+            "type": self._kind(message),
+            "product_codes": [],
+            "products": [],
+            "assessments": [],
+            "evidence_ids": [],
+            "data_quality": "critical_missing",
+            "personalization_status": "research_candidate",
+            "ambiguities": [],
+            "report": str(state.get("agent_response", "")),
+        }
+
+    def invoke(self, state: dict[str, Any]) -> dict[str, Any]:
+        """执行一次产品研究，不读取或写入 ReAct 会话状态。"""
+        try:
+            result = self._pipeline.analyze(self._request(state))
+        except Exception as exc:  # noqa: BLE001
+            state["product_analysis"] = {
+                "schema_version": "product_research.v1",
+                "type": self._kind(str(state.get("user_message", ""))),
+                "product_codes": [],
+                "products": [],
+                "assessments": [],
+                "evidence_ids": [],
+                "data_quality": "critical_missing",
+                "personalization_status": "research_candidate",
+                "ambiguities": [],
+                "report": f"产品研究暂不可用：{exc}",
+            }
+            state["agent_response"] = state["product_analysis"]["report"]
+            state.setdefault("intent_results", {})["product_analysis"] = {
+                "status": "failed",
+                "content": state["agent_response"],
+            }
+            return state
+
+        state["product_analysis"] = self._payload(result)
+        state["agent_response"] = result.report
+        self._write_facts(state, result)
+        state.setdefault("intent_results", {})["product_analysis"] = {
+            "status": "success" if result.data_quality == "complete" else "degraded",
+            "content": result.report,
+        }
+        return state
 
 
 __all__ = ["ProductAnalysisAgent"]

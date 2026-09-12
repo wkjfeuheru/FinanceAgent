@@ -44,12 +44,15 @@ _STOCK_ALIASES: Dict[str, str] = {
 }
 
 _SLOT_CODES = "stock_codes"
+_SLOT_PRODUCT_CODES = "product_codes"
 _SLOT_NAMES = "stock_names"
 _SLOT_EXCLUDED = "excluded"
 _SLOT_THEMES = "themes"
 
 # 正则
 _VALID_CODE_RE = re.compile(r"(?<!\d)(60\d{4}|00\d{4}|30\d{4}|68\d{4}|8\d{5}|4\d{5})(?!\d)")
+# 产品（基金/ETF 等）代码与股票代码同为六位数字但语义不同，须用独立槽位承载。
+_VALID_PRODUCT_CODE_RE = re.compile(r"(?<!\d)\d{6}(?!\d)")
 # 否定表达：捕获否定词后的对象（跳过 推荐/买/持有 等常见搭配动词）
 _NEGATION_RE = re.compile(
     r"(?:不要|别|不买|不做|排除|避免|不想|剔除|去掉)\s*(?:推荐|买入|买|持有|配置|关注|考虑|投)?\s*([^，。；!?！？\s]{1,12})"
@@ -63,6 +66,13 @@ def _codes_from_text(message: str) -> List[str]:
     if not message:
         return []
     return list(dict.fromkeys(_VALID_CODE_RE.findall(message)))
+
+
+def _product_codes_from_text(message: str) -> List[str]:
+    """提取金融产品常见的六位数字代码；产品代码不等同于股票代码。"""
+    if not message:
+        return []
+    return list(dict.fromkeys(_VALID_PRODUCT_CODE_RE.findall(message)))
 
 
 # ── 各意图的槽位 schema ─────────────────────────────────────────────────────────
@@ -112,6 +122,8 @@ _INTENT_SLOT_SCHEMAS: Dict[str, Dict[str, Any]] = {
     "product_analysis": {
         "title": "产品解读",
         "slots": [
+            {"key": _SLOT_PRODUCT_CODES, "type": "code_list", "required": False,
+             "desc": "用户明确给出的金融产品代码（如基金代码110011），不作为股票代码处理"},
             {"key": "product_names", "type": "text_list", "required": False,
              "desc": "用户想了解/对比的金融产品名称"},
         ],
@@ -165,6 +177,10 @@ def _as_text_list(value: Any) -> List[str]:
 
 def _as_code_list(value: Any) -> List[str]:
     return [v for v in _as_text_list(value) if _VALID_CODE_RE.fullmatch(v)]
+
+
+def _as_product_code_list(value: Any) -> List[str]:
+    return [v for v in _as_text_list(value) if _VALID_PRODUCT_CODE_RE.fullmatch(v)]
 
 
 def _as_number(value: Any, default: Any = None) -> Any:
@@ -414,6 +430,9 @@ def _deterministic_extract(message: str, intent: str) -> Dict[str, Any]:
         if horizon:
             slots["holding_period"] = horizon
     elif intent == "product_analysis":
+        product_codes = _product_codes_from_text(message)
+        if product_codes:
+            slots[_SLOT_PRODUCT_CODES] = product_codes
         products = _candidate_product_names(message)
         if products:
             slots["product_names"] = products
@@ -505,6 +524,9 @@ def _resolve_slots(intent: str, raw: Dict[str, Any], prior: Dict[str, Any]) -> D
             if merged.get(field) not in (None, ""):
                 result[field] = merged[field]
     elif intent == "product_analysis":
+        result[_SLOT_PRODUCT_CODES] = list(dict.fromkeys(
+            _as_product_code_list(merged.get(_SLOT_PRODUCT_CODES))
+        ))[:10]
         result["product_names"] = _as_text_list(merged.get("product_names"))
 
     return result
@@ -621,6 +643,9 @@ class SlotExtractor:
                     if resolved.get(field) not in (None, ""):
                         profile_from_slots[field] = resolved[field]
             elif intent == "product_analysis":
+                slots_by_intent[intent][_SLOT_PRODUCT_CODES] = _as_product_code_list(
+                    resolved.get(_SLOT_PRODUCT_CODES)
+                )
                 slots_by_intent[intent]["product_names"] = _as_text_list(resolved.get("product_names"))
 
         state["intent_slots"] = slots_by_intent
