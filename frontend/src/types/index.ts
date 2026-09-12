@@ -114,6 +114,21 @@ export interface ThemeLeadReviewRequest {
   note: string
 }
 
+/** 主题注册记录：名称/别名 → theme_id 的解析来源。 */
+export interface ThemeRegistryEntry {
+  theme_id: string
+  display_name: string
+  aliases: string[]
+  active: boolean
+}
+
+export interface ThemeRegistryUpsertRequest {
+  theme_id: string
+  display_name: string
+  aliases: string[]
+  active: boolean
+}
+
 /** 对话请求体 */
 export interface ChatRequest {
   message: string

@@ -22,6 +22,8 @@ import type {
   HistoryMessage,
   ThemeLead,
   ThemeLeadReviewRequest,
+  ThemeRegistryEntry,
+  ThemeRegistryUpsertRequest,
 } from '@/types'
 
 const http = axios.create({
@@ -318,6 +320,30 @@ export async function reviewThemeLead(
   return data
 }
 
+/** 主题注册表（管理员）：名称/别名 → theme_id 映射。 */
+export async function listThemeRegistry(): Promise<ThemeRegistryEntry[]> {
+  const { data } = await http.get<ThemeRegistryEntry[]>('/admin/themes')
+  return data
+}
+
+/** 新增或更新主题注册记录。 */
+export async function upsertThemeRegistry(
+  request: ThemeRegistryUpsertRequest,
+): Promise<ThemeRegistryEntry> {
+  const { data } = await http.post<ThemeRegistryEntry>('/admin/themes', request)
+  return data
+}
+
+/** 软删除主题（置 active=false），停止参与解析但保留历史映射。 */
+export async function deactivateTheme(
+  themeId: string,
+): Promise<{ theme_id: string; active: boolean }> {
+  const { data } = await http.delete<{ theme_id: string; active: boolean }>(
+    `/admin/themes/${encodeURIComponent(themeId)}`,
+  )
+  return data
+}
+
 export default {
   chat,
   chatStream,
@@ -331,6 +357,9 @@ export default {
   clearRecords,
   getThemeLeads,
   reviewThemeLead,
+  listThemeRegistry,
+  upsertThemeRegistry,
+  deactivateTheme,
   saveUser,
   getStoredUser,
   getToken,

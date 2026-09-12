@@ -22,11 +22,14 @@ from finance_agent.api.schemas import (
     RegisterResponse,
     ThemeLeadResponse,
     ThemeLeadReviewRequest,
+    ThemeRegistryEntry,
+    ThemeRegistryUpsertRequest,
 )
 from finance_agent.api.sse import sse_stream
 from finance_agent.config import ADMIN_CUSTOMER_IDS, get_postgres_connection_factory
 from finance_agent.data.auth import get_user_store
 from finance_agent.orchestrator.orchestrator import AdvisorSystem
+from finance_agent.research.theme_registry import PostgresThemeRegistry, ThemeEntry as _ThemeEntry
 from finance_agent.research.theme_repository import PostgresThemeRepository, ThemeRepository
 
 
@@ -35,6 +38,7 @@ router = APIRouter()
 # 全局系统实例（延迟初始化）
 _system: AdvisorSystem | None = None
 _theme_repository: ThemeRepository | None = None
+_theme_registry: PostgresThemeRegistry | None = None
 
 
 def get_theme_repository() -> ThemeRepository:
@@ -43,6 +47,14 @@ def get_theme_repository() -> ThemeRepository:
     if _theme_repository is None:
         _theme_repository = PostgresThemeRepository(get_postgres_connection_factory())
     return _theme_repository
+
+
+def get_theme_registry() -> PostgresThemeRegistry:
+    """延迟构造主题注册表（读 + 管理写路径）。"""
+    global _theme_registry
+    if _theme_registry is None:
+        _theme_registry = PostgresThemeRegistry(get_postgres_connection_factory())
+    return _theme_registry
 
 
 def get_system() -> AdvisorSystem:
@@ -266,6 +278,54 @@ async def review_theme_lead(
         raise HTTPException(status_code=404, detail="待审核线索不存在")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/api/admin/themes", response_model=list[ThemeRegistryEntry])
+async def list_registered_themes(http_request: Request) -> list[ThemeRegistryEntry]:
+    """管理员查看主题注册表（名称/别名 → theme_id 的映射来源）。"""
+    _require_admin(http_request)
+    return [
+        ThemeRegistryEntry(
+            theme_id=entry.theme_id, display_name=entry.display_name,
+            aliases=list(entry.aliases), active=entry.active,
+        )
+        for entry in get_theme_registry().list_themes()
+    ]
+
+
+@router.post("/api/admin/themes", response_model=ThemeRegistryEntry)
+async def upsert_registered_theme(
+    payload: ThemeRegistryUpsertRequest, http_request: Request,
+) -> ThemeRegistryEntry:
+    """新增或更新主题注册记录；写盘一律以本表为解析来源。"""
+    _require_admin(http_request)
+    theme_id = payload.theme_id.strip()
+    if theme_id in {"", "market_insight"}:
+        raise HTTPException(status_code=400, detail="theme_id 非法")
+    aliases = list(dict.fromkeys(
+        alias.strip() for alias in payload.aliases if alias.strip()
+    ))
+    entry = get_theme_registry().upsert(
+        _ThemeEntry(
+            theme_id=theme_id,
+            display_name=payload.display_name.strip(),
+            aliases=aliases,
+            active=payload.active,
+        )
+    )
+    return ThemeRegistryEntry(
+        theme_id=entry.theme_id, display_name=entry.display_name,
+        aliases=list(entry.aliases), active=entry.active,
+    )
+
+
+@router.delete("/api/admin/themes/{theme_id}")
+async def deactivate_registered_theme(http_request: Request, theme_id: str) -> dict[str, Any]:
+    """软删除主题（置 active=false）：保留历史映射，仅停止参与解析。"""
+    _require_admin(http_request)
+    if not get_theme_registry().deactivate(theme_id):
+        raise HTTPException(status_code=404, detail="主题不存在")
+    return {"theme_id": theme_id, "active": False}
 
 
 @router.get("/api/profile/{customer_id}", response_model=ProfileResponse)

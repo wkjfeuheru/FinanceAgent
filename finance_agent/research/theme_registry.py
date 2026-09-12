@@ -59,6 +59,25 @@ class InMemoryThemeRegistry:
     def list_themes(self) -> list[ThemeEntry]:
         return [entry for entry in self._entries if entry.active]
 
+    def upsert(self, entry: ThemeEntry) -> ThemeEntry:
+        """新增或替换同 theme_id 的记录。"""
+        self._entries = [item for item in self._entries if item.theme_id != entry.theme_id]
+        self._entries.append(entry)
+        return entry
+
+    def deactivate(self, theme_id: str) -> bool:
+        """软删除：置 ``active=false``。返回是否命中。"""
+        hit = any(entry.theme_id == theme_id for entry in self._entries)
+        self._entries = [
+            ThemeEntry(
+                theme_id=entry.theme_id, display_name=entry.display_name,
+                aliases=list(entry.aliases),
+                active=False if entry.theme_id == theme_id else entry.active,
+            )
+            for entry in self._entries
+        ]
+        return hit
+
 
 class StaticThemeRegistry(InMemoryThemeRegistry):
     """由内置别名表构造的静态注册表。"""
@@ -110,6 +129,56 @@ class PostgresThemeRegistry:
 
     def resolve(self, name: str) -> str | None:
         return InMemoryThemeRegistry(self.list_themes()).resolve(name)
+
+    def upsert(self, entry: ThemeEntry) -> ThemeEntry:
+        """新增或更新主题（含别名），供 admin 管理接口使用。"""
+        import json
+
+        connection = self._connection_factory()
+        try:
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    """INSERT INTO finance.themes (theme_id, display_name, aliases, active, updated_at)
+                       VALUES (%s, %s, %s::jsonb, %s, now())
+                       ON CONFLICT (theme_id) DO UPDATE SET
+                         display_name = EXCLUDED.display_name,
+                         aliases = EXCLUDED.aliases,
+                         active = EXCLUDED.active,
+                         updated_at = now()""",
+                    (entry.theme_id, entry.display_name,
+                     json.dumps(entry.aliases, ensure_ascii=False), entry.active),
+                )
+            finally:
+                cursor.close()
+            connection.commit()
+            return entry
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def deactivate(self, theme_id: str) -> bool:
+        """软删除：置 ``active=false``，保留历史映射与审计。返回是否命中一行。"""
+        connection = self._connection_factory()
+        try:
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    "UPDATE finance.themes SET active = false, updated_at = now() WHERE theme_id = %s",
+                    (theme_id,),
+                )
+                affected = int(getattr(cursor, "rowcount", 0) or 0)
+            finally:
+                cursor.close()
+            connection.commit()
+            return affected > 0
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
 
 class FallbackThemeRegistry:

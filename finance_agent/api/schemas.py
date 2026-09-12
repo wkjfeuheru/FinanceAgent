@@ -196,3 +196,19 @@ class ThemeLeadResponse(BaseModel):
     evidence_hash: str
     discovered_at: datetime
     evidence_expires_at: datetime
+
+
+class ThemeRegistryUpsertRequest(BaseModel):
+    """管理员新增/更新主题注册记录（名称与别名用于解析用户自由文本）。"""
+
+    theme_id: str = Field(..., min_length=1, max_length=128)
+    display_name: str = Field(..., min_length=1, max_length=128)
+    aliases: list[str] = Field(default_factory=list)
+    active: bool = True
+
+
+class ThemeRegistryEntry(BaseModel):
+    theme_id: str
+    display_name: str
+    aliases: list[str] = Field(default_factory=list)
+    active: bool = True
