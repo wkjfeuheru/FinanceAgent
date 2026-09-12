@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -27,6 +28,8 @@ from finance_agent.research.theme_repository import PostgresThemeRepository
 
 # 批次内并行取数上限：与候选上限一致，避免一次请求放大过多外部取数。
 _MAX_FETCH_WORKERS = 5
+
+logger = logging.getLogger(__name__)
 
 
 class _FetchGateway:
@@ -185,7 +188,15 @@ class StockAnalysisAgent(AgentProtocol):
                 and "单股分析必须且只能包含一只股票" in str(exc)
             )
             if not can_discover_candidates:
-                return None, {"content": f"股票研究暂不可用：{exc}", "status": "degraded", "clarification": None}
+                # 请求形态非法（如单股请求带多只代码）。细节只进日志，
+                # 用户侧给固定文案，避免内部校验文本外泄。
+                logger.debug("股票请求解析失败 intent=%s error=%s",
+                             state.get("current_task_intent"), exc)
+                return None, {
+                    "content": "股票研究暂不可用：请求无法识别，请明确提供股票名称或6位代码。",
+                    "status": "degraded",
+                    "clarification": None,
+                }
             codes = self._resolve_candidate_codes(message)
             if not codes:
                 return None, {
@@ -260,11 +271,17 @@ class StockAnalysisAgent(AgentProtocol):
                 results, facts = pipeline.analyze_per_security(request, user_profile=profile)
             else:
                 results, facts = [pipeline.analyze(request, user_profile=profile)], []
-        except Exception as exc:
+        except Exception:  # noqa: BLE001 - 分析失败统一降级，细节只进日志
+            # 该分支包裹取数/快照/评分/投影全过程：任何内部异常都不得把原始
+            # 异常文本（校验信息、连接串等）暴露给用户，只给固定文案。
+            logger.exception(
+                "股票研究失败 intent=%s requirement=%s",
+                state.get("current_task_intent"), state.get("requirement"),
+            )
             return self._failed(state, {
-                "content": f"股票研究暂不可用：{exc}",
+                "content": "股票研究暂不可用，请稍后重试。",
                 "status": "degraded",
-                "clarification": str(exc) if "主题" in str(exc) else None,
+                "clarification": None,
             })
 
         projected = project_legacy_many(results)
@@ -335,11 +352,15 @@ class StockAnalysisAgent(AgentProtocol):
         """
         try:
             screening = self._get_theme_screener().screen(request, profile)
-        except Exception as exc:  # noqa: BLE001 - 治理库不可用时退回代表股
+        except Exception:  # noqa: BLE001 - 治理库不可用时退回代表股
+            logger.warning("主题筛选器不可用，尝试退回代表股 theme_id=%s",
+                           request.theme_id, exc_info=True)
             fallback = self._representative_request(request)
             if fallback is None:
                 return self._failed(state, {
-                    "content": f"主题筛选暂不可用：{exc}", "status": "degraded", "clarification": None,
+                    "content": "主题筛选暂不可用，请稍后重试。",
+                    "status": "degraded",
+                    "clarification": None,
                 })
             return self._representative_response(state, request, fallback)
 

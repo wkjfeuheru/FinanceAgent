@@ -79,6 +79,12 @@ class AdvisorSystem:
 
     # 向当前请求注册并发送阶段进度。
     def _emit_progress(self, stage: str, message: str, thread_id: str = "") -> None:
+        """发送阶段进度。
+
+        DAG 的专家执行在工作线程里（``run_task_dag`` 的线程池），而进度回调只
+        注册在主线程的 thread-local 上，因此**必须按 thread_id 查注册表**才能
+        从工作线程送达；thread-local 只作为无 thread_id 时的兜底（兼容旧调用）。
+        """
         callback = None
         if thread_id:
             with self._progress_lock:
@@ -121,7 +127,9 @@ class AdvisorSystem:
         if not run_id:
             return
         if expert == "stock_analysis":
-            self._audit_research_results(state)
+            # 研究结果审计**不在此处触发**：这里拿到的是尚未合并本任务结果的共享
+            # state，用它写 research_runs 会先删掉该运行既有行、写入过期内容。
+            # 调用方在合并回本任务状态后再审计一次（每个任务恰好一次）。
             result_data = {
                 "stock_data": state.get("stock_data", {}),
                 "stock_analysis": state.get("stock_analysis", {}),
@@ -376,6 +384,9 @@ class AdvisorSystem:
                 ) if agent is not None
             }
             local_states: dict[str, dict[str, Any]] = {}
+            # 进度回调注册在**原始会话 thread_id** 上；工作线程里必须显式用它，
+            # 否则 runner 里的进度事件全部被丢弃（thread-local 不跨线程）。
+            progress_thread_id = str(state.get("thread_id", "") or "")
 
             def runner(task: Any, payload: dict[str, Any]) -> dict[str, Any]:
                 local_state = copy.deepcopy(dict(state))
@@ -388,13 +399,17 @@ class AdvisorSystem:
                 }
                 # 股票任务的逐标的取数进度需要回传，专家无状态、不能持有回调。
                 local_state["progress_callback"] = (
-                    lambda text, _stage=task.expert_name: self._emit_progress(_stage, text)
+                    lambda text, _stage=task.expert_name: self._emit_progress(
+                        _stage, text, progress_thread_id,
+                    )
                 )
                 agent = agents[task.expert_name]
                 self._trace_agent(local_state, getattr(agent, "agent_name", task.expert_name))
-                self._emit_progress(task.expert_name, f"正在执行{task.expert_name}专家分析")
+                self._emit_progress(
+                    task.expert_name, f"正在执行{task.expert_name}专家分析", progress_thread_id,
+                )
                 if task.expert_name == "asset_allocation":
-                    self._emit_progress("debate", "正在进行资产配置多空辩论")
+                    self._emit_progress("debate", "正在进行资产配置多空辩论", progress_thread_id)
                 output = agent.invoke(local_state)
                 local_states[task.task_id] = output
                 return self._make_task_result(output, task, task.expert_name).model_dump(mode="json")
