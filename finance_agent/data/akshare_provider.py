@@ -31,6 +31,7 @@ from finance_agent.data.normalization import (
 from finance_agent.data.providers import ProviderUnavailableError, UnsupportedProviderCapability
 from finance_agent.data.quote_cache import read as cache_read
 from finance_agent.data.quote_cache import write as cache_write
+from finance_agent.data.reporting import recent_report_periods
 
 # 新浪源的复权参数直接使用 ""/qfq/hfq，东财用同一组取值。
 _ADJUST_MAP = {"raw": "", "forward": "qfq", "backward": "hfq"}
@@ -186,10 +187,60 @@ class AkshareDataSource:
             logging.getLogger(__name__).warning("AKShare %s 取数失败: %s", label, last)
         return []
 
+    def _earnings_snapshot(self) -> dict[str, Any]:
+        """最近报告期的全市场行业 / 披露日快照（东财 ``stock_yjbb_em``）。
+
+        返回 ``{"period": str, "by_code": {code: {"industry", "ann_date"}}}``；
+        最近报告期报表尚未发布时向前回退。按报告期缓存——行业与披露日季度内
+        基本不变，重复调用不应反复拉全市场表。
+
+        **失败一律降级为空快照**：补全信息（行业/披露日）缺失只会让对应限制项
+        继续如实出现，绝不阻断主流程。
+        """
+        fetch = getattr(self.ak, "stock_yjbb_em", None)
+        if not callable(fetch):
+            return {"period": "", "by_code": {}}
+        now = datetime.now()
+        for period in recent_report_periods(now.date(), count=4):
+            cache_key = ("akshare", "earnings", period)
+            cached = cache_read("earnings", cache_key)
+            if cached:
+                return cached
+            try:
+                rows = _records(fetch(date=period))
+            except Exception:  # noqa: BLE001 - 补全失败不阻断
+                continue
+            by_code: dict[str, dict[str, Any]] = {}
+            for row in rows:
+                code = str(row.get("股票代码") or row.get("code") or "").strip()
+                if not code:
+                    continue
+                by_code[code] = {
+                    "industry": str(row.get("所处行业") or "").strip(),
+                    "ann_date": _iso_bound(str(row.get("最新公告日期") or "")),
+                }
+            if not by_code:
+                continue
+            snapshot = {"period": period, "by_code": by_code}
+            cache_write("earnings", cache_key, snapshot)
+            return snapshot
+        return {"period": "", "by_code": {}}
+
     def get_stock_basic(self, stock_code: str = "") -> list[dict[str, Any]]:
-        """获取 AKShare A 股股票列表或指定股票信息。"""
+        """获取 AKShare A 股股票列表或指定股票信息。
+
+        ``stock_info_a_code_name`` 只返回代码与名称，因此这里并入最近报告期的
+        行业（申万二级，如"白酒Ⅱ"），供候选搜索的行业关键词匹配与展示使用；
+        快照不可用时退回不含行业的清单。
+        """
         frame = self.ak.stock_info_a_code_name()
         rows = _records(frame)
+        by_code = self._earnings_snapshot().get("by_code", {})
+        for row in rows:
+            code = str(row.get("code", row.get("代码", ""))).strip()
+            industry = (by_code.get(code) or {}).get("industry")
+            if industry:
+                row["industry"] = industry
         if not stock_code:
             return normalize_basic_records(rows)
         code = str(stock_code).split(".")[0]
@@ -259,7 +310,22 @@ class AkshareDataSource:
             frame = fetch(symbol=code)
         # 新浪源返回中文指标名（净资产收益率(%)/主营业务收入增长率(%)/...），
         # 统一为 roe/or_yoy/netprofit_yoy 后研究层才能生成基本面评分。
-        return normalize_financial_records(_records(frame))
+        rows = normalize_financial_records(_records(frame))
+        # 该接口不含披露日期，会让数据质量恒为 warning；从最近报告期业绩报表
+        # 回填 ann_date（按报告期匹配；取不到则保持缺失，限制项如实呈现）。
+        return self._attach_ann_date(code, rows)
+
+    def _attach_ann_date(self, code: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """按报告期把披露日回填到财务指标行；取不到时原样返回。"""
+        snapshot = self._earnings_snapshot()
+        ann_date = (snapshot.get("by_code", {}).get(code) or {}).get("ann_date")
+        period = _iso_bound(str(snapshot.get("period") or ""))
+        if not ann_date or not period:
+            return rows
+        for row in rows:
+            if str(row.get("end_date") or "") == period:
+                row["ann_date"] = ann_date
+        return rows
 
     def get_income(self, stock_code: str) -> list[dict[str, Any]]:
         """获取 AKShare 利润表。"""

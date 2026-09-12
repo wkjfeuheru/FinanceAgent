@@ -62,6 +62,28 @@ def test_akshare_financial_indicator_returns_metrics():
     assert any(latest.get(key) is not None for key in ("roe", "or_yoy", "netprofit_yoy"))
 
 
+def test_akshare_ann_date_is_backfilled_for_latest_period():
+    """披露日必须回填到最新报告期，否则数据质量恒为 warning。"""
+    from finance_agent.data.akshare_provider import AkshareDataSource
+
+    latest = AkshareDataSource().get_financial_indicator("600519")[-1]
+
+    assert latest.get("ann_date"), f"最新报告期 {latest.get('end_date')} 缺披露日"
+    assert latest["ann_date"] >= latest["end_date"], "披露日不应早于报告期"
+
+
+def test_akshare_stock_basic_carries_industry():
+    """行业字段必须并入清单，否则行业关键词候选发现无从匹配。"""
+    from finance_agent.data.akshare_provider import AkshareDataSource
+
+    rows = AkshareDataSource().get_stock_basic()
+
+    with_industry = [row for row in rows if str(row.get("industry") or "").strip()]
+    assert len(with_industry) >= len(rows) * 0.9, "行业覆盖率应≥90%"
+    maotai = next(row for row in rows if row.get("code") == "600519")
+    assert maotai["industry"] == "白酒Ⅱ"
+
+
 def test_baostock_valuation_agrees_with_akshare_on_magnitude():
     """两条估值路径互校。
 
