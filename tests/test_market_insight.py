@@ -1,15 +1,17 @@
-"""市场洞察意图：边界、诚实降级与审计归属。
+"""市场洞察意图：边界、三模式实数渲染与降级。
 
 ``market_insight`` 只回答市场级问题，绝不输出个股结论、推荐或配置。
-当前无指数/市场宽度数据源，因此 ``market_overview`` 必须是诚实的降级说明。
+取数经 ``tools.marketdata`` 注入，测试不联网。
 """
 
 from __future__ import annotations
 
 import threading
 
+import pytest
 from langgraph.checkpoint.memory import MemorySaver
 
+import finance_agent.agents.market_insight as market_insight_module
 from finance_agent.agents.market_insight import MarketInsightAgent
 from finance_agent.agents.supervisor import ManagerAgent
 from finance_agent.contracts.adapters import normalize_dispatch_plan
@@ -30,28 +32,131 @@ def test_market_insight_routes_to_its_own_expert():
     assert task.expert_name == "market_insight"
 
 
-def test_market_insight_agent_degrades_honestly_and_touches_no_stock_output():
-    agent = MarketInsightAgent()
-    state = agent.invoke({
+@pytest.fixture
+def overview_data(monkeypatch):
+    payload = {
+        "as_of": "2026-09-11",
+        "indices": [
+            {"symbol": "sh000001", "name": "上证指数", "as_of": "2026-09-11",
+             "close": 3888.11, "pct_chg": -1.18, "recent_closes": [3900.0, 3888.11]},
+            {"symbol": "sh000300", "name": "沪深300", "as_of": "2026-09-11",
+             "close": 4510.16, "pct_chg": -0.5, "recent_closes": [4530.0, 4510.16]},
+        ],
+        "breadth": {"advancing": 604, "declining": 4567, "limit_up": 40,
+                    "limit_down": 21, "activity": 11.57, "as_of": "2026-09-11"},
+        "limitations": [],
+        "note": "",
+    }
+    monkeypatch.setattr(market_insight_module, "get_market_overview_data", lambda: payload)
+    return payload
+
+
+def test_overview_mode_renders_real_numbers(overview_data):
+    state = MarketInsightAgent().invoke({
         "requirement": "今天大盘怎么样", "current_task_intent": "market_insight",
-        "task_context": {"execution_mode": "market_overview"},
-        "intent_results": {},
+        "task_context": {"execution_mode": "market_overview"}, "intent_results": {},
     })
 
     result = state["intent_results"]["market_insight"]
-    assert result["status"] == "degraded"
-    assert "尚未接入" in result["content"]
+    assert result["status"] == "success"
+    assert "上证指数" in result["content"]
+    assert "3,888.11" in result["content"]
+    assert "-1.18%" in result["content"]
+    assert "上涨 604 家" in result["content"]
     assert state["market_insight"]["mode"] == "market_overview"
     # 硬边界：不得产出任何个股结论字段。
     assert "stock_analysis" not in state
     assert "analysis_results" not in state
 
 
-def test_market_insight_agent_rejects_unsupported_mode():
-    agent = MarketInsightAgent()
-    state = agent.invoke({
+def test_sentiment_mode_renders_breadth(monkeypatch):
+    monkeypatch.setattr(market_insight_module, "get_market_sentiment_data", lambda: {
+        "as_of": "2026-09-11",
+        "breadth": {"advancing": 604, "declining": 4567, "limit_up": 40,
+                    "limit_down": 21, "flat": 36, "suspended": 12, "activity": 11.57},
+        "benchmark": {"name": "上证指数", "close": 3888.11, "pct_chg": -1.18},
+        "limitations": [],
+        "note": "",
+    })
+
+    state = MarketInsightAgent().invoke({
+        "requirement": "市场情绪如何", "current_task_intent": "market_insight",
+        "task_context": {"execution_mode": "market_sentiment"}, "intent_results": {},
+    })
+
+    content = state["intent_results"]["market_insight"]["content"]
+    assert "市场情绪" in content
+    assert "偏弱" in content          # 下跌多于上涨
+    assert "11.57%" in content
+    assert state["market_insight"]["mode"] == "market_sentiment"
+
+
+def test_capital_flow_mode_renders_channels_and_disclosure(monkeypatch):
+    monkeypatch.setattr(market_insight_module, "get_northbound_data", lambda: {
+        "as_of": "2026-09-11",
+        "channels": [
+            {"board": "沪股通", "direction": "northbound", "net_buy_yi": 5.2,
+             "advancing": 203, "declining": 1425},
+            {"board": "深股通", "direction": "northbound", "net_buy_yi": 12.5,
+             "advancing": 231, "declining": 1633},
+        ],
+        "net_buy_yi_total": 17.7,
+        "limitations": [],
+        "note": "当日快照；历史净流入自2024-09起停更。",
+    })
+
+    state = MarketInsightAgent().invoke({
         "requirement": "北向资金", "current_task_intent": "market_insight",
         "task_context": {"execution_mode": "capital_flow"}, "intent_results": {},
+    })
+
+    content = state["intent_results"]["market_insight"]["content"]
+    assert "沪股通" in content and "5.20 亿元" in content
+    assert "北向合计净买额：17.70 亿元" in content
+    assert "停更" in content          # 数据边界必须披露
+    assert state["market_insight"]["mode"] == "capital_flow"
+
+
+def test_partial_failures_are_disclosed_not_faked(monkeypatch):
+    monkeypatch.setattr(market_insight_module, "get_market_overview_data", lambda: {
+        "as_of": "2026-09-11",
+        "indices": [{"symbol": "sh000001", "name": "上证指数", "close": 3888.11,
+                     "pct_chg": -1.18}],
+        "breadth": {},
+        "limitations": ["market_breadth"],
+        "note": "",
+    })
+
+    state = MarketInsightAgent().invoke({
+        "requirement": "今天大盘怎么样", "current_task_intent": "market_insight",
+        "task_context": {"execution_mode": "market_overview"}, "intent_results": {},
+    })
+
+    result = state["intent_results"]["market_insight"]
+    assert result["status"] == "partial"
+    assert "限制与提示" in result["content"]
+    assert "market_breadth" in result["content"]
+
+
+def test_all_data_missing_degrades_honestly(monkeypatch):
+    monkeypatch.setattr(market_insight_module, "get_market_overview_data", lambda: {
+        "as_of": "", "indices": [], "breadth": {}, "limitations": ["market_breadth"], "note": "",
+    })
+
+    state = MarketInsightAgent().invoke({
+        "requirement": "今天大盘怎么样", "current_task_intent": "market_insight",
+        "task_context": {"execution_mode": "market_overview"}, "intent_results": {},
+    })
+
+    result = state["intent_results"]["market_insight"]
+    assert result["status"] == "degraded"
+    assert "暂不可用" in result["content"]
+
+
+def test_market_insight_agent_rejects_unknown_mode():
+    state = MarketInsightAgent().invoke({
+        "requirement": "外汇", "current_task_intent": "market_insight",
+        "task_context": {"execution_mode": "fx_flow"}, "intent_results": {},
     })
 
     assert state["intent_results"]["market_insight"]["status"] == "degraded"
@@ -88,7 +193,7 @@ def _make_system(monkeypatch, *, classifier_intents):
     return system
 
 
-def test_market_overview_end_to_end_routes_to_market_insight(monkeypatch):
+def test_market_overview_end_to_end_routes_to_market_insight(monkeypatch, overview_data):
     """"今天大盘怎么样"走市场洞察，不触发股票取数，也不产出个股结论。"""
     system = _make_system(monkeypatch, classifier_intents=[{
         "intent": "market_insight", "query": "今天大盘怎么样", "confidence": 0.99,
@@ -100,7 +205,7 @@ def test_market_overview_end_to_end_routes_to_market_insight(monkeypatch):
         config={"configurable": {"thread_id": "market-overview-e2e"}},
     )
 
-    assert "尚未接入" in result["agent_response"]
+    assert "上证指数" in result["agent_response"]
     assert "validation error" not in result["agent_response"]
     assert not result.get("stock_analysis")
-    assert "market_insight" in result["task_results"]["task-1"].expert_name
+    assert result["task_results"]["task-1"].expert_name == "market_insight"
