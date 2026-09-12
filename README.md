@@ -354,6 +354,20 @@ python -m finance_agent.research.refresh --theme-id ai_compute
 生产调度可在收盘后每日执行一次。也可通过 `THEME_REFRESH_IDS=ai_compute,robotics`
 配置多个主题；刷新失败会在 JSON 汇总中记录原因，且不会写入占位评分。
 
+产品数据灌库（产品解读专家的唯一事实来源；数据由运维准备，本仓库不接入外部产品数据源）：
+
+```bash
+# 由结构化数据生成幂等 SQL；校验失败时不产出任何文件
+python tools/generate_product_seed.py \
+  --input tools/data/products.sample.json \
+  --output sql/007_product_seed.sql
+# 再按既有方式应用到数据库（例如 psql -f sql/007_product_seed.sql）
+```
+
+生成器只接受 `products` / `holdings` / `performance` 三类记录，按外键顺序输出
+`INSERT ... ON CONFLICT`（明细表先按产品清空再写入，因此可重复执行）；所有值经类型
+白名单与单引号加倍转义。`tools/data/products.sample.json` 是可直接使用的样例。
+
 首次建立或补充主题候选池时，配置 `THEME_DISCOVERY_ENDPOINT`、
 `THEME_DISCOVERY_SOURCE_NAME`、`THEME_DISCOVERY_SOURCE_CLASS` 和可选的
 `THEME_DISCOVERY_API_TOKEN`，再运行：
