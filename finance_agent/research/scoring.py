@@ -7,7 +7,6 @@ from statistics import fmean, pstdev
 from typing import Any
 
 
-_SCORE_KEYS = ("fundamental_score", "technical_score", "risk_score")
 
 
 def _number(value: Any) -> float | None:

@@ -90,16 +90,6 @@ class StockAnalysisAgent(AgentProtocol):
             )
         return self._theme_screener
 
-    @staticmethod
-    def _codes_from_state(state: dict[str, Any], message: str) -> list[str]:
-        del message
-        resolved = state.get("resolved_stocks", []) or []
-        return [
-            str(item.get("code"))
-            for item in resolved
-            if isinstance(item, dict) and item.get("code")
-        ]
-
     def _resolve_candidate_codes(self, user_message: str) -> list[str]:
         """候选发现：主题代表股优先，其次名称/行业关键词搜索。
 
@@ -223,22 +213,6 @@ class StockAnalysisAgent(AgentProtocol):
                 and str(profile.get("holding_period", "")).strip()
             ),
         )
-
-    def plan(self, state: dict[str, Any]) -> dict[str, Any]:
-        """把状态解析为可扇出的执行计划，不执行分析、不取数。
-
-        返回 ``{"kind": "fanout", "request": {...}}``（逐标的扇出）、
-        ``{"kind": "defer"}``（主题筛选交给 task DAG）或
-        ``{"kind": "error", "content": ..., "status": ..., "clarification": ...}``。
-        """
-        message = str(state.get("requirement", "") or state.get("user_message", ""))
-        request, error = self._resolve_request(state, message)
-        if error is not None:
-            return {"kind": "error", **error}
-        assert request is not None
-        if request.kind.value == "theme_screening":
-            return {"kind": "defer"}
-        return {"kind": "fanout", "request": request.model_dump(mode="json")}
 
     def invoke(self, state: dict[str, Any]) -> dict[str, Any]:
         """解析一次状态并写回新旧两套结果，不保存本次调用数据。"""
@@ -485,8 +459,3 @@ class StockAnalysisAgent(AgentProtocol):
                 if key in raw:
                     entry[key] = raw[key]
         return entry
-
-    def _direct_technical_analysis(self, *args: Any, **kwargs: Any) -> None:
-        """旧调用方的兼容钩子；技术指标由快照/规则层统一处理。"""
-        del args, kwargs
-        return None

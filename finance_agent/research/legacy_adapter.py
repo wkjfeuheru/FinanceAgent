@@ -37,8 +37,3 @@ def project_legacy_many(results: list[AnalysisResult]) -> dict[str, Any]:
         "technical_analysis": {},
         "analysis_results": [result.model_dump(mode="json") for result in results],
     }
-
-
-def project_legacy(result: AnalysisResult) -> dict[str, Any]:
-    """保留旧调用入口：单条结论的兼容投影。"""
-    return project_legacy_many([result])
