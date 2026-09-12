@@ -21,15 +21,15 @@ from typing import Any, Dict
 
 from finance_agent.agents.base import ProceduralAgent
 from finance_agent.orchestrator.tools.marketdata import (
+    get_capital_flow_data,
     get_market_overview_data,
     get_market_sentiment_data,
-    get_northbound_data,
 )
 
 _MODE_COLLECTOR_NAMES = {
     "market_overview": "get_market_overview_data",
     "market_sentiment": "get_market_sentiment_data",
-    "capital_flow": "get_northbound_data",
+    "capital_flow": "get_capital_flow_data",
 }
 
 
@@ -60,6 +60,14 @@ def _num(value: Any) -> str:
     if isinstance(value, float):
         return f"{value:,.2f}"
     return str(value)
+
+
+def _yi(value: Any) -> str:
+    """把人民币元换算为亿元并格式化；None 返回占位。"""
+    try:
+        return f"{float(value) / 1e8:,.2f}"
+    except (TypeError, ValueError):
+        return "-"
 
 
 class MarketInsightAgent(ProceduralAgent):
@@ -173,24 +181,25 @@ class MarketInsightAgent(ProceduralAgent):
 
     @staticmethod
     def _render_capital_flow(data: dict[str, Any]) -> str:
-        channels = data.get("channels") or []
+        margin = data.get("margin") or {}
+        holdings = data.get("northbound_holdings") or {}
         as_of = str(data.get("as_of") or "").strip()
-        if not channels:
+        if not margin and not holdings:
             return ""
-        lines = ["### 北向资金" + (f"（{as_of}）" if as_of else "")]
-        for channel in channels:
-            if channel.get("disclosed") is False:
-                amount = "未披露"
-            else:
-                amount = f"{_num(channel.get('net_buy_yi'))} 亿元"
+        lines = ["### 资金面" + (f"（{as_of}）" if as_of else "")]
+        if margin:
             lines.append(
-                f"- {channel.get('board')}：当日成交净买额 {amount}"
-                f"（成分上涨 {_num(channel.get('advancing'))} 家，"
-                f"下跌 {_num(channel.get('declining'))} 家）"
+                f"融资融券（两市合计，{margin.get('as_of', '-')}）："
+                f"融资余额 {_num(margin.get('financing_balance_yi'))} 亿元，"
+                f"融券余额 {_num(margin.get('securities_lending_balance_yi'))} 亿元，"
+                f"两融余额 {_num(margin.get('total_balance_yi'))} 亿元，"
+                f"当日融资买入额 {_num(margin.get('financing_buy_yi'))} 亿元。"
             )
-        total = data.get("net_buy_yi_total")
-        if total is not None:
-            lines.append(f"北向合计净买额：{_num(total)} 亿元。")
+        if holdings.get("holdings_value_yuan") is not None:
+            lines.append(
+                f"北向持股市值（{holdings.get('as_of', '季度')}，季度披露）："
+                f"{_yi(holdings.get('holdings_value_yuan'))} 亿元。"
+            )
         note = str(data.get("note") or "").strip()
         if note:
             lines.append(f"数据说明：{note}")

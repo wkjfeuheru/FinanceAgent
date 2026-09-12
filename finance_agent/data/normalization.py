@@ -99,16 +99,16 @@ BREADTH_LABELS: dict[str, str] = {
     "统计日期": "as_of",
 }
 
-# 东财北向汇总的中文标签 → 统一通道键。
-NORTHBOUND_LABELS: dict[str, str] = {
-    "交易日": "as_of",
-    "类型": "connect_type",
-    "板块": "board",
-    "资金方向": "direction",
-    "成交净买额": "net_buy_yi",
-    "资金净流入": "fund_inflow_yi",
-    "上涨数": "advancing",
-    "下跌数": "declining",
+# 两市融资融券汇总（``stock_margin_account_info``）的中文标签 → 统一键。
+# 该接口口径为**两市合计**、**单位亿元**、日频且带日期；沪/深分列接口存在
+# 默认日期陈旧（沪市不带参返回 2023 年）与单位不一致（深市为亿元）的问题，
+# 因此统一走合计口径。
+MARGIN_LABELS: dict[str, str] = {
+    "日期": "as_of",
+    "融资余额": "financing_balance_yi",
+    "融券余额": "securities_lending_balance_yi",
+    "融资买入额": "financing_buy_yi",
+    "融券卖出额": "securities_lending_sell_yi",
 }
 
 _LIST_KEYS = ("data", "items", "results", "list", "records")
@@ -339,46 +339,67 @@ def normalize_breadth_record(payload: Any) -> dict[str, Any] | None:
     return record
 
 
-def normalize_northbound_records(payload: Any) -> list[dict[str, Any]]:
-    """把东财北向汇总表转为统一通道记录（金额单位：亿元）。
-
-    只保留 ``资金方向 == 北向`` 的通道（沪股通/深股通）；南向通道不进北向快照。
-    """
-    rows = payload
+def _rows_of(payload: Any) -> list[Any]:
+    """从列表或 ``{"data": [...]}`` 包装中取出记录列表。"""
+    if isinstance(payload, list):
+        return payload
     if isinstance(payload, dict):
         for key in _LIST_KEYS:
             if isinstance(payload.get(key), list):
-                rows = payload[key]
-                break
-    if not isinstance(rows, list):
-        return []
-    channels: list[dict[str, Any]] = []
+                return payload[key]
+    return []
+
+
+def normalize_margin_summary(payload: Any) -> dict[str, Any] | None:
+    """把两市融资融券汇总转为统一快照（单位：亿元）。
+
+    上游 ``stock_margin_account_info`` 按日期升序返回两市合计的日频数据；
+    取最后一行作为最新快照，出口统一为 ``as_of`` + ``*_yi`` 字段。
+    """
+    rows = _rows_of(payload)
+    if not rows:
+        return None
+    latest = rows[-1]
+    if not isinstance(latest, dict):
+        return None
+    record: dict[str, Any] = {}
+    for source, target in MARGIN_LABELS.items():
+        if source not in latest:
+            continue
+        if target == "as_of":
+            record["as_of"] = _iso_date(latest[source])
+        else:
+            record[target] = _as_number(latest[source])
+    if record.get("financing_balance_yi") is None:
+        return None
+    # 两融余额 = 融资余额 + 融券余额（上游未直接给出该合计列）。
+    financing = record.get("financing_balance_yi")
+    lending = record.get("securities_lending_balance_yi")
+    if financing is not None and lending is not None:
+        record["total_balance_yi"] = round(financing + lending, 4)
+    return record
+
+
+def normalize_northbound_holdings(payload: Any) -> dict[str, Any] | None:
+    """从北向资金历史中取最近一条**非零**持股市值（季度披露）。
+
+    自 2024-08 披露口径变更后逐日资金流停更，但 ``持股市值`` 改为季度披露且
+    近期仍有效；因此只保留最近一个有值的季度点位，并标注其 ``as_of``。
+    """
+    rows = _rows_of(payload)
+    latest: dict[str, Any] | None = None
     for row in rows:
         if not isinstance(row, dict):
             continue
-        unified: dict[str, Any] = {}
-        for source, target in NORTHBOUND_LABELS.items():
-            if source in row:
-                unified[target] = row[source]
-        if str(unified.get("direction", "")).strip() != "北向":
-            continue
-        channel = {
-            "board": str(unified.get("board", "")).strip(),
-            "direction": "northbound",
-            "as_of": _iso_date(unified.get("as_of")),
-            "net_buy_yi": _as_number(unified.get("net_buy_yi")),
-            "fund_inflow_yi": _as_number(unified.get("fund_inflow_yi")),
-            "advancing": int(_as_number(unified.get("advancing")) or 0),
-            "declining": int(_as_number(unified.get("declining")) or 0),
-        }
-        # 自 2024-08 起因监管调整，北向实时净买额不再披露；数据源仍返回该列但恒为
-        # 0，同时当日资金余额也归零。若把 0 当作"零净买入"会误导，故显式标记未披露。
-        channel["disclosed"] = not (
-            channel["net_buy_yi"] == 0 and channel["fund_inflow_yi"] == 0
-        )
-        if channel["board"]:
-            channels.append(channel)
-    return channels
+        value = _as_number(row.get("持股市值"))
+        if value and value > 0:
+            latest = {**row, "持股市值": value}
+    if latest is None:
+        return None
+    return {
+        "as_of": _iso_date(latest.get("日期")),
+        "holdings_value_yuan": latest["持股市值"],
+    }
 
 
 __all__ = [
@@ -388,7 +409,7 @@ __all__ = [
     "FINANCIAL_ALIASES",
     "FINANCIAL_LABEL_PATTERNS",
     "INDEX_DAILY_ALIASES",
-    "NORTHBOUND_LABELS",
+    "MARGIN_LABELS",
     "TRADE_CAL_ALIASES",
     "VALUATION_ALIASES",
     "normalize_basic_records",
@@ -396,7 +417,8 @@ __all__ = [
     "normalize_daily_records",
     "normalize_financial_records",
     "normalize_index_daily_records",
-    "normalize_northbound_records",
+    "normalize_margin_summary",
+    "normalize_northbound_holdings",
     "normalize_trade_cal_records",
     "normalize_valuation_records",
 ]

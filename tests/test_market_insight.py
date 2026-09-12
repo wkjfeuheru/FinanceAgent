@@ -91,53 +91,66 @@ def test_sentiment_mode_renders_breadth(monkeypatch):
     assert state["market_insight"]["mode"] == "market_sentiment"
 
 
-def test_capital_flow_mode_renders_channels_and_disclosure(monkeypatch):
-    monkeypatch.setattr(market_insight_module, "get_northbound_data", lambda: {
-        "as_of": "2026-09-11",
-        "channels": [
-            {"board": "沪股通", "direction": "northbound", "net_buy_yi": 5.2,
-             "advancing": 203, "declining": 1425, "disclosed": True},
-            {"board": "深股通", "direction": "northbound", "net_buy_yi": 12.5,
-             "advancing": 231, "declining": 1633, "disclosed": True},
-        ],
-        "net_buy_yi_total": 17.7,
+def test_capital_flow_mode_renders_margin_and_holdings(monkeypatch):
+    """capital_flow 以融资融券（日频主指标）+ 北向持股市值（季度参考）呈现。"""
+    monkeypatch.setattr(market_insight_module, "get_capital_flow_data", lambda: {
+        "as_of": "2026-09-10",
+        "margin": {
+            "as_of": "2026-09-10", "financing_balance_yi": 26171.760561,
+            "securities_lending_balance_yi": 291.914989,
+            "total_balance_yi": 26463.67555, "financing_buy_yi": 1363.108363,
+        },
+        "northbound_holdings": {"as_of": "2026-06-30",
+                                "holdings_value_yuan": 3102375003773},
         "limitations": [],
-        "note": "自2024-08起监管调整，北向实时净买额不再披露。",
+        "note": "融资融券为两市合计、交易所日频披露；北向持股市值为季度披露，非实时。",
     })
 
     state = MarketInsightAgent().invoke({
-        "requirement": "北向资金", "current_task_intent": "market_insight",
+        "requirement": "资金面如何", "current_task_intent": "market_insight",
         "task_context": {"execution_mode": "capital_flow"}, "intent_results": {},
     })
 
     content = state["intent_results"]["market_insight"]["content"]
-    assert "沪股通" in content and "5.20 亿元" in content
-    assert "北向合计净买额：17.70 亿元" in content
-    assert "不再披露" in content          # 数据边界必须披露
+    assert "融资融券（两市合计，2026-09-10）" in content
+    assert "26,171.76 亿元" in content        # 融资余额
+    assert "26,463.68 亿元" in content        # 两融余额
+    assert "北向持股市值（2026-06-30，季度披露）" in content
+    assert "31,023.75 亿元" in content
     assert state["market_insight"]["mode"] == "capital_flow"
 
 
-def test_capital_flow_shows_undisclosed_instead_of_zero(monkeypatch):
-    """未披露的通道不得渲染成 '0.00 亿元'，否则会被误读为零净买入。"""
-    monkeypatch.setattr(market_insight_module, "get_northbound_data", lambda: {
-        "as_of": "2026-09-11",
-        "channels": [
-            {"board": "沪股通", "direction": "northbound", "net_buy_yi": 0.0,
-             "advancing": 203, "declining": 1425, "disclosed": False},
-        ],
-        "net_buy_yi_total": None,
-        "limitations": [],
-        "note": "自2024-08起监管调整，北向实时净买额不再披露。",
+def test_capital_flow_lists_missing_source_instead_of_faking(monkeypatch):
+    monkeypatch.setattr(market_insight_module, "get_capital_flow_data", lambda: {
+        "as_of": "2026-09-10",
+        "margin": {"as_of": "2026-09-10", "financing_balance_yi": 26171.760561},
+        "northbound_holdings": {},
+        "limitations": ["northbound_holdings"],
+        "note": "融资融券为两市合计、交易所日频披露；北向持股市值为季度披露，非实时。",
     })
 
     state = MarketInsightAgent().invoke({
-        "requirement": "北向资金", "current_task_intent": "market_insight",
+        "requirement": "资金面如何", "current_task_intent": "market_insight",
         "task_context": {"execution_mode": "capital_flow"}, "intent_results": {},
     })
 
-    content = state["intent_results"]["market_insight"]["content"]
-    assert "未披露" in content
-    assert "0.00 亿元" not in content
+    result = state["intent_results"]["market_insight"]
+    assert result["status"] == "partial"
+    assert "northbound_holdings" in result["content"]
+
+
+def test_capital_flow_degrades_when_all_missing(monkeypatch):
+    monkeypatch.setattr(market_insight_module, "get_capital_flow_data", lambda: {
+        "as_of": "", "margin": {}, "northbound_holdings": {},
+        "limitations": ["margin_summary", "northbound_holdings"], "note": "",
+    })
+
+    state = MarketInsightAgent().invoke({
+        "requirement": "资金面如何", "current_task_intent": "market_insight",
+        "task_context": {"execution_mode": "capital_flow"}, "intent_results": {},
+    })
+
+    assert state["intent_results"]["market_insight"]["status"] == "degraded"
 
 
 def test_partial_failures_are_disclosed_not_faked(monkeypatch):

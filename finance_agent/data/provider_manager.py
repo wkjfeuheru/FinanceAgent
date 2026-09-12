@@ -141,9 +141,13 @@ class ProviderManager:
         """获取市场宽度（涨跌家数/涨跌停/活跃度，最近交易日快照）。"""
         return self._call("get_market_breadth")
 
-    def get_northbound_flow(self) -> Any:
-        """获取北向资金当日通道快照（金额单位：亿元）。"""
-        return self._call("get_northbound_flow")
+    def get_margin_summary(self) -> Any:
+        """获取两市融资融券汇总（日频；金额单位：亿元）。"""
+        return self._call("get_margin_summary")
+
+    def get_northbound_holdings(self) -> Any:
+        """获取北向持股市值（季度披露；金额单位：亿元）。"""
+        return self._call("get_northbound_holdings")
 
 
 _manager_instance: ProviderManager | None = None

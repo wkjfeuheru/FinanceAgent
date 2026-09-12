@@ -15,7 +15,8 @@ from finance_agent.data.board_codes import (
 from finance_agent.data.normalization import (
     normalize_breadth_record,
     normalize_index_daily_records,
-    normalize_northbound_records,
+    normalize_margin_summary,
+    normalize_northbound_holdings,
 )
 from finance_agent.data.providers import UnsupportedProviderCapability
 
@@ -97,38 +98,45 @@ def test_normalize_breadth_record_returns_none_without_advancing_declining():
     assert normalize_breadth_record("not-a-list") is None
 
 
-def test_normalize_northbound_marks_undisclosed_zero_flow():
-    """北向实时净买额自 2024-08 起不再披露（数据源恒返回 0），必须标记未披露。"""
+def test_normalize_margin_summary_takes_latest_combined_row():
+    """两市合计口径：按日期升序，取最后一行；单位已是亿元。"""
     payload = [
-        {"交易日": "2026-09-11", "类型": "沪港通", "板块": "沪股通", "资金方向": "北向",
-         "成交净买额": 0.0, "资金净流入": 0.0, "上涨数": 203, "下跌数": 1425},
-        {"交易日": "2026-09-11", "类型": "深港通", "板块": "深股通", "资金方向": "北向",
-         "成交净买额": 12.5, "资金净流入": 88.0, "上涨数": 231, "下跌数": 1633},
+        {"日期": "2026-09-09", "融资余额": 26193.911321, "融券余额": 292.094317,
+         "融资买入额": 1549.673373, "融券卖出额": 10.303606},
+        {"日期": "2026-09-10", "融资余额": 26171.760561, "融券余额": 291.914989,
+         "融资买入额": 1363.108363, "融券卖出额": 8.620038},
     ]
 
-    channels = normalize_northbound_records(payload)
+    record = normalize_margin_summary(payload)
 
-    assert channels[0]["disclosed"] is False
-    assert channels[1]["disclosed"] is True
+    assert record["as_of"] == "2026-09-10"
+    assert record["financing_balance_yi"] == 26171.760561
+    assert record["financing_buy_yi"] == 1363.108363
+    assert record["total_balance_yi"] == pytest.approx(26463.67555)
 
 
-def test_normalize_northbound_keeps_northbound_channels_only():
+def test_normalize_margin_summary_requires_financing_balance():
+    assert normalize_margin_summary([]) is None
+    assert normalize_margin_summary([{"日期": "2026-09-10"}]) is None
+
+
+def test_normalize_northbound_holdings_picks_last_nonzero_quarter():
+    """持股市值改为季度披露：跳过 0 值行，取最近一个有值的季度点位。"""
     payload = [
-        {"交易日": "2026-09-11", "类型": "沪港通", "板块": "沪股通", "资金方向": "北向",
-         "成交净买额": 5.2, "资金净流入": 10.0, "上涨数": 203, "下跌数": 1425},
-        {"交易日": "2026-09-11", "类型": "沪港通", "板块": "港股通(沪)", "资金方向": "南向",
-         "成交净买额": 31.9, "资金净流入": 420.0, "上涨数": 164, "下跌数": 480},
-        {"交易日": "2026-09-11", "类型": "深港通", "板块": "深股通", "资金方向": "北向",
-         "成交净买额": 12.5, "资金净流入": 88.0, "上涨数": 231, "下跌数": 1633},
+        {"日期": "2026-03-31", "持股市值": 2578453000000},
+        {"日期": "2026-06-30", "持股市值": 3102375003773},
+        {"日期": "2026-09-11", "持股市值": 0.0},
     ]
 
-    channels = normalize_northbound_records(payload)
+    record = normalize_northbound_holdings(payload)
 
-    assert [channel["board"] for channel in channels] == ["沪股通", "深股通"]
-    assert all(channel["direction"] == "northbound" for channel in channels)
-    assert channels[0]["net_buy_yi"] == 5.2
-    assert channels[1]["fund_inflow_yi"] == 88.0
-    assert channels[0]["as_of"] == "2026-09-11"
+    assert record["as_of"] == "2026-06-30"
+    assert record["holdings_value_yuan"] == 3102375003773
+
+
+def test_normalize_northbound_holdings_none_without_valid_value():
+    assert normalize_northbound_holdings([{"日期": "2026-09-11", "持股市值": 0}]) is None
+    assert normalize_northbound_holdings([]) is None
 
 
 # ── 适配器出口（夹具驱动，不联网） ──────────────────────────────────────────────
@@ -163,10 +171,19 @@ class _FakeAk:
             {"项目": "统计日期", "数值": "2026-09-11 15:00:00"},
         ])
 
-    def stock_hsgt_fund_flow_summary_em(self):
+    def stock_margin_account_info(self):
         return _FakeFrame([
-            {"交易日": "2026-09-11", "类型": "沪港通", "板块": "沪股通", "资金方向": "北向",
-             "成交净买额": 5.2, "资金净流入": 88.0, "上涨数": 203, "下跌数": 1425},
+            {"日期": "2026-09-09", "融资余额": 26193.911321, "融券余额": 292.094317,
+             "融资买入额": 1549.673373, "融券卖出额": 10.303606},
+            {"日期": "2026-09-10", "融资余额": 26171.760561, "融券余额": 291.914989,
+             "融资买入额": 1363.108363, "融券卖出额": 8.620038},
+        ])
+
+    def stock_hsgt_hist_em(self, symbol: str = "北向资金"):
+        assert symbol == "北向资金"
+        return _FakeFrame([
+            {"日期": "2026-03-31", "持股市值": 2578453000000},
+            {"日期": "2026-06-30", "持股市值": 3102375003773},
         ])
 
 
@@ -208,17 +225,28 @@ def test_akshare_market_breadth_returns_unified_snapshot(monkeypatch):
     assert record["as_of"] == "2026-09-11"
 
 
-def test_akshare_northbound_flow_keeps_note_and_channels(monkeypatch):
+def test_akshare_margin_summary_returns_combined_snapshot(monkeypatch):
     provider = _akshare(monkeypatch)
     monkeypatch.setattr("finance_agent.data.akshare_provider.cache_read", lambda *a, **k: None)
     monkeypatch.setattr("finance_agent.data.akshare_provider.cache_write", lambda *a, **k: None)
 
-    record = provider.get_northbound_flow()
+    record = provider.get_margin_summary()
 
-    assert record["as_of"] == "2026-09-11"
-    assert record["channels"][0]["board"] == "沪股通"
-    assert record["channels"][0]["net_buy_yi"] == pytest.approx(5.2)
-    assert "停更" in record["note"]
+    assert record["as_of"] == "2026-09-10"
+    assert record["financing_balance_yi"] == 26171.760561
+    assert record["total_balance_yi"] == pytest.approx(26463.67555)
+
+
+def test_akshare_northbound_holdings_returns_quarter_point(monkeypatch):
+    provider = _akshare(monkeypatch)
+    monkeypatch.setattr("finance_agent.data.akshare_provider.cache_read", lambda *a, **k: None)
+    monkeypatch.setattr("finance_agent.data.akshare_provider.cache_write", lambda *a, **k: None)
+
+    record = provider.get_northbound_holdings()
+
+    assert record["as_of"] == "2026-06-30"
+    assert record["holdings_value_yuan"] == 3102375003773
+    assert "季度" in record["note"]
 
 
 def test_akshare_rejects_stock_code_as_index(monkeypatch):
@@ -227,14 +255,16 @@ def test_akshare_rejects_stock_code_as_index(monkeypatch):
         provider.get_index_daily("600519")
 
 
-def test_baostock_declares_breadth_and_northbound_unsupported():
+def test_baostock_declares_market_capabilities_unsupported():
     from finance_agent.data.baostock_provider import BaostockDataSource
 
     provider = object.__new__(BaostockDataSource)
     with pytest.raises(UnsupportedProviderCapability):
         provider.get_market_breadth()
     with pytest.raises(UnsupportedProviderCapability):
-        provider.get_northbound_flow()
+        provider.get_margin_summary()
+    with pytest.raises(UnsupportedProviderCapability):
+        provider.get_northbound_holdings()
 
 
 def test_provider_manager_routes_index_daily_with_fallback(monkeypatch):

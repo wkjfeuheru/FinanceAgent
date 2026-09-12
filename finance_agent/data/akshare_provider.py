@@ -24,7 +24,8 @@ from finance_agent.data.normalization import (
     normalize_daily_records,
     normalize_financial_records,
     normalize_index_daily_records,
-    normalize_northbound_records,
+    normalize_margin_summary,
+    normalize_northbound_holdings,
     normalize_valuation_records,
 )
 from finance_agent.data.providers import ProviderUnavailableError, UnsupportedProviderCapability
@@ -311,33 +312,56 @@ class AkshareDataSource:
         cache_write("breadth", cache_key, record)
         return record
 
-    def get_northbound_flow(self) -> dict[str, Any]:
-        """获取北向资金当日通道快照（东财 ``stock_hsgt_fund_flow_summary_em``）。
+    def get_margin_summary(self) -> dict[str, Any]:
+        """获取两市融资融券汇总（日频，单位亿元）。
 
-        实测 2026-09-12：返回沪股通/深股通（北向）与港股通（南向）当日净买额
-        （单位亿元）与成分涨跌家数；本方法只保留北向通道。
-        历史净流入自 2024-09 起因披露口径变更停更，因此**只提供当日快照**，
-        不提供历史序列。
+        实测 2026-09-12：``stock_margin_account_info`` 返回两市合计的日频序列
+        （最近 2026-09-10，融资余额约 2.62 万亿元），带日期、单位统一为亿元。
+        相比之下沪市 ``stock_margin_sse`` 不带日期时默认返回 2023 年旧数据，
+        深市 ``stock_margin_szse`` 单位为亿元，两列口径与日期都不一致，因此这里
+        只走合计接口。
         """
-        fetch = getattr(self.ak, "stock_hsgt_fund_flow_summary_em", None)
+        fetch = getattr(self.ak, "stock_margin_account_info", None)
         if not callable(fetch):
-            raise UnsupportedProviderCapability("AKShare 该版本未提供 stock_hsgt_fund_flow_summary_em 接口")
-        cache_key = ("akshare", "northbound")
-        cached = cache_read("northbound", cache_key)
+            raise UnsupportedProviderCapability("AKShare 该版本未提供 stock_margin_account_info 接口")
+        cache_key = ("akshare", "margin")
+        cached = cache_read("margin", cache_key)
         if cached:
             return cached
         try:
-            channels = normalize_northbound_records(_records(fetch()))
+            record = normalize_margin_summary(_records(fetch()))
         except Exception as exc:
-            raise ProviderUnavailableError(f"AKShare 取北向资金失败: {exc}") from exc
-        if not channels:
-            raise ProviderUnavailableError("AKShare 北向资金返回空数据")
-        as_of = next((channel["as_of"] for channel in channels if channel.get("as_of")), "")
+            raise ProviderUnavailableError(f"AKShare 取两市融资融券失败: {exc}") from exc
+        if not record:
+            raise ProviderUnavailableError("AKShare 两市融资融券返回空数据")
+        record["note"] = "两市合计，交易所日频披露。"
+        cache_write("margin", cache_key, record)
+        return record
+
+    def get_northbound_holdings(self) -> dict[str, Any]:
+        """获取北向持股市值最近季度点位（东财 ``stock_hsgt_hist_em``）。
+
+        实测 2026-09-12：逐日资金流自 2024-08-16 起停更（监管披露调整），但
+        ``持股市值`` 改为**季度**披露且近期仍有效（最近 2026-06-30 约 3.1 万亿元）。
+        因此这里只返回最近一个有值的季度点位，并在 note 中标注披露频率与滞后。
+        """
+        fetch = getattr(self.ak, "stock_hsgt_hist_em", None)
+        if not callable(fetch):
+            raise UnsupportedProviderCapability("AKShare 该版本未提供 stock_hsgt_hist_em 接口")
+        cache_key = ("akshare", "northbound_holdings")
+        cached = cache_read("northbound_holdings", cache_key)
+        if cached:
+            return cached
+        try:
+            snapshot = normalize_northbound_holdings(_records(fetch(symbol="北向资金")))
+        except Exception as exc:
+            raise ProviderUnavailableError(f"AKShare 取北向持股市值失败: {exc}") from exc
+        if not snapshot:
+            raise ProviderUnavailableError("AKShare 北向持股市值返回空数据")
         record = {
-            "as_of": as_of,
-            "channels": channels,
-            "note": "自2024-08起监管调整，北向实时净买额不再披露（数据源该列恒为0）；"
-                    "历史净流入序列亦自2024-09停更。本接口只提供当日通道快照与成分涨跌家数。",
+            "as_of": snapshot.get("as_of", ""),
+            "holdings_value_yuan": snapshot.get("holdings_value_yuan"),
+            "note": "北向持股市值为季度披露（最近有效季度），非实时；逐日北向资金流自2024-08起停更。",
         }
-        cache_write("northbound", cache_key, record)
+        cache_write("northbound_holdings", cache_key, record)
         return record

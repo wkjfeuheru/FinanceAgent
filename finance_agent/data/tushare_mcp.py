@@ -329,9 +329,15 @@ class TushareMcpDataSource:
         """Tushare MCP 不提供市场宽度快照。"""
         raise UnsupportedProviderCapability("Tushare MCP 不提供市场宽度接口")
 
-    def get_northbound_flow(self) -> Any:
-        """Tushare MCP 北向资金路径未经验证（本仓库无可用 token），暂不声明。"""
+    def get_margin_summary(self) -> Any:
+        """Tushare MCP 融资融券路径未经验证（本仓库无可用 token），暂不声明。"""
         raise UnsupportedProviderCapability(
-            "Tushare MCP 北向资金接口未在无 token 环境验证，暂不声明该能力"
+            "Tushare MCP 融资融券接口未在无 token 环境验证，暂不声明该能力"
+        )
+
+    def get_northbound_holdings(self) -> Any:
+        """Tushare MCP 北向持股路径未经验证（本仓库无可用 token），暂不声明。"""
+        raise UnsupportedProviderCapability(
+            "Tushare MCP 北向持股接口未在无 token 环境验证，暂不声明该能力"
         )
 

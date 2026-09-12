@@ -102,36 +102,37 @@ def get_market_sentiment_data() -> dict[str, Any]:
     }
 
 
-def get_northbound_data() -> dict[str, Any]:
-    """北向资金：各通道当日净买额与成分涨跌家数。
+def get_capital_flow_data() -> dict[str, Any]:
+    """资金面：两市融资融券（日频主指标）+ 北向持股市值（季度参考）。
 
-    历史净流入因数据源披露口径变更停更，本函数只返回当日快照，并原样透传
-    数据源给出的 ``note``，让展示层能如实披露数据边界。
+    原北向逐日净买额自 2024-08 起停止披露（监管调整），故改用仍在日频披露的
+    融资融券作为主指标，并以季度披露的北向持股市值作为中期参考。两项均
+    best-effort，缺项只记入 ``limitations``。
     """
     manager = get_provider_manager()
-    snapshot, error = _safe(manager.get_northbound_flow)
     limitations: list[str] = []
-    if error or not snapshot:
-        limitations.append("northbound_flow")
-        snapshot = {}
-    channels = list((snapshot or {}).get("channels", []) or [])
-    net_total = None
-    disclosed = [channel for channel in channels if channel.get("disclosed")]
-    if disclosed:
-        values = [channel.get("net_buy_yi") for channel in disclosed]
-        if all(isinstance(value, (int, float)) for value in values):
-            net_total = round(sum(values), 2)
+
+    margin, margin_error = _safe(manager.get_margin_summary)
+    if margin_error or not margin:
+        limitations.append("margin_summary")
+        margin = {}
+
+    holdings, holdings_error = _safe(manager.get_northbound_holdings)
+    if holdings_error or not holdings:
+        limitations.append("northbound_holdings")
+        holdings = {}
+
     return {
-        "as_of": (snapshot or {}).get("as_of", "") or "",
-        "channels": channels,
-        "net_buy_yi_total": net_total,
+        "as_of": (margin or {}).get("as_of", "") or "",
+        "margin": margin or {},
+        "northbound_holdings": holdings or {},
         "limitations": limitations,
-        "note": (snapshot or {}).get("note", ""),
+        "note": "融资融券为两市合计、交易所日频披露；北向持股市值为季度披露，非实时。",
     }
 
 
 __all__ = [
+    "get_capital_flow_data",
     "get_market_overview_data",
     "get_market_sentiment_data",
-    "get_northbound_data",
 ]

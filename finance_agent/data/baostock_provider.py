@@ -227,6 +227,10 @@ class BaostockDataSource:
         """BaoStock 不提供市场宽度快照。"""
         raise UnsupportedProviderCapability("BaoStock 不提供市场宽度接口")
 
-    def get_northbound_flow(self) -> Any:
-        """BaoStock 不提供北向资金数据。"""
-        raise UnsupportedProviderCapability("BaoStock 不提供北向资金接口")
+    def get_margin_summary(self) -> Any:
+        """BaoStock 不提供融资融券汇总。"""
+        raise UnsupportedProviderCapability("BaoStock 不提供融资融券接口")
+
+    def get_northbound_holdings(self) -> Any:
+        """BaoStock 不提供北向持股数据。"""
+        raise UnsupportedProviderCapability("BaoStock 不提供北向持股接口")
