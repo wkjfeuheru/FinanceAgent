@@ -233,7 +233,7 @@ def test_langgraph_routes_expert_result_into_manager_synthesis(monkeypatch):
     system._emit_progress = lambda *args, **kwargs: None
 
     def fake_dispatch(state):
-        """真正写入 tasks：新图由 plan_tasks 消费 tasks，不再有旧式逐专家回退。"""
+        """真正写入 tasks：新图由 task_batch 统一调度，不再有旧式逐专家回退。"""
         from finance_agent.contracts.adapters import dispatch_plan_to_legacy, normalize_dispatch_plan
         plan = normalize_dispatch_plan(
             [{"intent": "casual_chat", "query": "你好", "confidence": 0.99,

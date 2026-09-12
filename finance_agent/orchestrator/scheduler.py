@@ -31,6 +31,18 @@ def _failure(task: Task, *, status: ExpertStatus, error_code: str, summary: str)
     )
 
 
+def _budget(
+    budgets: dict[str, dict[str, float]] | None,
+    expert_name: str,
+    key: str,
+    default: float,
+) -> float:
+    """取该专家的预算覆盖值；未配置时用默认值。"""
+    override = (budgets or {}).get(expert_name) or {}
+    value = override.get(key)
+    return float(value) if value is not None else default
+
+
 def _validate_result(raw: Any, task: Task) -> ExpertResult:
     if isinstance(raw, ExpertResult):
         result = raw
@@ -106,15 +118,15 @@ def run_task_dag(
     max_retries: int = 2,
     timeout_seconds: float,
     deadline_seconds: float,
-    initial_results: dict[str, ExpertResult] | None = None,
+    budgets: dict[str, dict[str, float]] | None = None,
 ) -> dict[str, ExpertResult]:
     """按依赖层执行任务；当前层的独立任务并行执行。
 
-    ``initial_results`` 允许把已完成的（例如逐标的扇出聚合出的）结果作为
-    依赖满足条件注入，使下游任务不会误判为依赖缺失。
+    ``budgets`` 允许按 ``expert_name`` 覆盖单任务超时/总 deadline（例如股票任务
+    的取数耗时随标的数增长，需要更宽裕的余量），未列出的专家沿用传入默认值。
     """
-    results: dict[str, ExpertResult] = dict(initial_results or {})
-    pending = {task.task_id: task for task in tasks if task.task_id not in results}
+    pending = {task.task_id: task for task in tasks}
+    results: dict[str, ExpertResult] = {}
     while pending:
         blocked = [
             task for task in pending.values()
@@ -151,8 +163,8 @@ def run_task_dag(
                         runner=context.runner,
                     ),
                     max_retries=max_retries,
-                    timeout_seconds=timeout_seconds,
-                    deadline_seconds=deadline_seconds,
+                    timeout_seconds=_budget(budgets, task.expert_name, "timeout_seconds", timeout_seconds),
+                    deadline_seconds=_budget(budgets, task.expert_name, "deadline_seconds", deadline_seconds),
                 )
                 for task in ready
             }

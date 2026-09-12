@@ -14,7 +14,7 @@ from finance_agent.orchestrator.tools import stockdata
 
 
 def _dispatch_with_tasks(state, raw_intents):
-    """供图级测试：写入真实 tasks（新图由 plan_tasks 消费），并返回旧式分派。"""
+    """供图级测试：写入真实 tasks（新图由 task_batch 统一调度），并返回旧式分派。"""
     plan = normalize_dispatch_plan(raw_intents, state.get("user_message", ""))
     state["tasks"] = plan.tasks
     return dispatch_plan_to_legacy(plan)

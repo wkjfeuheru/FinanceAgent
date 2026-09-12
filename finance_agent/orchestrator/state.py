@@ -88,16 +88,8 @@ class AdvisorState(TypedDict, total=False):
     warnings: Annotated[List[str], dedupe_concat]
     business_state: Dict[str, Any]
 
-    # ── 逐标的扇出分片（并发写入，聚合节点消费）──
-    planned_branches: List[Dict[str, Any]]
-    stock_fragments: Annotated[Dict[str, Dict[str, Any]], merge_dict]
-    stock_fragment_errors: Annotated[Dict[str, Dict[str, Any]], merge_dict]
-    plan_kind: str
-    stock_plan_error: Dict[str, Any]
+    # ── 运行级研究请求留档（审计按一次运行归组重放）──
     research_request: Dict[str, Any]
-    # 逐标的扇出的单次取数入参（Send 分支携带）
-    fetch_code: str
-    fetch_task_id: str
 
     # ── 用户画像与股票 ──
     user_profile: Dict[str, Any]

@@ -12,7 +12,6 @@ from typing import Any, Callable, Dict, List
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
-from langgraph.types import Send
 
 from finance_agent.agents.asset_allocation import AssetAllocationAgent
 from finance_agent.agents.casual_chat import CasualChatAgent
@@ -42,6 +41,12 @@ from finance_agent.orchestrator.state import AdvisorState
 from finance_agent.middleware import BLOCKED_RESPONSE, find_sensitive_word
 
 logger = logging.getLogger(__name__)
+
+# 按专家放宽 DAG 预算：股票任务的取数是批次内并行外部 I/O，整批耗时随标的数增长，
+# 沿用其它专家的 90s/180s 会在慢网络下截断整批（重构前该路径无超时）。
+_DAG_BUDGETS: Dict[str, Dict[str, float]] = {
+    "stock_analysis": {"timeout_seconds": 120, "deadline_seconds": 300},
+}
 
 
 class AdvisorSystem:
@@ -353,164 +358,14 @@ class AdvisorSystem:
             return self.slot_extractor.extract(state)
 
         def route_after_slots(state: AdvisorState) -> str:
-            """有 task 走计划/扇出；无 task 直接进入合成（澄清或分类失败）。"""
+            """有 task 走 DAG 批处理；无 task 直接进入合成（澄清或分类失败）。"""
             if state.get("tasks"):
-                return "plan_tasks"
+                return "task_batch"
             return "manager_synthesis"
 
-        _STOCK_INTENTS = {"stock_analysis", "stock_recommendation"}
-
-        def _stock_task(state: AdvisorState) -> Any:
-            """取本轮第一个股票类任务；无则返回 None。"""
-            for task in state.get("tasks", []) or []:
-                if task.expert_name == "stock_analysis" or (
-                    task.intent is not None and task.intent.value in _STOCK_INTENTS
-                ):
-                    return task
-            return None
-
-        def plan_tasks_handler(state: AdvisorState) -> AdvisorState:
-            """解析股票请求并登记逐标的扇出计划；不取数、不执行分析。"""
-            task = _stock_task(state)
-            if task is None:
-                state["planned_branches"] = []
-                return state
-            plan_state = dict(state)
-            plan_state["requirement"] = task.requirement
-            plan_state["current_task_intent"] = task.intent.value if task.intent else ""
-            plan_state["task_id"] = task.task_id
-            plan = self.stock_agent.plan(plan_state)
-            state["plan_kind"] = plan.get("kind", "")
-            if plan.get("kind") == "fanout":
-                request = plan["request"]
-                codes = list(request.get("stock_codes", []))
-                state["research_request"] = request
-                state["resolved_stocks"] = [{"code": code} for code in codes]
-                state["planned_branches"] = [
-                    {"code": code, "task_id": task.task_id,
-                     "intent": task.intent.value if task.intent else ""}
-                    for code in codes
-                ]
-            elif plan.get("kind") == "error":
-                state["stock_plan_error"] = {
-                    "content": plan.get("content", ""),
-                    "status": plan.get("status", "degraded"),
-                    "clarification": plan.get("clarification"),
-                    "task_id": task.task_id,
-                    "intent": task.intent.value if task.intent else "",
-                }
-            else:
-                state["planned_branches"] = []
-            return state
-
-        def route_after_plan(state: AdvisorState):
-            """逐标的扇出 / 计划失败 / 其余任务走 DAG / 仅主题筛选交 DAG。"""
-            error = state.get("stock_plan_error")
-            if error:
-                return "manager_synthesis"
-            branches = state.get("planned_branches", []) or []
-            if branches:
-                return [Send("fetch_security", {
-                    "fetch_code": branch["code"],
-                    "fetch_task_id": branch["task_id"],
-                    "thread_id": state.get("thread_id", "default"),
-                }) for branch in branches]
-            return "task_batch"
-
-        def fetch_security_handler(state: AdvisorState) -> AdvisorState:
-            """单个标的的数据取数分支；只写分片，不写共享审计。"""
-            code = str(state.get("fetch_code", ""))
-            self._emit_progress("stock_analysis", f"正在获取 {code} 行情与财务数据")
-            try:
-                data = fetch_stock_data([code]).get(code, {})
-            except Exception as exc:  # noqa: BLE001
-                return {"stock_fragment_errors": {code: {"error": str(exc)}}}
-            return {"stock_data": {code: data}}
-
-        def aggregate_handler(state: AdvisorState) -> AdvisorState:
-            """汇总扇出分片，对整批请求只构建一次快照并逐标的出结论。"""
-            task = _stock_task(state)
-            errors = dict(state.get("stock_fragment_errors", {}) or {})
-            branches = state.get("planned_branches", []) or []
-            if task is None:
-                return state
-            if errors and len(errors) >= len(branches):
-                self._emit_progress("stock_analysis", "股票数据获取失败")
-                result_state = self.stock_agent._failed(dict(state), {
-                    "content": "股票研究暂不可用：数据获取失败。",
-                    "status": "degraded",
-                    "clarification": None,
-                })
-            else:
-                self._emit_progress("stock_analysis", "正在分析股票（逐标的数据已并行获取）")
-                analysis_state = dict(state)
-                analysis_state["requirement"] = task.requirement
-                analysis_state["current_task_intent"] = task.intent.value if task.intent else ""
-                analysis_state["task_id"] = task.task_id
-                raw_request = state.get("research_request")
-                request = AnalysisRequest.model_validate(raw_request) if raw_request else None
-                result_state = (
-                    self.stock_agent.run_resolved(analysis_state, request)
-                    if request is not None else self.stock_agent.invoke(analysis_state)
-                )
-            intent = task.intent.value if task.intent else ""
-            intent_result = (result_state.get("intent_results", {}) or {}).get(intent, {})
-            status_name = str(intent_result.get("status", "success"))
-            result = ExpertResult(
-                task_id=task.task_id,
-                intent=task.intent,
-                expert_name=task.expert_name,
-                status=ExpertStatus.DEGRADED if status_name == "degraded" else ExpertStatus.SUCCESS,
-                summary=str(intent_result.get("content", "")).strip()
-                or str(result_state.get("agent_response", "")),
-                result_data={
-                    key: result_state.get(key, {}) for key in (
-                        "stock_data", "stock_analysis", "technical_analysis", "analysis_results",
-                        "theme_screening",
-                    ) if result_state.get(key)
-                },
-            )
-            state["task_results"] = {task.task_id: result}
-            task.status = (
-                TaskStatus.SUCCESS if result.status is ExpertStatus.SUCCESS else TaskStatus.DEGRADED
-            )
-            self._audit_expert_result(result_state, task.expert_name, task)
-            self._audit_research_results(result_state)
-            # 仅股票请求时这里就是终结状态；若还有非股票任务，task_batch 会覆盖。
-            run_status = (
-                RunStatus.COMPLETED if result.status is ExpertStatus.SUCCESS else RunStatus.PARTIAL
-            )
-            # 只返回增量：与 Send 分支并发写的分片按 reducer 合并，避免整状态覆盖。
-            return {
-                key: result_state[key]
-                for key in (
-                    "stock_data", "stock_analysis", "technical_analysis", "analysis_results",
-                    "theme_screening", "theme_screening_status", "theme_candidates",
-                    "pending_leads", "personalization_status", "intent_results", "facts",
-                    "agent_response", "clarification_question", "research_request",
-                )
-                if key in result_state
-            } | {
-                "task_results": {task.task_id: result},
-                "stock_fragment_errors": {},
-                "run_status": run_status,
-            }
-
-        def route_after_aggregate(state: AdvisorState) -> str:
-            """聚合后仍有非股票任务（如资产配置依赖股票结果）则继续执行 DAG。"""
-            pending = [
-                task for task in (state.get("tasks", []) or [])
-                if task.status is TaskStatus.PENDING
-            ]
-            return "task_batch" if pending else "manager_synthesis"
-
         def task_batch_handler(state: AdvisorState) -> AdvisorState:
-            """执行尚未完成的 task（股票类已在扇出+聚合完成，这里只跑其余）。"""
+            """按 task_id 执行全部任务的 DAG（含股票类）并合并结果。"""
             all_tasks = list(state.get("tasks", []) or [])
-            tasks = [
-                task for task in all_tasks
-                if task.task_id not in (state.get("task_results", {}) or {})
-            ]
             agents = {
                 name: agent for name, agent in (
                     ("stock_analysis", self.stock_agent),
@@ -531,6 +386,10 @@ class AdvisorSystem:
                     **build_task_context(state, task),
                     "upstream_results": payload.get("upstream_results", {}),
                 }
+                # 股票任务的逐标的取数进度需要回传，专家无状态、不能持有回调。
+                local_state["progress_callback"] = (
+                    lambda text, _stage=task.expert_name: self._emit_progress(_stage, text)
+                )
                 agent = agents[task.expert_name]
                 self._trace_agent(local_state, getattr(agent, "agent_name", task.expert_name))
                 self._emit_progress(task.expert_name, f"正在执行{task.expert_name}专家分析")
@@ -541,23 +400,19 @@ class AdvisorSystem:
                 return self._make_task_result(output, task, task.expert_name).model_dump(mode="json")
 
             results = run_task_dag(
-                tasks,
+                all_tasks,
                 TaskContext(payload={}, runner=runner),
                 max_retries=2,
                 timeout_seconds=90,
                 deadline_seconds=180,
-                initial_results=dict(state.get("task_results", {}) or {}),
+                budgets=_DAG_BUDGETS,
             )
-            completed_results = dict(state.get("task_results", {}) or {})
-            state["task_results"] = {**completed_results, **results}
+            state["task_results"] = results
             state["completed_tasks"] = []
-            state["completed_experts"] = list(state.get("completed_experts", []) or [])
+            state["completed_experts"] = []
             for task in all_tasks:
-                result = state["task_results"].get(task.task_id)
+                result = results.get(task.task_id)
                 if result is None:
-                    continue
-                if task.task_id in completed_results:
-                    # 扇出+聚合已写入结果，保持状态与审计，不重复执行。
                     continue
                 task.status = (
                     TaskStatus.SUCCESS
@@ -581,7 +436,11 @@ class AdvisorSystem:
                         "analysis_results",
                         "theme_screening",
                         "theme_screening_status", "theme_candidates", "pending_leads", "personalization_status",
+                        "market_insight",
                         "allocation_result", "debate_result", "product_analysis",
+                        # 专家在本地状态里给出的澄清问题与运行级请求必须回传，
+                        # 否则合成阶段读不到（旧扇出路径经专用错误键传递）。
+                        "clarification_question", "research_request",
                     ):
                         if local.get(key):
                             state[key] = local[key]
@@ -620,15 +479,6 @@ class AdvisorSystem:
                 state["cancelled"] = True
                 state["agent_response"] = "已停止生成，当前已完成的专家结果已保留。"
                 return state
-            plan_error = state.get("stock_plan_error") or {}
-            if plan_error:
-                question = str(plan_error.get("clarification") or "").strip()
-                if question:
-                    state["clarification_question"] = question
-                    state["agent_response"] = f"需要您进一步确认：{question}"
-                else:
-                    state["agent_response"] = str(plan_error.get("content", "")) or "股票研究暂不可用。"
-                return state
             question = str(state.get("clarification_question", "")).strip()
             if question:
                 state["agent_response"] = f"需要您进一步确认：{question}"
@@ -646,22 +496,12 @@ class AdvisorSystem:
 
         graph.add_node("manager", manager_handler)
         graph.add_node("slot_extraction", slot_handler)
-        graph.add_node("plan_tasks", plan_tasks_handler)
-        graph.add_node("fetch_security", fetch_security_handler)
-        graph.add_node("aggregate", aggregate_handler)
         graph.add_node("task_batch", task_batch_handler)
         graph.add_node("manager_synthesis", synthesis_handler)
         graph.add_edge(START, "manager")
         graph.add_edge("manager", "slot_extraction")
         graph.add_conditional_edges(
-            "slot_extraction", route_after_slots, ["plan_tasks", "manager_synthesis"],
-        )
-        graph.add_conditional_edges(
-            "plan_tasks", route_after_plan, ["fetch_security", "task_batch", "manager_synthesis"],
-        )
-        graph.add_edge("fetch_security", "aggregate")
-        graph.add_conditional_edges(
-            "aggregate", route_after_aggregate, ["task_batch", "manager_synthesis"],
+            "slot_extraction", route_after_slots, ["task_batch", "manager_synthesis"],
         )
         graph.add_edge("task_batch", "manager_synthesis")
         graph.add_edge("manager_synthesis", END)
@@ -738,8 +578,7 @@ class AdvisorSystem:
                 "market_insight": {},
                 "intent_results": {}, "detected_intents": [], "finance_related": True,
                 "agent_response": "", "compliance_result": {},
-                "planned_branches": [], "stock_fragments": {}, "stock_fragment_errors": {},
-                "plan_kind": "", "stock_plan_error": {}, "research_request": {},
+                "research_request": {},
                 "memory_context": memory_data.get("context_text", ""),
                 "thread_id": conversation_id, "run_id": run_id,
                 "trace_id": trace_id, "message_id": message_id,

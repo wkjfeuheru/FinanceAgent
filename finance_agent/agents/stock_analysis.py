@@ -2,11 +2,15 @@
 
 该专家只负责把编排状态转换为 ``AnalysisRequest``，调用无状态研究流水线，
 再把结构化结果投影回旧状态字段。取数、评分和行动结论均不交给 LLM。
+
+多标的请求在**本专家内部**并行取数（DAG 只把整个股票任务当一个调度单元），
+整批仍只构建一次快照，因此跨标的门禁（报告期混用）语义不受并行影响。
 """
 
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from finance_agent.agents.base import AgentProtocol
@@ -20,6 +24,9 @@ from finance_agent.research.snapshot_builder import production_builder
 from finance_agent.research.screener import ThemeScreener
 from finance_agent.research.theme_registry import ThemeRegistry, production_theme_registry
 from finance_agent.research.theme_repository import PostgresThemeRepository
+
+# 批次内并行取数上限：与候选上限一致，避免一次请求放大过多外部取数。
+_MAX_FETCH_WORKERS = 5
 
 
 class _FetchGateway:
@@ -246,7 +253,7 @@ class StockAnalysisAgent(AgentProtocol):
             if not request.stock_codes:
                 raise ValueError("未识别到股票代码")
             if not stock_data and not self._injected_pipeline:
-                stock_data = fetch_stock_data(request.stock_codes)
+                stock_data = self._fetch_stock_data_parallel(request.stock_codes, state)
                 state["stock_data"] = stock_data
             pipeline = self._pipeline_for_state(stock_data)
             if hasattr(pipeline, "analyze_per_security"):
@@ -280,6 +287,40 @@ class StockAnalysisAgent(AgentProtocol):
         state["agent_response"] = content
         self._write_intent_result(state, content, self._status(results))
         return state
+
+    def _fetch_stock_data_parallel(
+        self, codes: list[str], state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """批次内并行取数；每个标的完成即上报进度。
+
+        取数是最重的 I/O（单只约 5 次工具调用），串行会让多标的比较/推荐明显变慢；
+        DAG 只把整个股票任务当一个调度单元，因此并行放在专家内部。
+        单个标的失败只让它缺数据（后续给"数据不足"结论），不牵连整批。
+        """
+        if len(codes) <= 1:
+            if codes:
+                self._emit_progress(state, f"正在获取 {codes[0]} 行情与财务数据")
+            return fetch_stock_data(codes)
+
+        merged: dict[str, Any] = {}
+        workers = min(_MAX_FETCH_WORKERS, len(codes))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(fetch_stock_data, [code]): code for code in codes}
+            for future in as_completed(futures):
+                code = futures[future]
+                self._emit_progress(state, f"正在获取 {code} 行情与财务数据")
+                try:
+                    merged.update(future.result() or {})
+                except Exception:  # noqa: BLE001 - 单只失败不阻断整批
+                    merged[code] = {}
+        return merged
+
+    @staticmethod
+    def _emit_progress(state: dict[str, Any], message: str) -> None:
+        """上报逐标的进度；回调由编排层写入状态，缺失时静默（测试/直接调用）。"""
+        callback = state.get("progress_callback")
+        if callable(callback):
+            callback(message)
 
     def _run_theme_screening(
         self, state: dict[str, Any], request: AnalysisRequest, profile: dict[str, Any],
