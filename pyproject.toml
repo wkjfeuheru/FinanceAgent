@@ -35,10 +35,8 @@ dependencies = [
     "uvicorn[standard]",
     "pandas",
     "numpy",
-    "scipy",
     "pydantic",
     "requests",
-    "pyautogen==0.9.0",
     "mcp>=1.0.0",
     "httpx2>=2.0.0",
 ]

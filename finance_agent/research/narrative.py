@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from finance_agent.research.contracts import AnalysisResult
 
 
@@ -76,6 +78,16 @@ def _score_items(scores: dict[str, float | None]) -> list[str]:
     return items
 
 
+def _dimension_notice(request: Any) -> str:
+    """收窄分析维度时标注口径；``both``（默认）不额外加句。"""
+    analysis_type = getattr(request, "analysis_type", "both") if request is not None else "both"
+    if analysis_type == "technical":
+        return "分析维度：技术面（风险始终纳入）。"
+    if analysis_type == "fundamental":
+        return "分析维度：基本面（风险始终纳入）。"
+    return ""
+
+
 class NarrativeRenderer:
     """当前阶段使用固定模板，保留后续接入受限 LLM 的边界。"""
 
@@ -90,13 +102,15 @@ class NarrativeRenderer:
         codes = result.request.stock_codes if result.request is not None else []
         # 比较请求会产出多条结论，文本必须标明各自标的，否则无法对应。
         target = f"（{codes[0]}）" if len(codes) == 1 else ""
+        # 收窄维度时明确标注口径；both（默认）不加此句，保持既有文本不变。
+        dimension_notice = _dimension_notice(result.request)
         score_items = _score_items(result.scores)
         scores_text = "、".join(score_items) if score_items else "不可计算"
         limitations = _restriction_items(result.restrictions)
         limitations_text = "；".join(limitations) if limitations else "无"
         return (
             f"确定性研究结论{target}：{action}。规则版本：{result.rule_version or '未设置'}。"
-            f"数据质量：{result.data_quality}。{candidate_notice}"
+            f"数据质量：{result.data_quality}。{candidate_notice}{dimension_notice}"
             f"评分：{scores_text}。"
             f"限制与提示：{limitations_text}。",
             "template_fallback",

@@ -1,6 +1,6 @@
 # Finance Agent
 
-基于 LangGraph 多 Agent 协作的 A 股智能投顾系统。系统通过自然语言收集用户投资需求，完成用户画像提取、股票识别、行情与财务数据获取、基本面分析、技术分析、资产配置和合规审查，并提供 Vue 3 Web 界面及 FastAPI 接口。
+基于 LangGraph 多 Agent 协作的 A 股智能投顾系统。系统通过自然语言收集用户投资需求，完成用户画像提取、股票识别、行情与财务数据获取、基本面分析、技术分析、市场洞察和合规审查，并提供 Vue 3 Web 界面及 FastAPI 接口。
 
 ## 功能特性
 
@@ -9,7 +9,7 @@
 - 可选数据源：配置 `TUSHARE_MCP_URL` 后启用 Tushare MCP 作为其中一路（需 ≥2000 积分才能提供股息率）。
 - 智能选股：可选接入联网搜索，辅助识别行业、主题和股票名称。
 - 基本面与技术面分析：支持财务指标及 MACD、KDJ、RSI、BOLL、MA、WR 等指标。
-- 资产配置：计算收益率、波动率等指标并生成组合配置建议。
+- 市场洞察：大盘概览、市场情绪、资金面与政策事件影响，只回答市场整体问题，不输出个股结论。
 - 合规审查：对最终回答执行敏感内容和投资风险检查。
 - 流式对话：支持基于 SSE 的实时响应。
 - 用户系统：支持注册、登录、Bearer Token 认证、会话管理和账户注销。
@@ -31,8 +31,7 @@ Supervisor（任务规划）
    +--> 股票识别与校验
    +--> Data Fetch（按 Provider 顺序降级取数）
    +--> Stock Analysis（基本面 + 技术面分析）
-   +--> Market Insight（市场洞察：大盘/情绪/资金面）
-   +--> Asset Allocation（资产配置）
+   +--> Market Insight（市场洞察：大盘/情绪/资金面/政策事件）
    +--> Compliance（合规审查）
    |
    v
@@ -41,11 +40,12 @@ Supervisor（任务规划）
 
 Supervisor 会根据用户意图选择所需节点，并非每次请求都会执行完整流程。多标的请求（选股推荐、
 股票比较）会按标的并行取数并逐只给出独立结论。`Market Insight` 只回答市场整体问题，不输出
-个股结论或推荐，支持三种模式：大盘概览（主要指数 + 市场宽度）、市场情绪（涨跌家数/活跃度）、
-资金面（两市融资融券日频 + 北向持股市值季度参考）。数据来源为 AKShare（指数走新浪源、宽度走
-乐咕、融资融券与北向走东财/交易所）。**北向逐日净买额自 2024-08 起因监管披露调整停止披露**
-（历史序列亦停更），因此资金面改用仍在日频披露的两市融资融券作为主指标，北向仅保留季度披露的
-持股市值并标注滞后。
+个股结论或推荐，支持四种模式：大盘概览（主要指数 + 市场宽度 + 成交额 + 区间涨跌）、市场情绪（涨跌家数/活跃度）、
+资金面（两市融资融券日频含日环比 + 北向持股市值季度参考）、政策事件影响（政策新闻筛选 + 定性影响解读）。
+指数数据走 AKShare 新浪源、宽度走乐咕、融资融券与北向走东财/交易所，政策新闻走新浪全球快讯（央视新闻联播作政策补充）。
+**北向逐日净买额自 2024-08 起因监管披露调整停止披露**（历史序列亦停更），因此资金面改用仍在日频
+披露的两市融资融券作为主指标，北向仅保留季度披露的持股市值并标注滞后。政策事件影响模式的取数为
+确定性关键词筛选，影响解读由 LLM 基于筛选出的事件生成（失败时回退纯事件清单，不伪造）。
 
 ## 技术栈
 
@@ -58,7 +58,7 @@ Supervisor 会根据用户意图选择所需节点，并非每次请求都会执
 - Tushare MCP
 - Redis
 - PostgreSQL
-- pandas / NumPy / SciPy
+- pandas / NumPy
 
 ### 前端
 
@@ -207,12 +207,8 @@ DEEPSEEK_INTENT_MAX_RETRIES=1
 LLM_REQUEST_TIMEOUT=45
 LLM_MAX_RETRIES=1
 FINAL_SYNTHESIS_TIMEOUT=20
-DEBATE_ENABLED=true
-DEBATE_MAX_ROUNDS=2
-DEBATE_TIMEOUT=60
-DEBATE_BULL_TEMPERATURE=0.4
-DEBATE_BEAR_TEMPERATURE=0.4
-DEBATE_SYNTHESIS_TEMPERATURE=0.1
+POLICY_NEWS_MAX_DAYS=3
+POLICY_NEWS_MAX_ITEMS=50
 PRODUCT_ANALYSIS_TEMPERATURE=0.2
 ```
 

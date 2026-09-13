@@ -41,7 +41,9 @@ class AnalysisRequest(BaseModel):
     stock_codes: list[str] = Field(default_factory=list)
     theme_id: str | None = None
     horizon: Literal["short", "medium", "long"] = "medium"
-    indicators: list[str] = Field(default_factory=list)
+    # 分析维度：决定参与加权与呈现的维度。风险维度任何模式下都强制纳入
+    # （安全门禁），因此 ``both`` 之外的取值是"收窄"而非"排除风险"。
+    analysis_type: Literal["fundamental", "technical", "both"] = "both"
     profile_complete: bool = False
 
     @model_validator(mode="before")

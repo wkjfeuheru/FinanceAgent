@@ -17,6 +17,7 @@ from finance_agent.data.normalization import (
     normalize_index_daily_records,
     normalize_margin_summary,
     normalize_northbound_holdings,
+    normalize_policy_news_records,
 )
 from finance_agent.data.providers import UnsupportedProviderCapability
 
@@ -300,3 +301,132 @@ def test_provider_manager_routes_index_daily_with_fallback(monkeypatch):
     assert manager.last_metadata["source"] == "baostock"
     assert manager.last_metadata["degraded"] is True
     assert manager.last_metadata["failures"][0]["provider"] == "akshare"
+
+
+# ── 融资余额日环比 ─────────────────────────────────────────────────────────────
+
+def test_normalize_margin_summary_adds_day_over_day_change():
+    payload = [
+        {"日期": "2026-09-09", "融资余额": 26193.911321, "融券余额": 292.094317},
+        {"日期": "2026-09-10", "融资余额": 26171.760561, "融券余额": 291.914989},
+    ]
+
+    record = normalize_margin_summary(payload)
+
+    assert record["financing_balance_prev_yi"] == 26193.911321
+    assert record["financing_balance_chg_yi"] == pytest.approx(-22.15076, abs=1e-4)
+
+
+def test_normalize_margin_summary_single_row_has_no_change():
+    record = normalize_margin_summary([
+        {"日期": "2026-09-10", "融资余额": 26171.760561, "融券余额": 291.914989},
+    ])
+
+    assert "financing_balance_chg_yi" not in record
+    assert "financing_balance_prev_yi" not in record
+
+
+# ── 政策新闻归一化 ─────────────────────────────────────────────────────────────
+
+def test_normalize_policy_news_sina_extracts_title_from_content():
+    """新浪全球快讯只有 时间/内容，标题需从内容开头的【…】提取。"""
+    payload = [
+        {"时间": "2026-09-13 10:43:43", "内容": "【央行开展逆回购操作】为维护流动性合理充裕..."},
+    ]
+
+    records = normalize_policy_news_records(payload)
+
+    assert len(records) == 1
+    assert records[0]["title"] == "央行开展逆回购操作"
+    assert records[0]["datetime"] == "2026-09-13 10:43:43"
+
+
+def test_normalize_policy_news_ths_uses_title_column_and_sorts_desc():
+    payload = [
+        {"标题": "较早的新闻", "内容": "x", "发布时间": "2026-09-12 08:00:00", "链接": "u"},
+        {"标题": "较新的新闻", "内容": "y", "发布时间": "2026-09-13 09:00:00", "链接": "u"},
+    ]
+
+    records = normalize_policy_news_records(payload)
+
+    assert [r["title"] for r in records] == ["较新的新闻", "较早的新闻"]
+
+
+def test_normalize_policy_news_cctv_date_field():
+    payload = [{"date": "20260912", "title": "新闻联播头条", "content": "全文"}]
+
+    records = normalize_policy_news_records(payload)
+
+    assert records[0]["datetime"] == "2026-09-12"
+    assert records[0]["title"] == "新闻联播头条"
+
+
+def test_normalize_policy_news_drops_untitled_records():
+    assert normalize_policy_news_records([{"时间": "2026-09-13", "内容": "无标题无括号"}]) == []
+
+
+# ── 政策事件确定性筛选 ─────────────────────────────────────────────────────────
+
+def test_policy_event_filter_categorizes_by_priority(monkeypatch):
+    """命中多类时取优先级靠前类目（货币政策优先于产业政策）。"""
+    from datetime import datetime
+
+    from finance_agent.orchestrator.tools import marketdata
+
+    recent = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    raw = [
+        {"datetime": recent, "title": "央行降准并发布产业规划", "content": ""},
+        {"datetime": recent, "title": "证监会发布减持新规", "content": ""},
+        {"datetime": recent, "title": "某公司发布新品", "content": ""},
+    ]
+
+    class _M:
+        def get_policy_news(self):
+            return raw
+
+    monkeypatch.setattr(marketdata, "get_provider_manager", lambda: _M())
+    data = marketdata.get_policy_events_data()
+
+    categories = {e["title"]: e["category"] for e in data["events"]}
+    assert categories["央行降准并发布产业规划"] == "货币政策"
+    assert categories["证监会发布减持新规"] == "资本市场监管"
+    assert "某公司发布新品" not in categories          # 非政策事件被筛掉
+    assert data["categories_summary"] == {"货币政策": 1, "资本市场监管": 1}
+
+
+def test_policy_event_filter_drops_stale_records(monkeypatch):
+    """超出近 N 天窗口的政策事件被确定性过滤掉。"""
+    from datetime import datetime, timedelta
+
+    from finance_agent.orchestrator.tools import marketdata
+
+    stale = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+    fresh = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    class _M:
+        def get_policy_news(self):
+            return [
+                {"datetime": stale, "title": "央行降准", "content": ""},
+                {"datetime": fresh, "title": "证监会发布减持新规", "content": ""},
+            ]
+
+    monkeypatch.setattr(marketdata, "get_provider_manager", lambda: _M())
+    data = marketdata.get_policy_events_data()
+
+    titles = [e["title"] for e in data["events"]]
+    assert "证监会发布减持新规" in titles
+    assert "央行降准" not in titles
+
+
+def test_policy_event_source_failure_reports_limitation(monkeypatch):
+    from finance_agent.orchestrator.tools import marketdata
+
+    class _M:
+        def get_policy_news(self):
+            raise RuntimeError("network down")
+
+    monkeypatch.setattr(marketdata, "get_provider_manager", lambda: _M())
+    data = marketdata.get_policy_events_data()
+
+    assert data["events"] == []
+    assert "policy_news" in data["limitations"]

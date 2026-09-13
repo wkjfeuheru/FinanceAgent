@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from math import isnan
-from re import fullmatch
+from re import fullmatch, search
 from typing import Any
 
 # 统一日线字段：trade_date/open/high/low/close/vol/amount/change/pct_chg。
@@ -354,7 +354,9 @@ def normalize_margin_summary(payload: Any) -> dict[str, Any] | None:
     """把两市融资融券汇总转为统一快照（单位：亿元）。
 
     上游 ``stock_margin_account_info`` 按日期升序返回两市合计的日频数据；
-    取最后一行作为最新快照，出口统一为 ``as_of`` + ``*_yi`` 字段。
+    以最后一行作为最新快照，出口统一为 ``as_of`` + ``*_yi`` 字段。若上一行
+    同样给出融资余额，则补充 ``financing_balance_prev_yi`` 与
+    ``financing_balance_chg_yi``（日环比），供资金面展示趋势。
     """
     rows = _rows_of(payload)
     if not rows:
@@ -377,7 +379,54 @@ def normalize_margin_summary(payload: Any) -> dict[str, Any] | None:
     lending = record.get("securities_lending_balance_yi")
     if financing is not None and lending is not None:
         record["total_balance_yi"] = round(financing + lending, 4)
+    # 日环比：仅在前一日融资余额可解析时给出，避免用陈旧行伪造趋势。
+    prev_row = rows[-2] if len(rows) >= 2 else None
+    if isinstance(prev_row, dict):
+        prev_financing = _as_number(prev_row.get("融资余额"))
+        if prev_financing is not None:
+            record["financing_balance_prev_yi"] = prev_financing
+            record["financing_balance_chg_yi"] = round(financing - prev_financing, 4)
     return record
+
+
+def normalize_policy_news_records(payload: Any) -> list[dict[str, Any]]:
+    """把财经快讯原始记录统一为 ``datetime/title/content/source``，按时间倒序。
+
+    兼容三类来源字段形态：
+
+    - 新浪全球快讯：``时间/内容``（标题通常内嵌在内容首个【】中）；
+    - 同花顺/富途：``标题/内容/发布时间/链接``；
+    - 央视新闻联播：``date/title/content``。
+
+    标题缺失时从内容开头的【…】提取；两者都没有的记录直接丢弃，避免产出无标题事件。
+    """
+    rows = _rows_of(payload)
+    if not rows and isinstance(payload, dict):
+        # 央视等来源可能直接返回单条记录字典。
+        rows = [payload]
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        content = str(row.get("内容") or row.get("content") or "").strip()
+        title = str(row.get("标题") or row.get("title") or "").strip()
+        if not title:
+            match = search(r"【([^】]+)】", content)
+            if match:
+                title = match.group(1).strip()
+        if not title:
+            continue
+        stamp = (
+            row.get("发布时间") or row.get("时间") or row.get("date") or row.get("datetime")
+        )
+        out.append({
+            "datetime": _iso_date(stamp),
+            "title": title,
+            "content": content,
+            "source": str(row.get("来源") or row.get("source") or "").strip(),
+        })
+    out.sort(key=lambda item: str(item.get("datetime") or ""), reverse=True)
+    return out
 
 
 def normalize_northbound_holdings(payload: Any) -> dict[str, Any] | None:
@@ -419,6 +468,7 @@ __all__ = [
     "normalize_index_daily_records",
     "normalize_margin_summary",
     "normalize_northbound_holdings",
+    "normalize_policy_news_records",
     "normalize_trade_cal_records",
     "normalize_valuation_records",
 ]

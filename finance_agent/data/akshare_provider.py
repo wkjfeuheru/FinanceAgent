@@ -26,6 +26,7 @@ from finance_agent.data.normalization import (
     normalize_index_daily_records,
     normalize_margin_summary,
     normalize_northbound_holdings,
+    normalize_policy_news_records,
     normalize_valuation_records,
 )
 from finance_agent.data.providers import ProviderUnavailableError, UnsupportedProviderCapability
@@ -447,3 +448,74 @@ class AkshareDataSource:
         }
         cache_write("northbound_holdings", cache_key, record)
         return record
+
+    def _news_general_source(self) -> Any:
+        """取一路通用财经快讯（按新浪 → 同花顺 → 富途优先级）。
+
+        财联社电报 ``stock_info_global_cls`` 在本网络环境会挂起（与东财接口同类
+        问题），因此不进链；新浪全球快讯为主源，同花顺/富途为回退。
+        """
+        for name in ("stock_info_global_sina", "stock_info_global_ths", "stock_info_global_futu"):
+            fetch = getattr(self.ak, name, None)
+            if not callable(fetch):
+                continue
+            try:
+                frame = fetch()
+            except Exception:  # noqa: BLE001 - 逐源回退，失败换下一路
+                continue
+            records = _records(frame)
+            if records:
+                return records
+        return []
+
+    def _news_cctv(self) -> Any:
+        """取央视新闻联播（官方政策口径），当日无更新则回退前一日。"""
+        fetch = getattr(self.ak, "news_cctv", None)
+        if not callable(fetch):
+            return []
+        for back in (0, 1):
+            day = (datetime.now() - timedelta(days=back)).strftime("%Y%m%d")
+            try:
+                frame = fetch(date=day)
+            except Exception:  # noqa: BLE001 - 单日失败换前一日
+                continue
+            records = _records(frame)
+            if records:
+                return records
+        return []
+
+    def get_policy_news(self) -> list[dict[str, Any]]:
+        """获取近期财经快讯（政策新闻候选，按时间倒序）。
+
+        组合两路来源：通用财经快讯（新浪主源，同花顺/富途回退）与央视新闻联播
+        （官方政策口径补充）。任一路失败不影响另一路；两路皆空才抛
+        ``ProviderUnavailableError``，由工具层记为 limitations。
+        """
+        cache_key = ("akshare", "policy_news")
+        cached = cache_read("policy_news", cache_key)
+        if cached:
+            return cached
+
+        merged: dict[str, dict[str, Any]] = {}
+        failures: list[str] = []
+        for name, fetch in (("general", self._news_general_source), ("cctv", self._news_cctv)):
+            try:
+                records = normalize_policy_news_records(fetch())
+            except Exception as exc:  # noqa: BLE001 - 逐路降级
+                failures.append(f"{name}: {exc}")
+                continue
+            for item in records:
+                title = str(item.get("title") or "").strip()
+                if title and title not in merged:
+                    merged[title] = item
+
+        if not merged:
+            detail = "；".join(failures) if failures else "全部来源返回空数据"
+            raise ProviderUnavailableError(f"AKShare 未取到财经快讯：{detail}")
+        result = sorted(
+            merged.values(),
+            key=lambda item: str(item.get("datetime") or ""),
+            reverse=True,
+        )
+        cache_write("policy_news", cache_key, result)
+        return result

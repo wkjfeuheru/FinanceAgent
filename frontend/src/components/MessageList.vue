@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { ref, watch, nextTick, computed } from 'vue'
 import { User, Headset, Loading } from '@element-plus/icons-vue'
-import type { ChatMessage, ResearchAnalysisResult } from '@/types'
+import type {
+  ChatMessage,
+  ChatResponse,
+  ResearchAnalysisResult,
+  TechnicalIndicatorSet,
+} from '@/types'
 
 const props = defineProps<{
   messages: ChatMessage[]
@@ -34,11 +39,6 @@ function formatTime(ts?: string): string {
   const d = new Date(ts)
   if (isNaN(d.getTime())) return ts
   return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
-}
-
-function formatPercent(value: number | null | undefined): string {
-  if (value == null || Number.isNaN(value)) return '—'
-  return `${(value * 100).toFixed(2)}%`
 }
 
 function formatNumber(value: number | null | undefined): string {
@@ -81,6 +81,50 @@ function restrictionText(code: string): string {
 /** 结论对应的标的代码；比较请求会为每只标的各出一条结论。 */
 function resultCode(result: ResearchAnalysisResult): string {
   return result.request?.stock_codes?.[0] ?? ''
+}
+
+/** 收窄分析维度时的视角标注；both（默认）返回空串，不显示徽标。 */
+function dimensionLabel(result: ResearchAnalysisResult): string {
+  const analysisType = result.request?.analysis_type
+  if (analysisType === 'technical') return '技术面视角'
+  if (analysisType === 'fundamental') return '基本面视角'
+  return ''
+}
+
+/** 技术指标卡片数据；K 线不足时后端不产出该标的，这里自然为空。 */
+function technicalPanels(
+  data?: ChatResponse,
+): Array<{ code: string; indicators: TechnicalIndicatorSet }> {
+  const raw = data?.technical_analysis
+  if (!raw || typeof raw !== 'object') return []
+  return Object.entries(raw)
+    .filter(([, value]) => Boolean(value) && typeof value === 'object')
+    .map(([code, value]) => ({ code, indicators: value as TechnicalIndicatorSet }))
+}
+
+/** 关键指标数值拍平为 label/value；缺失项直接跳过，不显示占位。 */
+function indicatorRows(
+  indicators: TechnicalIndicatorSet,
+): Array<{ label: string; value: string }> {
+  const rows: Array<{ label: string; value: string }> = []
+  const push = (label: string, value: number | string | null | undefined) => {
+    if (value === undefined || value === null || value === '') return
+    rows.push({ label, value: typeof value === 'number' ? value.toFixed(2) : String(value) })
+  }
+  const ma = indicators.MA?.latest ?? {}
+  push('MA5', ma.MA5)
+  push('MA20', ma.MA20)
+  const macd = indicators.MACD?.latest ?? {}
+  push('MACD DIF', macd.DIF)
+  push('MACD DEA', macd.DEA)
+  const kdj = indicators.KDJ?.latest ?? {}
+  push('KDJ K', kdj.K)
+  push('KDJ D', kdj.D)
+  const rsi = indicators.RSI?.latest ?? {}
+  push('RSI6', rsi.RSI6)
+  push('RSI12', rsi.RSI12)
+  push('BOLL 带宽', indicators.BOLL?.bandwidth)
+  return rows
 }
 
 const isEmpty = computed(
@@ -147,26 +191,6 @@ const isEmpty = computed(
               <div v-text="msg.content"></div>
             </template>
           </div>
-          <!-- 附加数据卡片 -->
-          <div
-            v-if="msg.data?.allocation_result && Object.keys(msg.data.allocation_result).length"
-            class="extra-data"
-          >
-            <div
-              v-if="msg.data.allocation_result && Object.keys(msg.data.allocation_result).length"
-              class="alloc-summary"
-            >
-              <span class="alloc-item">
-                预期收益：<b>{{ formatPercent(msg.data.allocation_result.expected_return) }}</b>
-              </span>
-              <span class="alloc-item">
-                预期波动：<b>{{ formatPercent(msg.data.allocation_result.expected_volatility) }}</b>
-              </span>
-              <span class="alloc-item">
-                夏普比率：<b>{{ formatNumber(msg.data.allocation_result.sharpe_ratio) }}</b>
-              </span>
-            </div>
-          </div>
           <section
             v-for="(result, resultIndex) in msg.data?.analysis_results || []"
             :key="`${idx}-${resultIndex}`"
@@ -175,6 +199,7 @@ const isEmpty = computed(
             <div class="research-heading">
               <strong>确定性研究结论：{{ result.action }}</strong>
               <span v-if="resultCode(result)">{{ resultCode(result) }}</span>
+              <span v-if="dimensionLabel(result)" class="dimension-badge">{{ dimensionLabel(result) }}</span>
               <span>{{ result.personalization_status === 'personalized' ? '已结合画像' : '研究候选' }}</span>
             </div>
             <div class="research-meta">规则 {{ result.rule_version }} · 数据质量 {{ result.data_quality }}</div>
@@ -187,6 +212,34 @@ const isEmpty = computed(
             </div>
             <div v-if="result.evidence_ids.length" class="evidence-list">
               <span v-for="factId in result.evidence_ids" :key="factId">证据 {{ factId }}</span>
+            </div>
+          </section>
+          <section
+            v-for="panel in technicalPanels(msg.data)"
+            :key="`${idx}-tech-${panel.code}`"
+            class="technical-panel"
+          >
+            <div class="technical-heading">
+              <strong>技术指标：{{ panel.code }}</strong>
+              <span v-if="panel.indicators.summary?.trend">{{ panel.indicators.summary.trend }}</span>
+            </div>
+            <div class="technical-meta">
+              最新价 {{ formatNumber(panel.indicators.summary?.latest_price) }}
+            </div>
+            <div v-if="indicatorRows(panel.indicators).length" class="indicator-grid">
+              <span
+                v-for="row in indicatorRows(panel.indicators)"
+                :key="row.label"
+                class="indicator-item"
+              >{{ row.label }} {{ row.value }}</span>
+            </div>
+            <div v-if="panel.indicators.summary?.signals?.length" class="signal-list">
+              <span class="signal-title">看多信号</span>
+              <span v-for="item in panel.indicators.summary.signals" :key="item">{{ item }}</span>
+            </div>
+            <div v-if="panel.indicators.summary?.risks?.length" class="risk-list">
+              <span class="risk-title">风险信号</span>
+              <span v-for="item in panel.indicators.summary.risks" :key="item">{{ item }}</span>
             </div>
           </section>
           <section v-if="msg.data?.pending_leads?.length" class="pending-leads">
@@ -352,39 +405,10 @@ const isEmpty = computed(
   animation: spin 1s linear infinite;
 }
 
-.extra-data {
-  margin-top: 8px;
-  padding: 10px 12px;
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: 0;
-  font-size: 12px;
-  color: var(--color-text-secondary);
-  width: fit-content;
-  max-width: 100%;
-}
-.message-item.user .extra-data {
-  display: none;
-}
-
-.alloc-summary {
-  margin-top: 8px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  padding-top: 8px;
-  border-top: 1px solid var(--color-border);
-}
-.alloc-item {
-  color: var(--color-text-secondary);
-}
-.alloc-item b {
-  color: var(--color-primary);
-  font-family: var(--font-mono);
-}
 .research-result, .pending-leads { margin-top: 8px; max-width: 100%; border: 1px solid var(--color-border); background: var(--color-surface); padding: 10px 12px; font-size: 12px; color: var(--color-text-secondary); }
 .research-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--color-text); }
 .research-heading span { color: var(--color-primary); font: 10px/1 var(--font-mono); letter-spacing: .06em; }
+.research-heading span.dimension-badge { padding: 3px 6px; background: var(--color-primary-soft); color: var(--color-primary); }
 .research-meta { margin-top: 7px; font-family: var(--font-mono); font-size: 10px; }
 .score-list, .evidence-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .score-list span, .evidence-list span { padding: 3px 5px; background: var(--color-primary-soft); color: var(--color-primary); font: 10px/1.2 var(--font-mono); }
@@ -393,6 +417,18 @@ const isEmpty = computed(
 .restriction-list .restriction-title { background: transparent; color: var(--color-text-secondary); padding-left: 0; }
 .pending-leads strong { color: var(--color-text); }
 .pending-leads p { margin: 6px 0 0; }
+
+.technical-panel { margin-top: 8px; max-width: 100%; border: 1px solid var(--color-border); background: var(--color-surface); padding: 10px 12px; font-size: 12px; color: var(--color-text-secondary); }
+.technical-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--color-text); }
+.technical-heading span { color: var(--color-primary); font: 10px/1 var(--font-mono); letter-spacing: .06em; }
+.technical-meta { margin-top: 6px; font-family: var(--font-mono); font-size: 10px; }
+.indicator-grid { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.indicator-item { padding: 3px 5px; background: var(--color-primary-soft); color: var(--color-primary); font: 10px/1.2 var(--font-mono); }
+.signal-list, .risk-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.signal-list span, .risk-list span { padding: 3px 5px; font: 10px/1.2 var(--font-mono); }
+.signal-list span { background: rgba(103, 194, 58, 0.12); color: var(--color-success); }
+.risk-list span { background: rgba(230, 162, 60, 0.12); color: #b8791a; }
+.signal-list .signal-title, .risk-list .risk-title { background: transparent; color: var(--color-text-secondary); padding-left: 0; }
 
 .empty-tip {
   color: var(--color-text-secondary);

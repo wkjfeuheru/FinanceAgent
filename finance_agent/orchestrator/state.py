@@ -106,8 +106,6 @@ class AdvisorState(TypedDict, total=False):
     theme_candidates: Annotated[List[Dict[str, Any]], dedupe_concat]
     pending_leads: Annotated[List[Dict[str, Any]], dedupe_concat]
     personalization_status: str
-    allocation_result: Dict[str, Any]
-    debate_result: Dict[str, Any]
     product_analysis: Dict[str, Any]
     market_insight: Dict[str, Any]
     compliance_result: Dict[str, Any]

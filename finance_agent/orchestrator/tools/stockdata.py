@@ -108,13 +108,6 @@ def get_stock_quote(stock_code: str) -> str:
 
 
 @tool
-# 保留原实时行情工具名，兼容已有调用方。
-def get_stock_realtime_quote(stock_code: str) -> str:
-    """获取 A 股最近交易日行情，兼容原实时行情工具名。"""
-    return get_stock_quote.invoke({"stock_code": stock_code})
-
-
-@tool
 # 获取指定区间的日线历史行情。
 def get_stock_history(
     stock_code: str,

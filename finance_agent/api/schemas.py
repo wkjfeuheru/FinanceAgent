@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 from finance_agent.contracts.models import ResponseEnvelope
 
@@ -17,28 +17,6 @@ class ChatRequest(BaseModel):
     customer_id: str = Field(default="CUST001", description="客户ID")
     chat_history: list[dict[str, Any]] = Field(default_factory=list, description="对话历史")
     conversation_id: str = Field(default="", description="当前会话ID")
-
-
-class DebateSummary(BaseModel):
-    """辩论摘要，可按需返回部分字段。"""
-    summary: str | None = None
-    rationale: str | None = None
-    bull_arguments: list[str] = Field(default_factory=list)
-    bear_arguments: list[str] = Field(default_factory=list)
-    disagreements: list[str] = Field(default_factory=list)
-    convergences: list[str] = Field(default_factory=list)
-
-
-class AllocationResult(BaseModel):
-    """资产配置结果，保留未知字段以兼容历史结果。"""
-    model_config = ConfigDict(extra="allow")
-
-    weights: dict[str, float] = Field(default_factory=dict)
-    expected_return: float | None = None
-    expected_volatility: float | None = None
-    sharpe_ratio: float | None = None
-    allocation_amounts: dict[str, float] = Field(default_factory=dict)
-    debate: DebateSummary | None = None
 
 
 class ChatResponse(BaseModel):
@@ -56,8 +34,6 @@ class ChatResponse(BaseModel):
     theme_candidates: list[dict[str, Any]] = Field(default_factory=list)
     pending_leads: list[dict[str, Any]] = Field(default_factory=list)
     personalization_status: str = ""
-    allocation_result: AllocationResult = Field(default_factory=AllocationResult, description="资产配置结果")
-    debate_result: dict[str, Any] = Field(default_factory=dict, description="辩论结果")
     compliance_result: dict[str, Any] = Field(default_factory=dict, description="合规审查结果")
     product_analysis: dict[str, Any] | None = Field(default=None, description="产品解读结果")
     market_insight: dict[str, Any] = Field(default_factory=dict, description="市场洞察结果")
@@ -95,10 +71,6 @@ def to_chat_response(result: ResponseEnvelope | Mapping[str, Any] | ChatResponse
                     "theme_screening",
                     "theme_screening_status", "theme_candidates", "pending_leads", "personalization_status",
                 ) if key in data})
-            elif expert_result.expert_name == "asset_allocation":
-                payload["allocation_result"] = data
-                if "debate" in data:
-                    payload["debate_result"] = data["debate"]
             elif expert_result.expert_name == "market_insight":
                 payload["market_insight"] = data.get("market_insight", data)
             elif expert_result.expert_name == "product_analysis":

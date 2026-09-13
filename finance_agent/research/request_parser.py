@@ -11,18 +11,7 @@ from finance_agent.research.theme_registry import ThemeRegistry, default_theme_r
 
 _CODE_PATTERN = re.compile(r"(?<!\d)(?:60\d{4}|00\d{4}|30\d{4}|68\d{4}|8\d{5}|4\d{5})(?!\d)")
 _COMPARISON_WORDS = ("比较", "对比", "相比", "哪个好", "孰优", "vs", "VS")
-_INDICATOR_ALIASES = {
-    "macd": "MACD",
-    "kdj": "KDJ",
-    "rsi": "RSI",
-    "boll": "BOLL",
-    "布林": "BOLL",
-    "ma": "MA",
-    "m.a.": "MA",
-    "均线": "MA",
-    "wr": "WR",
-    "威廉": "WR",
-}
+_ANALYSIS_TYPES = ("fundamental", "technical", "both")
 
 
 def _ordered_codes(raw_codes: Any) -> list[str]:
@@ -52,20 +41,10 @@ def _market_slots(intent_slots: dict[str, Any]) -> dict[str, Any]:
     return intent_slots
 
 
-def _normalize_indicators(raw_indicators: Any) -> list[str]:
-    """将工具层接受的指标别名标准化为大写名称。"""
-    values = raw_indicators if isinstance(raw_indicators, list) else []
-    normalized: list[str] = []
-    for raw_value in values:
-        value = str(raw_value).strip()
-        if not value:
-            continue
-        standard = _INDICATOR_ALIASES.get(value.lower(), value.upper())
-        if standard not in set(_INDICATOR_ALIASES.values()):
-            standard = None
-        if standard and standard not in normalized:
-            normalized.append(standard)
-    return normalized
+def _analysis_type(raw_value: Any) -> str:
+    """读取分析维度槽位；缺失或非法值一律回落 ``both``。"""
+    value = str(raw_value or "").strip().lower()
+    return value if value in _ANALYSIS_TYPES else "both"
 
 
 class UnknownThemeError(ValueError):
@@ -167,6 +146,6 @@ def parse_analysis_request(
         kind=kind,
         stock_codes=codes,
         theme_id=theme_id,
-        indicators=_normalize_indicators(slots.get("indicators", [])),
+        analysis_type=_analysis_type(slots.get("analysis_type")),
         profile_complete=profile_complete,
     )

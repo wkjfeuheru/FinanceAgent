@@ -41,24 +41,51 @@ export interface ProfileResponse {
   updated_at: string
 }
 
-/** 辩论摘要 */
-export interface DebateSummary {
-  summary?: string
-  rationale?: string
-  bull_arguments?: string[]
-  bear_arguments?: string[]
-  disagreements?: string[]
-  convergences?: string[]
+/** 单个标的的技术指标（展示层，来自股票专家的确定性计算）。 */
+export interface TechnicalIndicatorSet {
+  /** 移动均线：latest 含 MA5/MA10/MA20/MA60。 */
+  MA?: {
+    latest?: Record<string, number>
+    trend?: Record<string, string>
+    position?: string
+  }
+  /** MACD：信号与背离仅在有明确结论时给出。 */
+  MACD?: {
+    latest?: Record<string, number>
+    signal?: string | null
+    divergence?: string | null
+    trend?: string
+  }
+  KDJ?: {
+    latest?: Record<string, number>
+    signal?: string | null
+    zone?: string
+  }
+  RSI?: {
+    latest?: Record<string, number>
+    zones?: Record<string, string>
+  }
+  BOLL?: {
+    latest?: Record<string, number>
+    bandwidth?: number
+    position?: string
+  }
+  WR?: {
+    latest?: Record<string, number>
+    zones?: Record<string, string>
+  }
+  /** 汇总：综合趋势、看多信号、风险信号与最新价。 */
+  summary?: {
+    trend?: string
+    signals?: string[]
+    risks?: string[]
+    latest_price?: number
+  }
 }
 
-/** 资产配置结果 */
-export interface AllocationResult {
-  weights: Record<string, number>
-  expected_return?: number
-  expected_volatility?: number
-  sharpe_ratio?: number
-  allocation_amounts: Record<string, number>
-  debate?: DebateSummary
+/** 技术指标按标的代码组织；K 线不足时该标的会缺失。 */
+export interface TechnicalAnalysis {
+  [code: string]: TechnicalIndicatorSet
 }
 
 /** 对话响应（与后端 ChatResponse 对齐） */
@@ -69,14 +96,20 @@ export interface ChatResponse {
   stock_data: Record<string, any>
   fundamental_analysis: Record<string, any>
   stock_analysis: Record<string, any>
-  technical_analysis: Record<string, any>
+  technical_analysis: TechnicalAnalysis
   analysis_results: ResearchAnalysisResult[]
+  theme_screening?: Record<string, any>
+  theme_screening_status?: string
+  theme_candidates?: ThemeLead[]
   pending_leads?: ThemeLead[]
-  allocation_result: AllocationResult
-  debate_result: Record<string, any>
+  personalization_status?: string
   product_analysis?: ProductAnalysisPayload
   market_insight?: Record<string, any>
   compliance_result: Record<string, any>
+  run_status?: string
+  warnings?: string[]
+  tasks?: Record<string, any>[]
+  task_results?: Record<string, any>
   conversation_id: string
 }
 
@@ -129,7 +162,11 @@ export interface ResearchAnalysisResult {
   personalization_status: 'personalized' | 'research_candidate'
   restrictions: string[]
   /** 该结论对应的研究请求；比较请求会为每只标的各出一条结论。 */
-  request?: { stock_codes?: string[] }
+  request?: {
+    stock_codes?: string[]
+    /** 分析维度：both（默认）不改变呈现，收窄时前端标注视角。 */
+    analysis_type?: 'fundamental' | 'technical' | 'both'
+  }
 }
 
 /** 仅供管理员审核的外部研究线索；不含评分或行动结论。 */
@@ -215,7 +252,7 @@ export interface HealthResponse {
 /** SSE 阶段事件 */
 export interface SSEStageEvent {
   type: 'stage'
-  stage: 'debate' | 'product_analysis' | (string & {})
+  stage: 'product_analysis' | (string & {})
   message: string
 }
 

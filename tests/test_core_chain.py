@@ -1,14 +1,9 @@
 """核心总管-专家链路回归测试。"""
 
-import json
-
-import pytest
 from langgraph.checkpoint.memory import MemorySaver
 
-from finance_agent.agents.asset_allocation import AssetAllocationAgent, DebateResult
 from finance_agent.agents.stock_analysis import StockAnalysisAgent
 from finance_agent.agents.supervisor import ManagerAgent
-from finance_agent.orchestrator.tools.allocation import calculate_stock_metrics, optimize_portfolio
 
 
 def history_fixture(length=40, start=10.0, step=0.2):
@@ -57,122 +52,24 @@ def test_manager_dispatch_preserves_requirement(monkeypatch):
     manager._intent_classifier = FakeClassifier({
         "finance_related": True,
         "intents": [{
-            "intent": "asset_allocation",
-            "query": "用600519和000001配置10万元，持有1年，稳健",
+            "intent": "product_analysis",
+            "query": "帮我解读一下易方达蓝筹精选",
             "confidence": 0.95,
-            "execution_mode": "allocation",
-            "evidence": "用600519和000001配置10万元，持有1年，稳健",
+            "execution_mode": "product_analysis",
+            "evidence": "帮我解读一下易方达蓝筹精选",
         }],
     })
-    state = {"user_message": "用600519和000001配置10万元，持有1年，稳健"}
+    state = {"user_message": "帮我解读一下易方达蓝筹精选"}
 
     dispatch = manager.dispatch_tasks(state)
 
     assert dispatch == [{
-        "intent": "asset_allocation",
-        "expert": "asset_allocation",
-        "requirement": "用600519和000001配置10万元，持有1年，稳健",
-        "execution_mode": "allocation",
+        "intent": "product_analysis",
+        "expert": "product_analysis",
+        "requirement": "帮我解读一下易方达蓝筹精选",
+        "execution_mode": "product_analysis",
     }]
-    assert state["task_plan"] == ["asset_allocation"]
-
-
-def test_asset_tools_complete_mpt_flow():
-    """指标计算和 MPT 优化应产出完整结构化结果。"""
-    data = stock_data_fixture()
-    payload = json.dumps([data["600519"]["history"], data["000001"]["history"]])
-    metrics = json.loads(calculate_stock_metrics.invoke({
-        "stock_codes": "600519,000001",
-        "history_data": payload,
-    }))
-    allocation = json.loads(optimize_portfolio.invoke({
-        "stock_codes": "600519,000001",
-        "history_data": payload,
-        "risk_level": "R3 稳健",
-        "holding_period": "1年",
-        "budget": 100000,
-    }))
-
-    assert set(metrics["stock_codes"]) == {"600519", "000001"}
-    assert set(allocation["weights"]) == {"600519", "000001"}
-    assert sum(allocation["weights"].values()) == pytest.approx(1, abs=1e-3)
-    assert all(weight <= 0.6 + 1e-6 for weight in allocation["weights"].values())
-    assert sum(allocation["allocation_amounts"].values()) == pytest.approx(100000, abs=5)
-
-
-def test_asset_agent_passes_holding_period_to_optimizer(monkeypatch):
-    """资产配置专家必须把投资期限透传给 MPT 优化器。"""
-    captured = {}
-
-    class FakeTool:
-        def __init__(self, value):
-            self.value = value
-
-        def invoke(self, arguments):
-            captured.update(arguments)
-            return json.dumps(self.value, ensure_ascii=False)
-
-    monkeypatch.setattr(
-        "finance_agent.agents.asset_allocation.calculate_stock_metrics",
-        FakeTool({
-            "annual_returns": {"600519": 0.1, "000001": 0.08},
-            "annual_volatilities": {"600519": 0.2, "000001": 0.15},
-            "sharpe_ratios": {"600519": 0.4, "000001": 0.4},
-        }),
-    )
-    monkeypatch.setattr(
-        "finance_agent.agents.asset_allocation.optimize_portfolio",
-        FakeTool({
-            "weights": {"600519": 0.5, "000001": 0.5},
-            "expected_return": 0.09,
-            "expected_volatility": 0.1,
-            "sharpe_ratio": 0.7,
-            "optimization_target": "min_variance",
-            "allocation_amounts": {"600519": 50000, "000001": 50000},
-        }),
-    )
-    monkeypatch.setattr(
-        "finance_agent.agents.asset_allocation.run_debate",
-        lambda context: DebateResult(status="disabled"),
-    )
-    agent = AssetAllocationAgent()
-    profile = {
-        "stock_codes": ["600519", "000001"],
-        "risk_preference": "R3",
-        "budget_amount": 100000,
-        "holding_period": "3个月",
-    }
-
-    agent._generate_allocation_report(profile, "请配置", stock_data_fixture(), {})
-
-    assert captured["holding_period"] == "3个月"
-
-
-def test_asset_agent_debate_disabled_falls_back_to_mpt(monkeypatch):
-    """辩论禁用时主流程仍返回 MPT 结果和可消费状态。"""
-    monkeypatch.setattr(
-        "finance_agent.agents.asset_allocation.run_debate",
-        lambda context: DebateResult(status="disabled"),
-    )
-    agent = AssetAllocationAgent()
-    state = {
-        "user_message": "请做配置",
-        "user_profile": {
-            "stock_codes": ["600519", "000001"],
-            "risk_preference": "R3",
-            "budget_amount": 100000,
-            "holding_period": "1年",
-        },
-        "stock_data": stock_data_fixture(),
-        "stock_analysis": {},
-        "intent_results": {},
-    }
-
-    result = agent.invoke(state)
-
-    assert result["allocation_result"]["weights"]
-    assert result["debate_result"]["status"] == "disabled"
-    assert "MPT" in result["agent_response"]
+    assert state["task_plan"] == ["product_analysis"]
 
 
 def test_stock_agent_successful_result_keeps_quote_and_candidate(monkeypatch):
@@ -200,7 +97,6 @@ def test_langgraph_routes_expert_result_into_manager_synthesis(monkeypatch):
     system.checkpointer = MemorySaver()
     system.manager = ManagerAgent()
     system.stock_agent = object()
-    system.allocation_agent = object()
     system.product_agent = object()
     class FakeCasualAgent:
         def invoke(self, state):
@@ -270,7 +166,6 @@ def test_no_tasks_routes_straight_to_synthesis_without_experts(monkeypatch):
     system.checkpointer = MemorySaver()
     system.manager = ManagerAgent()
     system.stock_agent = object()
-    system.allocation_agent = object()
     system.product_agent = object()
     system.casual_chat_agent = object()
     system.slot_extractor = type("Slots", (), {"extract": lambda self, state: state})()
@@ -305,14 +200,14 @@ def test_manager_synthesis_combines_expert_outputs():
     state = {
         "intent_results": {
             "stock_analysis": {"status": "success", "content": "股票分析结果"},
-            "asset_allocation": {"status": "success", "content": "配置结果"},
+            "market_insight": {"status": "success", "content": "市场洞察结果"},
         }
     }
 
     response = manager.synthesize_response(state)
 
     assert "股票分析结果" in response
-    assert "配置结果" in response
+    assert "市场洞察结果" in response
     assert "风险提示" in response
 
 
@@ -356,7 +251,6 @@ def test_task_batch_executes_same_expert_for_distinct_intents(monkeypatch):
             return state
 
     system.stock_agent = FakeAgent()
-    system.allocation_agent = FakeOther()
     system.product_agent = FakeOther()
     system.casual_chat_agent = FakeOther()
     system.slot_extractor = type("Slots", (), {"extract": lambda self, state: state})()

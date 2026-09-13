@@ -13,7 +13,6 @@ from typing import Any, Callable, Dict, List
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from finance_agent.agents.asset_allocation import AssetAllocationAgent
 from finance_agent.agents.casual_chat import CasualChatAgent
 from finance_agent.agents.market_insight import MarketInsightAgent
 from finance_agent.agents.product_analysis import ProductAnalysisAgent
@@ -37,7 +36,7 @@ from finance_agent.orchestrator.memory import AgentMemoryContext, RedisMemorySto
 from finance_agent.orchestrator.slots import SlotExtractor
 from finance_agent.orchestrator.context_builder import build_task_context
 from finance_agent.orchestrator.scheduler import TaskContext, run_task_dag
-from finance_agent.orchestrator.state import AdvisorState
+from finance_agent.orchestrator.state import AdvisorState, dedupe_concat, merge_dict
 from finance_agent.middleware import BLOCKED_RESPONSE, find_sensitive_word
 
 logger = logging.getLogger(__name__)
@@ -61,7 +60,6 @@ class AdvisorSystem:
         self.manager = ManagerAgent(checkpointer=self.checkpointer)
         self.stock_agent = StockAnalysisAgent(checkpointer=self.checkpointer)
         self.market_insight_agent = MarketInsightAgent()
-        self.allocation_agent = AssetAllocationAgent()
         self.product_agent = ProductAnalysisAgent(checkpointer=self.checkpointer)
         self.casual_chat_agent = CasualChatAgent()
         self.slot_extractor = SlotExtractor()
@@ -139,11 +137,6 @@ class AdvisorSystem:
             }
         elif expert == "market_insight":
             result_data = {"market_insight": state.get("market_insight", {})}
-        elif expert == "asset_allocation":
-            result_data = {
-                "allocation_result": state.get("allocation_result", {}),
-                "debate_result": state.get("debate_result", {}),
-            }
         elif expert == "product_analysis":
             result_data = {"product_analysis": state.get("product_analysis", {})}
         else:
@@ -274,13 +267,12 @@ class AdvisorSystem:
             "market_insight": "market",
             "stock_analysis": "market",
             "stock_recommendation": "market",
-            "asset_allocation": "allocation",
             "product_analysis": "product",
         }.get(task.intent.value if task.intent else "", "runtime")
         payload_keys = (
             "stock_data", "stock_analysis", "technical_analysis", "analysis_results", "theme_screening",
             "market_insight",
-            "allocation_result", "debate_result", "product_analysis",
+            "product_analysis",
         )
         payload = {key: state.get(key, {}) for key in payload_keys if state.get(key)}
         if not payload:
@@ -309,6 +301,9 @@ class AdvisorSystem:
     _INTENT_STATUS_TO_EXPERT = {
         "success": ExpertStatus.SUCCESS,
         "degraded": ExpertStatus.DEGRADED,
+        # partial：市场洞察等专家"部分数据缺失但给出诚实降级说明"的中间态，
+        # 审计上按 DEGRADED 记录，避免限制项被吞掉。
+        "partial": ExpertStatus.DEGRADED,
         "failed": ExpertStatus.FAILED,
         "error": ExpertStatus.FAILED,
         "timeout": ExpertStatus.TIMEOUT,
@@ -335,7 +330,7 @@ class AdvisorSystem:
                     "stock_data", "stock_analysis", "technical_analysis", "analysis_results",
                     "theme_screening",
                     "market_insight",
-                    "allocation_result", "debate_result", "product_analysis",
+                    "product_analysis",
                 ) if state.get(key)
             },
             fact_ids=fact_ids,
@@ -349,6 +344,10 @@ class AdvisorSystem:
         def manager_handler(state: AdvisorState) -> AdvisorState:
             self._trace_agent(state, "ManagerAgent")
             self._emit_progress("manager", "正在识别需求并分派专家")
+            # 本轮起始清空上一轮遗留的澄清问题：它是 checkpoint 持久 channel，
+            # 若不重置会短路本轮合成（专家已执行却被丢弃）。本轮若仍需澄清，
+            # 下面的分支会重新写入。
+            state["clarification_question"] = ""
             dispatch = self.manager.dispatch_tasks(state)
             state["task_dispatch"] = dispatch
             state["task_plan"] = list(dict.fromkeys(
@@ -390,7 +389,6 @@ class AdvisorSystem:
                 name: agent for name, agent in (
                     ("stock_analysis", self.stock_agent),
                     ("market_insight", getattr(self, "market_insight_agent", None)),
-                    ("asset_allocation", self.allocation_agent),
                     ("product_analysis", self.product_agent),
                     ("casual_chat", self.casual_chat_agent),
                 ) if agent is not None
@@ -420,8 +418,6 @@ class AdvisorSystem:
                 self._emit_progress(
                     task.expert_name, f"正在执行{task.expert_name}专家分析", progress_thread_id,
                 )
-                if task.expert_name == "asset_allocation":
-                    self._emit_progress("debate", "正在进行资产配置多空辩论", progress_thread_id)
                 output = agent.invoke(local_state)
                 local_states[task.task_id] = output
                 return self._make_task_result(output, task, task.expert_name).model_dump(mode="json")
@@ -456,7 +452,11 @@ class AdvisorSystem:
                 if result.error_code:
                     task.error_code = result.error_code
                 self._audit_expert_result(state, task.expert_name, task)
-                if task.task_id in local_states:
+                # 只合并成功/降级任务的本地产出：超时或失败的专家线程可能仍在
+                # 运行，其迟到写入会污染共享状态与 agent_response。
+                if task.task_id in local_states and result.status in (
+                    ExpertStatus.SUCCESS, ExpertStatus.DEGRADED,
+                ):
                     local = local_states[task.task_id]
                     for key in (
                         "user_profile", "stock_data", "stock_analysis", "technical_analysis",
@@ -464,13 +464,23 @@ class AdvisorSystem:
                         "theme_screening",
                         "theme_screening_status", "theme_candidates", "pending_leads", "personalization_status",
                         "market_insight",
-                        "allocation_result", "debate_result", "product_analysis",
+                        "product_analysis",
                         # 专家在本地状态里给出的澄清问题与运行级请求必须回传，
                         # 否则合成阶段读不到（旧扇出路径经专用错误键传递）。
                         "clarification_question", "research_request",
                     ):
-                        if local.get(key):
-                            state[key] = local[key]
+                        value = local.get(key)
+                        if not value:
+                            continue
+                        # 同一专家的多个任务并行执行时按 key 合并，避免 last-write-wins
+                        # 丢掉另一任务的标的（例如同时"分析600519"与"推荐几只"）。
+                        current = state.get(key)
+                        if isinstance(current, dict) and isinstance(value, dict):
+                            state[key] = merge_dict(current, value)
+                        elif isinstance(current, list) and isinstance(value, list):
+                            state[key] = dedupe_concat(current, value)
+                        else:
+                            state[key] = value
                     for intent, value in (local.get("intent_results", {}) or {}).items():
                         state.setdefault("intent_results", {})[intent] = value
                     if local.get("agent_response"):
@@ -509,6 +519,8 @@ class AdvisorSystem:
             question = str(state.get("clarification_question", "")).strip()
             if question:
                 state["agent_response"] = f"需要您进一步确认：{question}"
+                # 澄清轮次已成功产出反问，给终态，避免审计把它记成仍在运行。
+                state["run_status"] = RunStatus.COMPLETED
                 return state
             classification_error = state.get("classification_error", {}) or {}
             if classification_error:
@@ -560,8 +572,8 @@ class AdvisorSystem:
                 return {
                     "response": BLOCKED_RESPONSE, "task_plan": [],
                     "task_dispatch": [], "user_profile": {}, "stock_data": {},
-                    "stock_analysis": {}, "allocation_result": {},
-                    "debate_result": {}, "product_analysis": {},
+                    "stock_analysis": {}, "market_insight": {},
+                    "product_analysis": {},
                     "compliance_result": {}, "conversation_id": conversation_id or uuid.uuid4().hex,
                     "blocked": True,
                 }
@@ -601,10 +613,14 @@ class AdvisorSystem:
                 "stock_data": {}, "stock_analysis": {}, "technical_analysis": {},
                 "theme_screening": {}, "theme_screening_status": "", "theme_candidates": [],
                 "pending_leads": [], "personalization_status": "",
-                "allocation_result": {}, "debate_result": {}, "product_analysis": {},
+                "product_analysis": {},
                 "market_insight": {},
                 "intent_results": {}, "detected_intents": [], "finance_related": True,
                 "agent_response": "", "compliance_result": {},
+                # 澄清问题是 checkpoint 持久 channel，会跨轮沿用；若不在每轮起始
+                # 重置，上一轮的反问会短路本轮合成（专家已执行却被丢弃）。本轮
+                # 若仍需澄清，manager/slot 节点会重新写入。
+                "clarification_question": "",
                 "research_request": {},
                 "memory_context": memory_data.get("context_text", ""),
                 "thread_id": conversation_id, "run_id": run_id,
@@ -646,13 +662,14 @@ class AdvisorSystem:
                 "user_profile": result.get("user_profile", {}),
                 "stock_data": result.get("stock_data", {}),
                 "stock_analysis": result.get("stock_analysis", {}),
+                "technical_analysis": result.get("technical_analysis", {}),
+                "fundamental_analysis": result.get("fundamental_analysis", {}),
+                "analysis_results": result.get("analysis_results", []),
                 "theme_screening": result.get("theme_screening", {}),
                 "theme_screening_status": result.get("theme_screening_status", ""),
                 "theme_candidates": result.get("theme_candidates", []),
                 "pending_leads": result.get("pending_leads", []),
                 "personalization_status": result.get("personalization_status", ""),
-                "allocation_result": result.get("allocation_result", {}),
-                "debate_result": result.get("debate_result", {}),
                 "product_analysis": result.get("product_analysis", {}),
                 "market_insight": result.get("market_insight", {}),
                 "compliance_result": result.get("compliance_result", {}),

@@ -89,7 +89,6 @@ def test_intent_context_prioritizes_current_message():
     context = build_intent_context({
         "user_message": "分析600519",
         "memory_context": "history",
-        "pending_clarifications": {"q1": "请确认标的"},
     })
     assert context["current_message"] == "分析600519"
-    assert context["pending_clarifications"]["q1"] == "请确认标的"
+    assert context["recent_summary"] == "history"

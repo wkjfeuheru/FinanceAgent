@@ -73,6 +73,14 @@ class StockDataProvider(Protocol):
         """获取北向持股市值（季度披露；金额单位：亿元）。"""
         ...
 
+    def get_policy_news(self) -> Any:
+        """获取近期财经快讯（政策新闻候选；按时间倒序）。
+
+        出口为统一记录列表：``datetime/title/content/source``。时间窗口与条数
+        上限由调用方（工具层）截断，provider 只负责取回原始快讯。
+        """
+        ...
+
 
 class UnsupportedProviderCapability(ProviderError):
     """Provider 不支持请求的能力。"""

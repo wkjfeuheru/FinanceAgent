@@ -12,7 +12,6 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  (e: 'allocation-update', weights: Record<string, number>): void
   (e: 'profile-updated'): void
   (e: 'conversation-updated', conversationId: string): void
 }>()
@@ -100,10 +99,6 @@ async function handleSend(text: string) {
         placeholder.progressSteps = []
         if (event.data?.conversation_id) {
           emit('conversation-updated', event.data.conversation_id)
-        }
-        const weights = event.data?.allocation_result?.weights
-        if (weights && Object.keys(weights).length) {
-          emit('allocation-update', weights)
         }
         if (event.data?.user_profile && Object.keys(event.data.user_profile).length) {
           emit('profile-updated')

@@ -153,3 +153,23 @@ def test_task_execution_timeout_does_not_wait_for_stuck_runner():
 
     assert result.status is ExpertStatus.TIMEOUT
     assert time.monotonic() - started < 0.15
+
+
+def test_internal_error_is_not_leaked_into_user_visible_fields():
+    """任务异常时，用户可见的 summary/error_code 不得包含异常原文。"""
+
+    def runner(task, payload):
+        raise RuntimeError("connection to postgres://user:secret@host failed")
+
+    result = execute_task_with_retry(
+        _task(),
+        TaskContext(payload={}, runner=runner),
+        max_retries=0,
+        timeout_seconds=5,
+        deadline_seconds=5,
+    )
+
+    assert result.status is ExpertStatus.FAILED
+    assert result.error_code == "task_error"
+    assert "postgres" not in result.summary
+    assert "secret" not in result.summary

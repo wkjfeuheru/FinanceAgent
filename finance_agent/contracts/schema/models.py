@@ -119,7 +119,6 @@ class ExpertResult(_ContractModel):
             mapping = {
                 "market_insight": IntentKind.MARKET_INSIGHT,
                 "stock_analysis": IntentKind.STOCK_ANALYSIS,
-                "asset_allocation": IntentKind.ASSET_ALLOCATION,
                 "product_analysis": IntentKind.PRODUCT_ANALYSIS,
                 "casual_chat": IntentKind.CASUAL_CHAT,
             }

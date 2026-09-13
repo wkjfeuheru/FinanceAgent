@@ -31,7 +31,18 @@ class ProviderManager:
     def __init__(self, providers: dict[str, Any] | None = None, order: list[str] | None = None) -> None:
         self.order = order or DATA_PROVIDER_ORDER
         self.providers = providers if providers is not None else self._build_providers()
-        self.last_metadata: dict[str, Any] = {}
+        # 逐股取数是并行的，而 manager 是单例；来源元数据必须按线程隔离，
+        # 否则一个线程的 last_metadata 会在另一个线程读取前被覆盖，导致来源错配。
+        self._local = threading.local()
+
+    @property
+    def last_metadata(self) -> dict[str, Any]:
+        """返回**当前线程**最近一次数据请求的来源元数据。"""
+        return getattr(self._local, "metadata", {})
+
+    @last_metadata.setter
+    def last_metadata(self, value: dict[str, Any]) -> None:
+        self._local.metadata = value
 
     def _build_providers(self) -> dict[str, Any]:
         """按启用配置懒构造可用 provider，避免导入可选依赖失败。"""
@@ -148,6 +159,10 @@ class ProviderManager:
     def get_northbound_holdings(self) -> Any:
         """获取北向持股市值（季度披露；金额单位：亿元）。"""
         return self._call("get_northbound_holdings")
+
+    def get_policy_news(self) -> Any:
+        """获取近期财经快讯（政策新闻候选；按时间倒序）。"""
+        return self._call("get_policy_news")
 
 
 _manager_instance: ProviderManager | None = None

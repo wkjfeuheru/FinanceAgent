@@ -210,9 +210,16 @@ async def chat_stop(
     run_id: str = "",
 ) -> dict[str, Any]:
     """请求停止指定会话/运行的生成；已完成的专家结果保留。"""
-    _require_customer_id(http_request)
+    customer_id = _require_customer_id(http_request)
     if not conversation_id and not run_id:
         raise HTTPException(status_code=400, detail="需提供 conversation_id 或 run_id")
+    if conversation_id:
+        # 会话归属校验：stop 按 conversation_id 索引停止标记，若不校验归属，
+        # 任何登录用户只要知道 id 就能停掉他人的运行。
+        from finance_agent.orchestrator.database import get_database
+
+        if get_database().get_conversation(conversation_id, customer_id) is None:
+            raise HTTPException(status_code=404, detail="会话不存在或无权操作")
     stopped = get_system().request_stop(conversation_id=conversation_id, run_id=run_id)
     return {"status": "ok", "stopped": stopped, "conversation_id": conversation_id, "run_id": run_id}
 

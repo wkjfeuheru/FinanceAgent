@@ -81,11 +81,9 @@ def test_resolve_ambiguous_name_returns_candidates(stock_index):
     assert "000001" in ambiguous[0]["candidates"] and "601318" in ambiguous[0]["candidates"]
 
 
-def test_deterministic_allocation_extract():
-    raw = slots._deterministic_extract("用600519和000001配置10万，稳健，持有1年", "asset_allocation")
+def test_deterministic_product_profile_extract():
+    raw = slots._deterministic_extract("帮我解读易方达蓝筹基金，我比较稳健，持有1年", "product_analysis")
     s = raw["slots"]
-    assert s["stock_codes"] == ["600519", "000001"]
-    assert s["budget_amount"] == 100000
     assert s["risk_preference"] == "R2 中低风险"
     assert s["holding_period"] == "1年"
 
@@ -173,19 +171,17 @@ def test_extract_ambiguity_raises_clarification(stock_index):
     assert "601318" not in codes and "000001" not in codes
 
 
-def test_extract_updates_allocation_profile(stock_index):
+def test_extract_updates_product_profile(stock_index):
     extractor = _det_extractor(slots.SlotExtractor())
     state = {
-        "user_message": "用600519配置10万，稳健，持有1年",
+        "user_message": "解读一下易方达蓝筹基金，我比较稳健，持有1年",
         "memory_context": "",
         "user_profile": {"risk_preference": "R3 中风险"},
-        "task_dispatch": [{"intent": "asset_allocation", "expert": "asset_allocation", "requirement": "用600519配置10万，稳健，持有1年"}],
+        "task_dispatch": [{"intent": "product_analysis", "expert": "product_analysis", "requirement": "解读一下易方达蓝筹基金，我比较稳健，持有1年"}],
         "intent_slots": {},
     }
     out = extractor.extract(state)
     profile = out["user_profile"]
-    assert profile["stock_codes"] == ["600519"]
-    assert profile["budget_amount"] == 100000
     assert profile["holding_period"] == "1年"
     # 已确认画像字段不被覆盖
     assert profile["risk_preference"] == "R3 中风险"
@@ -193,26 +189,26 @@ def test_extract_updates_allocation_profile(stock_index):
 
 def test_merge_across_turns_keeps_and_updates_slots(stock_index):
     turn1 = slots._resolve_slots(
-        "asset_allocation",
-        slots._deterministic_extract("用600519和000001配置", "asset_allocation"),
+        "product_analysis",
+        slots._deterministic_extract("对比易方达蓝筹基金和华夏红利基金", "product_analysis"),
         {},
     )
-    assert set(turn1["stock_codes"]) == {"600519", "000001"}
+    assert len(turn1["product_names"]) == 2
 
-    # 第二轮只补预算：保留代码并新增预算
+    # 第二轮只补风险偏好：保留产品名并新增风险偏好
     raw2 = slots._normalize_raw({
-        "slots": {"budget_amount": 100000}, "negatives": {}, "cleared": [], "ambiguity": [], "missing": [],
+        "slots": {"risk_preference": "R2 中低风险"}, "negatives": {}, "cleared": [], "ambiguity": [], "missing": [],
     })
-    turn2 = slots._resolve_slots("asset_allocation", raw2, turn1)
-    assert set(turn2["stock_codes"]) == {"600519", "000001"}
-    assert turn2["budget_amount"] == 100000
+    turn2 = slots._resolve_slots("product_analysis", raw2, turn1)
+    assert len(turn2["product_names"]) == 2
+    assert turn2["risk_preference"] == "R2 中低风险"
 
     # 第三轮清除某字段
     raw3 = slots._normalize_raw({
-        "slots": {}, "negatives": {}, "cleared": ["stock_codes"], "ambiguity": [], "missing": [],
+        "slots": {}, "negatives": {}, "cleared": ["product_names"], "ambiguity": [], "missing": [],
     })
-    turn3 = slots._resolve_slots("asset_allocation", raw3, turn2)
-    assert turn3["stock_codes"] == []
+    turn3 = slots._resolve_slots("product_analysis", raw3, turn2)
+    assert turn3["product_names"] == []
 
 
 def test_llm_failure_falls_back_to_deterministic(monkeypatch):
@@ -222,8 +218,8 @@ def test_llm_failure_falls_back_to_deterministic(monkeypatch):
         raise RuntimeError("io error")
 
     monkeypatch.setattr(extractor, "_llm_extract", boom)
-    out = extractor._extract_one("用600519配置10万，稳健", "asset_allocation", {"slots": []}, {}, "")
-    assert out["slots"]["budget_amount"] == 100000
+    out = extractor._extract_one("解读易方达蓝筹基金，我比较稳健", "product_analysis", {"slots": []}, {}, "")
+    assert out["slots"]["risk_preference"] == "R2 中低风险"
 
 
 def test_search_candidates_name_substring_match(monkeypatch):
@@ -277,7 +273,6 @@ def test_graph_wires_slots_to_stock_agent(monkeypatch):
             return state
 
     system.stock_agent = FakeStockAgent()
-    system.allocation_agent = FakeOtherAgent()
     system.product_agent = FakeOtherAgent()
     system.casual_chat_agent = FakeOtherAgent()
     import threading
@@ -315,3 +310,22 @@ def test_graph_wires_slots_to_stock_agent(monkeypatch):
     assert captured["resolved_stocks"] == [{"code": "600519", "name": "贵州茅台"}]
     assert "未识别到需要分析的股票代码" not in result.get("agent_response", "")
     assert "600519" in result.get("agent_response", "")
+
+
+def test_deterministic_analysis_type_only_on_explicit_exclusive_wording():
+    """只在显式排他词（只看/仅看…）时收窄维度，描述性语句保持默认 both。"""
+    # 显式"只看技术面" → technical
+    tech = slots._deterministic_extract("只看技术面分析600519", "stock_analysis")
+    assert tech["slots"].get("analysis_type") == "technical"
+
+    # 显式"只看基本面" → fundamental
+    fund = slots._deterministic_extract("只看基本面分析600519", "stock_analysis")
+    assert fund["slots"].get("analysis_type") == "fundamental"
+
+    # 描述性语句（无排他词）不得被误判为收窄
+    descriptive = slots._deterministic_extract("分析一下600519的行情和基本面", "stock_analysis")
+    assert "analysis_type" not in descriptive["slots"]
+
+    # 两者都命中且带排他词 → 等价 both，不收窄
+    both = slots._deterministic_extract("只看600519的基本面和技术面", "stock_analysis")
+    assert "analysis_type" not in both["slots"]

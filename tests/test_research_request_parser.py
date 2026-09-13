@@ -5,18 +5,44 @@ import pytest
 from finance_agent.research.request_parser import UnknownThemeError, parse_analysis_request
 
 
-def test_slots_win_over_message_regex_for_comparison_and_indicators():
-    """已提取的槽位优先于消息正则，且指标保持用户指定范围。"""
+def test_slots_win_over_message_regex_for_comparison():
+    """已提取的槽位优先于消息正则。"""
     request = parse_analysis_request(
-        "比较茅台和招行的MACD",
+        "比较茅台和招行",
         resolved_stocks=[{"code": "600519"}, {"code": "600036"}],
-        intent_slots={"stock_analysis": {"indicators": ["MACD"]}},
+        intent_slots={"stock_analysis": {}},
         user_profile={},
     )
 
     assert request.kind.value == "comparison"
     assert request.stock_codes == ["600519", "600036"]
-    assert request.indicators == ["MACD"]
+
+
+def test_analysis_type_slot_is_read_and_defaults_to_both():
+    """分析维度槽位被读取；缺失或非法值一律回落 both。"""
+    narrowed = parse_analysis_request(
+        "只看技术面",
+        resolved_stocks=[{"code": "600519"}],
+        intent_slots={"stock_analysis": {"analysis_type": "technical"}},
+        user_profile={},
+    )
+    assert narrowed.analysis_type == "technical"
+
+    default = parse_analysis_request(
+        "分析600519",
+        resolved_stocks=[{"code": "600519"}],
+        intent_slots={},
+        user_profile={},
+    )
+    assert default.analysis_type == "both"
+
+    illegal = parse_analysis_request(
+        "分析600519",
+        resolved_stocks=[{"code": "600519"}],
+        intent_slots={"stock_analysis": {"analysis_type": "bogus"}},
+        user_profile={},
+    )
+    assert illegal.analysis_type == "both"
 
 
 def test_profile_is_complete_only_with_risk_and_holding_period():

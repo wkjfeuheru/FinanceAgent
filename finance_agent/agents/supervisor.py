@@ -34,37 +34,33 @@ from finance_agent.middleware import OUTPUT_BLOCKED_RESPONSE, check_sensitive_wo
 
 
 _INTENT_CLASSIFIER_PROMPT = """你是金融工作流的多意图分类器，只分类当前用户消息，不回答问题。
-近期上下文摘要只能用于解析“它、这些股票、继续配置”等指代，不得从上下文新增当前消息未表达的意图。
-历史中出现预算、风险偏好、期限或配置任务，不代表本轮要求资产配置。
-只有当前消息明确要求资金分配、仓位、权重、组合构建，或者 pending_allocation=true 且当前消息在补充待填字段时，才能输出 asset_allocation。
+近期上下文摘要只能用于解析“它、这些股票”等指代，不得从上下文新增当前消息未表达的意图。
 “最近AI行业有什么值得投资的股票，为我推荐几个”只能输出 stock_recommendation，execution_mode=candidate_search。
 
 允许的意图与 execution_mode：
-- market_insight: market_overview | market_sentiment | capital_flow
+- market_insight: market_overview | market_sentiment | capital_flow | policy_impact
 - stock_analysis: stock_analysis
 - stock_recommendation: candidate_search | stock_comparison
-- asset_allocation: allocation
 - product_analysis: product_analysis
 - casual_chat: conversation
 
 market_insight 只回答大盘/指数/市场整体问题，绝不输出个股结论或推荐：
 “今天大盘怎么样”用 market_overview；“市场情绪/赚钱效应/涨跌家数”用 market_sentiment；
-“北向资金/外资动向”用 capital_flow。
+“资金面/两融/融资融券/北向持仓”用 capital_flow；
+“政策/新闻/消息面有什么动态、对市场有什么影响”用 policy_impact。
 stock_analysis 只回答具体个股的基本面/技术面/行情；stock_recommendation 负责选股与多股比较。
 
 每个意图必须包含 intent、query、confidence、reason、evidence、execution_mode、requires_slot_extraction。
 evidence 必须逐字摘自 current_message，不能来自上下文。query 只包含该意图对应的当前轮子请求。
 当 confidence 小于 0.9 时，必须返回非空 clarification_question，提出一个简短、具体、可直接回答的问题；不得直接回答或执行业务。
-pending_clarifications 仅用于理解用户对上一轮反问的回复。若用户在纠正候选意图，可按当前消息改为正确意图；若已明确，必须回传对应 clarification_id。
-解析待澄清项时，query 应结合 original_query 与当前回复形成完整、可执行的子请求；不能重复其他已经完成的意图。
+解析用户对上轮反问的回复时，query 应结合上下文形成完整、可执行的子请求；不能重复其他已经完成的意图。
 不得因为近期上下文重复输出已经完成的高置信度意图。
 只输出 JSON 对象：{"intents": [...], "finance_related": true}。"""
 
 _CLASSIFIER_MODES = {
-    "market_insight": {"market_overview", "market_sentiment", "capital_flow"},
+    "market_insight": {"market_overview", "market_sentiment", "capital_flow", "policy_impact"},
     "stock_analysis": {"stock_analysis"},
     "stock_recommendation": {"candidate_search", "stock_comparison"},
-    "asset_allocation": {"allocation"},
     "product_analysis": {"product_analysis"},
     "casual_chat": {"conversation"},
 }
@@ -171,9 +167,6 @@ class DeepSeekIntentClassifier:
         self,
         message: str,
         context_summary: str = "",
-        pending_allocation: bool = False,
-        pending_fields: list[str] | None = None,
-        pending_clarifications: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not self.api_key:
             raise IntentClassificationError(
@@ -183,9 +176,6 @@ class DeepSeekIntentClassifier:
         request_input = {
             "current_message": message.strip(),
             "recent_context_summary": context_summary.strip(),
-            "pending_allocation": bool(pending_allocation),
-            "pending_fields": list(pending_fields or []),
-            "pending_clarifications": dict(pending_clarifications or {}),
         }
         body = {
             "model": self.model,
@@ -248,12 +238,14 @@ class DeepSeekIntentClassifier:
         raise error
 
 
-_INTENTS = ("market_insight", "stock_analysis", "stock_recommendation", "asset_allocation", "product_analysis", "casual_chat")
+_INTENTS = ("market_insight", "stock_analysis", "stock_recommendation", "product_analysis", "casual_chat")
 _EXECUTION_MODES = {
-    "market_insight": {"market_overview": False, "market_sentiment": False, "capital_flow": False},
+    "market_insight": {
+        "market_overview": False, "market_sentiment": False,
+        "capital_flow": False, "policy_impact": False,
+    },
     "stock_analysis": {"stock_analysis": True},
     "stock_recommendation": {"candidate_search": False, "stock_comparison": True},
-    "asset_allocation": {"allocation": True},
     "product_analysis": {"product_analysis": True},
     "casual_chat": {"conversation": False},
 }
@@ -338,35 +330,20 @@ class ManagerAgent(ProceduralAgent):
         self,
         message: str,
         context_summary: str,
-        pending_allocation: bool,
-        pending_fields: list[str],
-        pending_clarifications: dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
-        args = (message, context_summary, pending_allocation, pending_fields)
-        if pending_clarifications:
-            return self.intent_classifier.classify(*args, pending_clarifications)
-        return self.intent_classifier.classify(*args)
+        return self.intent_classifier.classify(message, context_summary)
 
     def classify_intents(
         self,
         message: str,
         context_summary: str = "",
-        pending_allocation: bool = False,
-        pending_fields: list[str] | None = None,
-        pending_clarifications: dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """使用 DeepSeek 结合近期摘要识别并合并本轮全部意图。"""
         source = "deepseek"
         classification_error = False
         classification_error_details: dict[str, str] = {}
         try:
-            parsed = self._classify_with_deepseek(
-                message,
-                context_summary,
-                pending_allocation,
-                list(pending_fields or []),
-                pending_clarifications,
-            )
+            parsed = self._classify_with_deepseek(message, context_summary)
         except Exception as exc:
             _LOGGER.warning("intent_deepseek_unavailable error=%s", exc)
             parsed = {}
@@ -418,8 +395,15 @@ class ManagerAgent(ProceduralAgent):
             finance_related = False
             uncertain = []
         elif not merged and not uncertain:
+            # 模型返回了 intents，但没有一条通过校验（未知意图/非当前轮证据/
+            # 置信度<=0）。这是分类失败，必须带上原因，否则编排层只看到空字典
+            # 会误判成功，落到含糊的"暂时无法生成回复"。
             source = "classification_error"
             finance_related = False
+            classification_error_details = {
+                "error_code": "intent_protocol_error",
+                "cause": "no_valid_intents",
+            }
         else:
             finance_related = bool(
                 parsed.get("finance_related")
@@ -449,9 +433,6 @@ class ManagerAgent(ProceduralAgent):
         classified = self.classify_intents(
             message,
             str(state.get("memory_context", "")),
-            bool(state.get("pending_allocation", False)),
-            list(state.get("pending_fields", []) or []),
-            state.get("pending_clarifications"),
         )
         plan = normalize_dispatch_plan(classified.get("intents", []), message)
         state["tasks"] = plan.tasks
@@ -494,7 +475,7 @@ class ManagerAgent(ProceduralAgent):
                 return response
         results = state.get("intent_results", {}) or {}
         sections = []
-        for intent in ("casual_chat", "market_insight", "stock_analysis", "stock_recommendation", "product_analysis", "asset_allocation"):
+        for intent in ("casual_chat", "market_insight", "stock_analysis", "stock_recommendation", "product_analysis"):
             result = results.get(intent, {})
             if not isinstance(result, dict):
                 continue

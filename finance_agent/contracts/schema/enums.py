@@ -24,11 +24,9 @@ class TaskKind(str, Enum):
 
     STOCK_ANALYSIS = "stock_analysis"
     MARKET_INSIGHT = "market_insight"
-    ASSET_ALLOCATION = "asset_allocation"
     PRODUCT_ANALYSIS = "product_analysis"
     CASUAL_CHAT = "casual_chat"
     DATA_PREPARATION = "data_preparation"
-    DEBATE = "debate"
     SYNTHESIS = "synthesis"
 
 
@@ -38,7 +36,6 @@ class IntentKind(str, Enum):
     MARKET_INSIGHT = "market_insight"
     STOCK_ANALYSIS = "stock_analysis"
     STOCK_RECOMMENDATION = "stock_recommendation"
-    ASSET_ALLOCATION = "asset_allocation"
     PRODUCT_ANALYSIS = "product_analysis"
     CASUAL_CHAT = "casual_chat"
 

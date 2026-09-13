@@ -136,13 +136,9 @@ LLM_REQUEST_TIMEOUT = float(os.getenv("LLM_REQUEST_TIMEOUT", "45"))
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "1"))
 FINAL_SYNTHESIS_TIMEOUT = float(os.getenv("FINAL_SYNTHESIS_TIMEOUT", "20"))
 
-# 辩论流程配置：默认启用，并限制轮次与总耗时。
-DEBATE_ENABLED = os.getenv("DEBATE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
-DEBATE_MAX_ROUNDS = int(os.getenv("DEBATE_MAX_ROUNDS", "2"))
-DEBATE_TIMEOUT = float(os.getenv("DEBATE_TIMEOUT", "60.0"))
-DEBATE_BULL_TEMPERATURE = float(os.getenv("DEBATE_BULL_TEMPERATURE", "0.4"))
-DEBATE_BEAR_TEMPERATURE = float(os.getenv("DEBATE_BEAR_TEMPERATURE", "0.4"))
-DEBATE_SYNTHESIS_TEMPERATURE = float(os.getenv("DEBATE_SYNTHESIS_TEMPERATURE", "0.1"))
+# 政策事件解读的取数窗口与条数上限（天 / 条），避免解读上下文爆炸。
+POLICY_NEWS_MAX_DAYS = int(os.getenv("POLICY_NEWS_MAX_DAYS", "3"))
+POLICY_NEWS_MAX_ITEMS = int(os.getenv("POLICY_NEWS_MAX_ITEMS", "50"))
 
 PRODUCT_ANALYSIS_TEMPERATURE = float(os.getenv("PRODUCT_ANALYSIS_TEMPERATURE", "0.2"))
 
@@ -166,11 +162,7 @@ AGENT_TEMPERATURES = {
     "slot_extraction": 0.1, # 需求字段抽取：低温保证抽取准确
     "fundamental": 0.3,      # 基本面分析：适度温度保证分析深度
     "stock_analysis": 0.3,   # 股票综合分析：适度温度保证分析深度与决策灵活性
-    "market_insight": 0.2,   # 市场洞察：低温保证市场级表述稳定
-    "allocation": 0.2,        # 资产配置：低温保证计算严谨
-    "debate_bull": DEBATE_BULL_TEMPERATURE,       # 看多分析
-    "debate_bear": DEBATE_BEAR_TEMPERATURE,      # 看空分析
-    "debate_synthesis": DEBATE_SYNTHESIS_TEMPERATURE,  # 辩论聚合
+    "market_insight": 0.2,   # 市场洞察：低温保证市场级表述稳定（政策事件解读）
     "product_analysis": PRODUCT_ANALYSIS_TEMPERATURE,  # 产品解读
 }
 

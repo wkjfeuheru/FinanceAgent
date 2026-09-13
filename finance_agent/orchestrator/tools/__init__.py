@@ -7,7 +7,6 @@ from finance_agent.orchestrator.tools.stockdata import (
     get_stock_basic_info,
     get_stock_history,
     get_stock_quote,
-    get_stock_realtime_quote,
     get_valuation_indicators,
     search_candidates,
 )
@@ -33,13 +32,9 @@ from finance_agent.orchestrator.tools.technical import (
     compute_all_indicators,
 )
 
-# AssetAllocationAgent 工具
-from finance_agent.orchestrator.tools.allocation import calculate_stock_metrics, optimize_portfolio
-
 __all__ = [
     "get_stock_basic_info",
     "get_stock_quote",
-    "get_stock_realtime_quote",
     "get_financial_indicators",
     "get_stock_history",
     "get_valuation_indicators",
@@ -48,8 +43,6 @@ __all__ = [
     "query_user_profile",
     "list_user_conversations",
     "get_user_conversation_messages",
-    "calculate_stock_metrics",
-    "optimize_portfolio",
     "query_product",
     "list_products",
     "compute_all_indicators",

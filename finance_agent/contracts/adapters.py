@@ -12,7 +12,6 @@ _EXPERT_BY_INTENT = {
     IntentKind.MARKET_INSIGHT: "market_insight",
     IntentKind.STOCK_ANALYSIS: "stock_analysis",
     IntentKind.STOCK_RECOMMENDATION: "stock_analysis",
-    IntentKind.ASSET_ALLOCATION: "asset_allocation",
     IntentKind.PRODUCT_ANALYSIS: "product_analysis",
     IntentKind.CASUAL_CHAT: "casual_chat",
 }
@@ -46,13 +45,6 @@ def normalize_dispatch_plan(
             requirement=str(raw.get("query", "")).strip() or message.strip(),
             execution_mode=str(raw.get("execution_mode", "")).strip(),
         ))
-    stock_tasks = [
-        task.task_id for task in tasks
-        if task.intent in {IntentKind.STOCK_ANALYSIS, IntentKind.STOCK_RECOMMENDATION}
-    ]
-    for task in tasks:
-        if task.intent is IntentKind.ASSET_ALLOCATION and stock_tasks:
-            task.depends_on = list(stock_tasks)
     return DispatchPlan(tasks=tasks)
 
 

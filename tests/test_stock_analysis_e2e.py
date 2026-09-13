@@ -73,7 +73,6 @@ def _build_system(*, theme_repo=None) -> AdvisorSystem:
         ),
     )
     system.market_insight_agent = MarketInsightAgent()
-    system.allocation_agent = _StubAgent("asset_allocation")
     system.product_agent = _StubAgent("product_analysis")
     system.casual_chat_agent = _StubAgent("casual_chat")
     system.slot_extractor = slots_module.SlotExtractor()

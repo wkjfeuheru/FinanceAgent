@@ -29,6 +29,20 @@ from finance_agent.research.theme_repository import PostgresThemeRepository
 # 批次内并行取数上限：与候选上限一致，避免一次请求放大过多外部取数。
 _MAX_FETCH_WORKERS = 5
 
+# 技术指标（MA60/MACD 慢线/BOLL20）需要足够历史；不足则诚实跳过该标的。
+_MIN_TECHNICAL_BARS = 60
+
+
+def _as_float(value: Any) -> float | None:
+    """把数值或数字文本转为 float；不可解析返回 None。"""
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -149,6 +163,53 @@ class StockAnalysisAgent(AgentProtocol):
             result.narrative or f"研究结论：{result.action.value}。" for result in results
         )
 
+    def _compute_technical_indicators(
+        self, stock_data: Any, codes: Any, analysis_type: str = "both",
+    ) -> dict[str, Any]:
+        """为请求内的标的计算**展示层**技术指标（MA/MACD/KDJ/RSI/BOLL/WR）。
+
+        与 ``tools.marketdata`` 同哲学：只做展示，不写入 ``indicators``、不生成
+        ``FactSnapshot`` 证据、不参与评分与规则引擎重放。K 线不足 60 根、字段
+        缺失或计算异常时跳过该标的，绝不因此把整批任务打成失败。
+
+        ``analysis_type == "fundamental"`` 表示用户只要基本面，不展示技术面板，
+        直接返回空（默认 ``both`` 保持既有行为）。
+        """
+        from finance_agent.orchestrator.tools.technical import compute_all_indicators
+
+        result: dict[str, Any] = {}
+        if analysis_type == "fundamental" or not isinstance(stock_data, dict):
+            return result
+        for code in codes or []:
+            raw = stock_data.get(code)
+            history = raw.get("history") if isinstance(raw, dict) else None
+            rows = history.get("data") if isinstance(history, dict) else None
+            if not isinstance(rows, list) or len(rows) < _MIN_TECHNICAL_BARS:
+                continue
+            close: list[float] = []
+            high: list[float] = []
+            low: list[float] = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                c, h, low_value = (
+                    _as_float(row.get("close")),
+                    _as_float(row.get("high")),
+                    _as_float(row.get("low")),
+                )
+                if c is None or h is None or low_value is None:
+                    continue
+                close.append(c)
+                high.append(h)
+                low.append(low_value)
+            if len(close) < _MIN_TECHNICAL_BARS:
+                continue
+            try:
+                result[code] = compute_all_indicators(high, low, close)
+            except Exception:  # noqa: BLE001 - 指标计算失败只跳过该标的
+                logger.warning("技术指标计算失败 code=%s", code, exc_info=True)
+        return result
+
     def _resolve_request(self, state: dict[str, Any], message: str) -> tuple[AnalysisRequest | None, dict[str, Any] | None]:
         """把状态解析为研究请求；无法解析时返回结构化错误，不抛内部异常。"""
         profile = state.get("user_profile", {}) or {}
@@ -266,7 +327,9 @@ class StockAnalysisAgent(AgentProtocol):
                     if key in raw:
                         entry[key] = raw[key]
         state["stock_analysis"] = projected["stock_analysis"]
-        state["technical_analysis"] = projected["technical_analysis"]
+        state["technical_analysis"] = self._compute_technical_indicators(
+            stock_data, request.stock_codes, request.analysis_type,
+        )
         state["analysis_results"] = projected["analysis_results"]
         # 运行级请求（比较请求含全部标的）单独留档，审计才能按一次运行归组重放。
         state["research_request"] = request.model_dump(mode="json")
@@ -413,7 +476,7 @@ class StockAnalysisAgent(AgentProtocol):
         kind = AnalysisKind.SINGLE_STOCK if len(codes) == 1 else AnalysisKind.COMPARISON
         return AnalysisRequest(
             kind=kind, stock_codes=codes,
-            indicators=list(request.indicators), profile_complete=request.profile_complete,
+            analysis_type=request.analysis_type, profile_complete=request.profile_complete,
         )
 
     @staticmethod

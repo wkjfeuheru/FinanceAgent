@@ -28,22 +28,20 @@ def _facts_for_task(state: dict[str, Any], task: Task) -> list[dict[str, Any]]:
         "market_insight": {"market"},
         "stock_analysis": {"market", "fundamental", "technical"},
         "stock_recommendation": {"market", "fundamental", "technical"},
-        "asset_allocation": {"market", "fundamental", "technical", "allocation"},
         "product_analysis": {"product"},
         "casual_chat": set(),
     }
     allowed = domains.get(task.intent.value if task.intent else "", set())
-    return [fact for fact in facts if not allowed or fact.get("domain") in allowed]
+    # allowed 为空集表示该意图不消费任何事实（如闲聊）；此处必须显式区分，
+    # 不能用 `not allowed` 放行全部，否则闲聊会收到所有领域的证据。
+    return [fact for fact in facts if fact.get("domain") in allowed]
 
 
 def build_intent_context(state: dict[str, Any]) -> dict[str, Any]:
-    """分类器只接收当前消息、短摘要和待澄清状态。"""
+    """分类器只接收当前消息与短摘要。"""
     return {
         "current_message": str(state.get("user_message", "")),
         "recent_summary": str(state.get("memory_context", ""))[:1500],
-        "pending_allocation": bool(state.get("pending_allocation", False)),
-        "pending_fields": list(state.get("pending_fields", []) or []),
-        "pending_clarifications": dict(state.get("pending_clarifications", {}) or {}),
     }
 
 

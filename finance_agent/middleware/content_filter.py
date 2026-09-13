@@ -1,18 +1,14 @@
 """输入守卫与输出合规敏感词检查。
 
-find_sensitive_words 用于 API 入口拦截用户输入；
+find_sensitive_word 用于 API 入口拦截用户输入；
 check_sensitive_words 用于对 Agent 输出进行合规审查。
+（编排层在 handle_message 入口直接调用，因此不提供 create_agent 中间件形态。）
 """
 
 from __future__ import annotations
 
 import os
 import unicodedata
-from typing import Any
-
-from langchain.agents.middleware import AgentState, before_agent
-from langchain_core.messages import AIMessage
-from langgraph.runtime import Runtime
 
 
 BLOCKED_RESPONSE = "抱歉，您的输入包含不适宜的内容，暂时无法回答您的问题。"
@@ -64,37 +60,3 @@ def check_sensitive_words(text: str) -> list[str]:
         if _normalise(word) in content
     ]
 
-
-def _message_text(message: Any) -> str:
-    """从 LangChain 消息对象中提取纯文本。"""
-    content = getattr(message, "content", "")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return " ".join(
-            str(block.get("text", "")) if isinstance(block, dict) else str(block)
-            for block in content
-        )
-    return str(content)
-
-
-@before_agent(can_jump_to=["end"])
-def content_filter(
-    state: AgentState, runtime: Runtime
-) -> dict[str, Any] | None:
-    """在模型/工具执行前拦截命中敏感词的用户输入。"""
-    del runtime
-    messages = state.get("messages", [])
-    if not messages:
-        return None
-
-    last_message = messages[-1]
-    if getattr(last_message, "type", "") != "human":
-        return None
-    if find_sensitive_word(_message_text(last_message)) is None:
-        return None
-
-    return {
-        "messages": [AIMessage(content=BLOCKED_RESPONSE)],
-        "jump_to": "end",
-    }

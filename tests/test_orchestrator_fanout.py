@@ -30,7 +30,6 @@ def _make_system(*, stock_agent, classifier_intents, monkeypatch, fetch):
     )()
     system.stock_agent = stock_agent
     system.market_insight_agent = type("M", (), {"invoke": lambda self, s: s})()
-    system.allocation_agent = type("A", (), {"invoke": lambda self, s: s})()
     system.product_agent = type("P", (), {"invoke": lambda self, s: s})()
     system.casual_chat_agent = type("C", (), {"invoke": lambda self, s: s})()
     system.slot_extractor = type("Slots", (), {"extract": lambda self, s: s})()
@@ -199,3 +198,37 @@ def test_reducers_merge_dicts_and_dedupe_lists():
     assert dedupe_concat([{"fact_id": "f1"}, {"fact_id": "f2"}], [{"fact_id": "f1"}]) == [
         {"fact_id": "f1"}, {"fact_id": "f2"},
     ]
+
+
+def test_failed_task_local_state_is_not_merged(monkeypatch):
+    """超时/失败任务的本地状态不得污染共享状态与 agent_response。
+
+    专家线程在超时后仍可能继续运行并留下迟到写入，因此合并必须按结果状态过滤。
+    """
+    def fetch(codes):
+        return {code: {"basic_info": {"code": code}} for code in codes}
+
+    class RaisingAgent:
+        agent_name = "stock_analysis"
+
+        def invoke(self, state):
+            raise RuntimeError("boom")
+
+    system = _make_system(
+        stock_agent=RaisingAgent(),
+        classifier_intents=[{
+            "intent": "stock_analysis", "query": "分析600519", "confidence": 0.99,
+            "execution_mode": "stock_analysis", "evidence": "分析600519",
+        }],
+        monkeypatch=monkeypatch, fetch=fetch,
+    )
+    result = system._build_graph().invoke(
+        {"user_message": "分析600519", "completed_experts": [], "intent_results": {},
+         "intent_slots": {"stock_analysis": {"stock_codes": ["600519"]}}},
+        config={"configurable": {"thread_id": "failed-merge-test"}},
+    )
+
+    assert result["task_results"]["task-1"].status.value == "failed"
+    # 失败任务不产出专家结果，也不污染共享状态。
+    assert not result.get("stock_analysis")
+    assert not result.get("stock_data")

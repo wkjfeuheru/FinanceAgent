@@ -69,3 +69,25 @@ def test_narrative_deduplicates_reasons_and_keeps_unknown_codes():
     limitations = text.split("限制与提示：", 1)[1]
     assert limitations.count("最新报价超过允许的数据新鲜度") == 1
     assert "unknown_reason" in limitations
+
+
+def test_narrative_announces_narrowed_dimension():
+    """收窄维度时必须标注口径，避免用户误读为完整评级。"""
+    from finance_agent.research.contracts import AnalysisKind, AnalysisRequest
+
+    narrow = _result(request=AnalysisRequest(
+        kind=AnalysisKind.SINGLE_STOCK,
+        stock_codes=["600519"],
+        analysis_type="technical",
+    ))
+
+    text, _ = NarrativeRenderer().render(narrow)
+
+    assert "分析维度：技术面（风险始终纳入）。" in text
+
+
+def test_narrative_omits_dimension_notice_for_both():
+    """默认 both 不插入维度句，保持既有报告文本不变。"""
+    text, _ = NarrativeRenderer().render(_result())
+
+    assert "分析维度" not in text

@@ -341,3 +341,7 @@ class TushareMcpDataSource:
             "Tushare MCP 北向持股接口未在无 token 环境验证，暂不声明该能力"
         )
 
+    def get_policy_news(self) -> Any:
+        """Tushare MCP 不提供财经快讯/政策新闻。"""
+        raise UnsupportedProviderCapability("Tushare MCP 不提供财经快讯接口")
+

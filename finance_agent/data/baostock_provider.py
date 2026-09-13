@@ -234,3 +234,7 @@ class BaostockDataSource:
     def get_northbound_holdings(self) -> Any:
         """BaoStock 不提供北向持股数据。"""
         raise UnsupportedProviderCapability("BaoStock 不提供北向持股接口")
+
+    def get_policy_news(self) -> Any:
+        """BaoStock 不提供财经快讯/政策新闻。"""
+        raise UnsupportedProviderCapability("BaoStock 不提供财经快讯接口")

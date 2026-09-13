@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import pytest
@@ -255,3 +256,37 @@ def test_tool_errors_when_no_provider_available(monkeypatch):
 
     with pytest.raises(ProviderUnavailableError):
         stockdata.get_stock_history.invoke({"stock_code": "600519"})
+
+
+def test_last_metadata_is_thread_local():
+    """逐股并行取数时来源元数据必须按线程隔离，避免来源错配。
+
+    manager 是单例，若 last_metadata 是普通属性，A 线程刚写完就可能被 B 线程
+    覆盖，把 B 的来源记到 A 的标的上。
+    """
+    import threading
+
+    class _P:
+        provider_name = "fake"
+
+        def is_available(self):
+            return True
+
+    manager = ProviderManager(providers={"fake": _P()}, order=["fake"])
+    seen: dict[str, str] = {}
+
+    def worker(tag: str):
+        manager.last_metadata = {"source": tag}
+        # 睡一会儿，制造写入交错；线程本地存储下互不影响。
+        time.sleep(0.02)
+        seen[tag] = manager.last_metadata.get("source")
+
+    threads = [threading.Thread(target=worker, args=(tag,)) for tag in ("A", "B", "C")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert seen == {"A": "A", "B": "B", "C": "C"}
+    # 主线程从未写过，读到默认空字典而非某个工作线程的值。
+    assert manager.last_metadata == {}

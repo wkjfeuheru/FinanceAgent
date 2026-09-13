@@ -30,7 +30,6 @@ def _system(*, intents, stock_agent=None):
         "S", (), {"agent_name": "stock_analysis", "invoke": lambda self, s: s},
     )()
     system.market_insight_agent = type("M", (), {"invoke": lambda self, s: s})()
-    system.allocation_agent = type("A", (), {"agent_name": "asset_allocation", "invoke": lambda self, s: s})()
     system.product_agent = type("P", (), {"invoke": lambda self, s: s})()
     system.casual_chat_agent = type("C", (), {"agent_name": "casual_chat", "invoke": lambda self, s: s})()
     system.slot_extractor = type("Slots", (), {"extract": lambda self, s: s})()

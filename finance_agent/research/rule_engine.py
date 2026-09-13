@@ -82,6 +82,39 @@ def _bounded_score(value: Any) -> float | None:
         return None
 
 
+def _selected_dimensions(request: AnalysisRequest) -> frozenset[str]:
+    """返回参与加权的维度集合。
+
+    ``analysis_type`` 决定基本面/技术面是否参与；**风险维度任何模式下都强制
+    纳入**（安全门禁），因此 ``both`` 之外的取值是"收窄"而非"排除风险"。
+    """
+    analysis_type = getattr(request, "analysis_type", "both") or "both"
+    if analysis_type == "fundamental":
+        return frozenset({"fundamental", "risk"})
+    if analysis_type == "technical":
+        return frozenset({"technical", "risk"})
+    return frozenset({"fundamental", "technical", "risk"})
+
+
+def _visible_restrictions(codes: Any, selected: frozenset[str]) -> list[str]:
+    """过滤掉"被用户排除的维度"所产生的评分级缺失码。
+
+    只丢弃评分层的 ``fundamental*`` / ``technical*`` 前缀码；质量门禁的
+    warnings（数据完整性披露）不在 ``score_restrictions`` 里，不受影响。
+    """
+    dropped_prefix = {
+        "fundamental": "fundamental",
+        "technical": "technical",
+    }
+    hidden = [
+        prefix for dimension, prefix in dropped_prefix.items() if dimension not in selected
+    ]
+    return [
+        code for code in codes
+        if not any(code.startswith(prefix) for prefix in hidden)
+    ]
+
+
 class RuleEngine:
     """完全由快照和版本化配置决定的规则评估器。"""
 
@@ -135,18 +168,27 @@ class RuleEngine:
 
         primary = snapshot.securities[0] if snapshot.securities else None
         indicators = primary.indicators if primary is not None else {}
+        selected = _selected_dimensions(request)
         score_restrictions = indicators.get("score_restrictions", [])
         if isinstance(score_restrictions, list):
             restrictions.extend(
-                item for item in score_restrictions
-                if isinstance(item, str) and item
+                _visible_restrictions(
+                    (item for item in score_restrictions if isinstance(item, str) and item),
+                    selected,
+                )
             )
-        fundamental = _bounded_score(indicators.get("fundamental_score"))
-        technical = _bounded_score(indicators.get("technical_score"))
+        fundamental = (
+            _bounded_score(indicators.get("fundamental_score"))
+            if "fundamental" in selected else None
+        )
+        technical = (
+            _bounded_score(indicators.get("technical_score"))
+            if "technical" in selected else None
+        )
         risk = _bounded_score(indicators.get("risk_score"))
         suitability = self._suitability_score(request, indicators)
         conflict = self._has_fundamental_technical_conflict(fundamental, technical)
-        total = self._weighted_total(fundamental, technical, risk, suitability)
+        total = self._weighted_total(fundamental, technical, risk, suitability, selected)
         scores = ScoreBreakdown(
             fundamental=fundamental,
             technical=technical,
@@ -199,8 +241,16 @@ class RuleEngine:
         technical: float | None,
         risk: float | None,
         suitability: float | None,
+        selected: frozenset[str],
     ) -> float | None:
-        required = {"fundamental": fundamental, "technical": technical, "risk": risk}
+        """按选定维度加权求总分。
+
+        只有**选定维度**（外加始终纳入的风险）进入 required 集合：被用户排除的
+        维度（值为 None）不参与也不阻断；但**选定却缺失**的维度仍返回 None，
+        保持"数据缺失不得静默降级"的护栏。
+        """
+        candidates = {"fundamental": fundamental, "technical": technical, "risk": risk}
+        required = {name: value for name, value in candidates.items() if name in selected}
         if any(score is None for score in required.values()):
             return None
         weights = self._rules["weights"]

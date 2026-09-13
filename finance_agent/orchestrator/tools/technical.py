@@ -64,6 +64,22 @@ def _recent(values: list[float], count: int = 5) -> list[float]:
     return values[-count:] if len(values) >= count else list(values)
 
 
+def _argmax_since(values: list[float], lookback: int) -> int:
+    """返回最近 ``lookback`` 个元素中最大值的**绝对**下标。
+
+    不能用 ``list.index``：它从序列开头找第一个匹配值，若最大值在更早位置
+    也出现过，会返回窗口外的下标（背离判断因此误报）。
+    """
+    start = max(0, len(values) - lookback)
+    return max(range(start, len(values)), key=lambda index: values[index])
+
+
+def _argmin_since(values: list[float], lookback: int) -> int:
+    """返回最近 ``lookback`` 个元素中最小值的绝对下标（语义同 ``_argmax_since``）。"""
+    start = max(0, len(values) - lookback)
+    return min(range(start, len(values)), key=lambda index: values[index])
+
+
 def _cross_up(a: list[float], b: list[float]) -> int | None:
     """最近一次上穿（金叉）发生的距今位置。None 表示未发生。"""
     for i in range(len(a) - 2, max(len(a) - 60, 0), -1):
@@ -164,10 +180,10 @@ def calc_macd(
     divergence = None
     lookback = min(20, len(close) - 1)
     if lookback >= 10:
-        price_high_idx = close.index(max(close[-lookback:]))
-        dif_high_idx = dif_vals.index(max(dif_vals[-lookback:]))
-        price_low_idx = close.index(min(close[-lookback:]))
-        dif_low_idx = dif_vals.index(min(dif_vals[-lookback:]))
+        price_high_idx = _argmax_since(close, lookback)
+        dif_high_idx = _argmax_since(dif_vals, lookback)
+        price_low_idx = _argmin_since(close, lookback)
+        dif_low_idx = _argmin_since(dif_vals, lookback)
         if price_high_idx > dif_high_idx + 3:
             divergence = "顶背离"
         elif price_low_idx > dif_low_idx + 3:

@@ -106,19 +106,6 @@ _INTENT_SLOT_SCHEMAS: Dict[str, Dict[str, Any]] = {
              "desc": "期望推荐数量"},
         ],
     },
-    "asset_allocation": {
-        "title": "资产配置",
-        "slots": [
-            {"key": _SLOT_CODES, "type": "code_list", "required": False,
-             "desc": "配置标的股票代码"},
-            {"key": "budget_amount", "type": "number", "required": False,
-             "desc": "预算金额（元），如 10万=100000"},
-            {"key": "risk_preference", "type": "text", "required": False,
-             "desc": "风险偏好，如 稳健/保守/进取/激进"},
-            {"key": "holding_period", "type": "text", "required": False,
-             "desc": "持有期限，如 1年/6个月/3个月"},
-        ],
-    },
     "product_analysis": {
         "title": "产品解读",
         "slots": [
@@ -349,16 +336,6 @@ def _candidate_names(message: str) -> List[str]:
     return chosen[:5]
 
 
-def _extract_amount(message: str) -> Optional[float]:
-    m = re.search(r"(\d+(?:\.\d+)?)\s*万", message)
-    if m:
-        return float(m.group(1)) * 10000
-    m = re.search(r"(\d+(?:\.\d+)?)\s*元", message)
-    if m and float(m.group(1)) >= 100:
-        return float(m.group(1))
-    return None
-
-
 _RISK_LEVELS = (
     ("R5 高风险", ("高风险", "进取", "激进")),
     ("R4 中高风险", ("中高风险", "积极")),
@@ -416,6 +393,30 @@ def _extract_horizon(message: str) -> Optional[str]:
         if word in message:
             return word
     return None
+
+
+def _extract_analysis_type(message: str) -> Optional[str]:
+    """抽取分析维度，**只在用户显式表达"只看某面"时才收窄**。
+
+    必须要求排他词（只看/仅看/单看/只做/仅做/只分析/仅分析）：否则"分析一下
+    它的行情和基本面"这类**描述性**语句会被误判为收窄。无排他词时返回 None，
+    交由默认值 ``both``。
+    """
+    if not any(word in message for word in _ANALYSIS_TYPE_EXCLUSIVE):
+        return None
+    technical = any(word in message for word in _TECHNICAL_WORDS)
+    fundamental = any(word in message for word in _FUNDAMENTAL_WORDS)
+    if technical and not fundamental:
+        return "technical"
+    if fundamental and not technical:
+        return "fundamental"
+    # 两者都命中（"只看基本面和技术面"）等价于 both，回落默认。
+    return None
+
+
+_ANALYSIS_TYPE_EXCLUSIVE = ("只看", "仅看", "单看", "只做", "仅做", "只分析", "仅分析", "只给", "仅给")
+_TECHNICAL_WORDS = ("技术面", "技术", "k线", "K线", "指标", "走势", "行情", "量价")
+_FUNDAMENTAL_WORDS = ("基本面", "财务", "估值", "业绩", "财报")
 
 
 def _extract_negated_names(message: str) -> List[str]:
@@ -499,6 +500,9 @@ def _deterministic_extract(message: str, intent: str) -> Dict[str, Any]:
                 slots[_SLOT_NAMES] = names
         if excluded:
             slots[_SLOT_EXCLUDED] = excluded
+        analysis_type = _extract_analysis_type(message)
+        if analysis_type:
+            slots["analysis_type"] = analysis_type
     elif intent == "stock_recommendation":
         slots[_SLOT_CODES] = codes
         themes = _strip_theme_noise(message)
@@ -506,17 +510,6 @@ def _deterministic_extract(message: str, intent: str) -> Dict[str, Any]:
             slots[_SLOT_THEMES] = _as_text_list(themes)[:5]
         if excluded:
             slots[_SLOT_EXCLUDED] = excluded
-    elif intent == "asset_allocation":
-        slots[_SLOT_CODES] = codes
-        amount = _extract_amount(message)
-        if amount is not None:
-            slots["budget_amount"] = amount
-        risk = _extract_risk(message)
-        if risk:
-            slots["risk_preference"] = risk
-        horizon = _extract_horizon(message)
-        if horizon:
-            slots["holding_period"] = horizon
     elif intent == "product_analysis":
         product_codes = _product_codes_from_text(message)
         if product_codes:
@@ -524,7 +517,7 @@ def _deterministic_extract(message: str, intent: str) -> Dict[str, Any]:
         products = _candidate_product_names(message)
         if products:
             slots["product_names"] = products
-        # 产品适配判断需要画像：与资产配置用同一套确定性抽取。
+        # 产品适配判断需要画像：确定性抽取风险偏好与期限。
         risk = _extract_risk(message)
         if risk:
             slots["risk_preference"] = risk
@@ -614,16 +607,12 @@ def _resolve_slots(intent: str, raw: Dict[str, Any], prior: Dict[str, Any]) -> D
         if themes:
             result[_SLOT_THEMES] = themes
         result["limit"] = int(_as_number(merged.get("limit"), 5) or 5)
-    elif intent == "asset_allocation":
-        for field in ("budget_amount", "risk_preference", "holding_period"):
-            if merged.get(field) not in (None, ""):
-                result[field] = merged[field]
     elif intent == "product_analysis":
         result[_SLOT_PRODUCT_CODES] = list(dict.fromkeys(
             _as_product_code_list(merged.get(_SLOT_PRODUCT_CODES))
         ))[:10]
         result["product_names"] = _as_text_list(merged.get("product_names"))
-        # 画像字段与资产配置同义：产品适配判断需要风险偏好与持有期限。
+        # 画像字段：产品适配判断需要风险偏好与持有期限。
         for field in ("risk_preference", "holding_period"):
             if merged.get(field) not in (None, ""):
                 result[field] = merged[field]
@@ -734,19 +723,12 @@ class SlotExtractor:
                     clarification.append(
                         f"您提到的「{a.get('name', '')}」可能指{candidates}，请确认具体标的。"
                     )
-            elif intent == "asset_allocation":
-                for entry in entries:
-                    if entry["code"] not in profile_from_slots.get("stock_codes", []):
-                        profile_from_slots.setdefault("stock_codes", []).append(entry["code"])
-                for field in ("budget_amount", "risk_preference", "holding_period"):
-                    if resolved.get(field) not in (None, ""):
-                        profile_from_slots[field] = resolved[field]
             elif intent == "product_analysis":
                 slots_by_intent[intent][_SLOT_PRODUCT_CODES] = _as_product_code_list(
                     resolved.get(_SLOT_PRODUCT_CODES)
                 )
                 slots_by_intent[intent]["product_names"] = _as_text_list(resolved.get("product_names"))
-                # 产品请求也可能携带画像：与资产配置一致地回填缺失画像，
+                # 产品请求也可能携带画像，回填缺失画像，
                 # 否则产品适配判断对本轮请求永远不可用。
                 for field in ("risk_preference", "holding_period"):
                     if resolved.get(field) not in (None, ""):
@@ -758,7 +740,7 @@ class SlotExtractor:
         if explicit_codes:
             state["explicit_user_stock_codes"] = list(dict.fromkeys(explicit_codes))
 
-        # 资产配置：抽取后仅填充画像缺失字段（不覆盖已确认画像）
+        # 画像回填：抽取后仅填充画像缺失字段（不覆盖已确认画像）
         if profile_from_slots:
             profile = dict(state.get("user_profile", {}) or {})
             for key, value in profile_from_slots.items():

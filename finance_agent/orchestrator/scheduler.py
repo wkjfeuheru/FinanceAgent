@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
@@ -10,6 +11,8 @@ from typing import Any, Callable
 from pydantic import ValidationError
 
 from finance_agent.contracts import ExpertResult, ExpertStatus, Task, TaskStatus
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -100,7 +103,10 @@ def execute_task_with_retry(
                 },
             }
         except Exception as exc:  # noqa: BLE001
-            last_error = str(exc) or "task_error"
+            # 异常原文可能含内部路径/连接串/校验细节，只进日志，不进用户可见的
+            # summary 与 warnings（error_code 会随响应透出）。
+            logger.warning("任务 %s(%s) 执行异常", task.task_id, task.expert_name, exc_info=exc)
+            last_error = "task_error"
         finally:
             # timeout 后不等待失控的专家线程；Python 线程本身不能被强制杀死，
             # 但 future 已取消，任务生命周期由 deadline 控制。
@@ -108,7 +114,8 @@ def execute_task_with_retry(
         if time.monotonic() - started >= float(deadline_seconds):
             return _failure(task, status=ExpertStatus.TIMEOUT, error_code="task_deadline", summary="任务超过总超时时间")
     status = ExpertStatus.TIMEOUT if last_error == "task_timeout" else ExpertStatus.FAILED
-    return _failure(task, status=status, error_code=last_error, summary="任务执行失败：" + last_error)
+    summary = "任务超时，未能在限定时间内完成。" if status is ExpertStatus.TIMEOUT else "任务执行失败，请稍后重试。"
+    return _failure(task, status=status, error_code=last_error, summary=summary)
 
 
 def run_task_dag(

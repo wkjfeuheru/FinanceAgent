@@ -120,33 +120,6 @@ class RedisMemoryStore:
             return []
         return [json.loads(value) for value in values]
 
-    def set_window_messages(
-        self,
-        conversation_id: str,
-        messages: list[dict[str, Any]],
-        window_size: int = 5,
-    ) -> bool:
-        """用给定消息列表替换指定对话的滑动窗口。"""
-        try:
-            client = self._get_client()
-            key = self._window_key(conversation_id)
-            client.delete(key)
-            for msg in messages[-window_size:]:
-                payload = {
-                    "role": msg.get("role", ""),
-                    "content": msg.get("content", ""),
-                    "metadata": msg.get("metadata", {}),
-                    "timestamp": msg.get("timestamp", datetime.now().isoformat(timespec="seconds")),
-                }
-                client.rpush(key, json.dumps(payload, ensure_ascii=False))
-            if messages[-window_size:]:
-                client.expire(key, self.ttl_seconds)
-            self._last_error = ""
-            return True
-        except redis.RedisError as exc:
-            self._last_error = str(exc)
-            return False
-
     # ── 对话级摘要 ─────────────────────────────────────────────
 
     def get_summary(self, conversation_id: str) -> str:
@@ -193,33 +166,6 @@ class RedisMemoryStore:
         """对话级滑动窗口键。"""
         return f"finance_cs:conv:{conversation_id}:window"
 
-    def set_short_cache(self, namespace: str, key: str, value: Any, ttl_seconds: int | None = None) -> bool:
-        """写入带 TTL 的临时事实缓存，不承担业务事实持久化。"""
-        try:
-            self._get_client().set(
-                self._cache_key(namespace, key),
-                json.dumps(value, ensure_ascii=False),
-                ex=ttl_seconds or self.ttl_seconds,
-            )
-            self._last_error = ""
-            return True
-        except redis.RedisError as exc:
-            self._last_error = str(exc)
-            return False
-
-    def get_short_cache(self, namespace: str, key: str) -> Any | None:
-        """读取临时事实缓存；Redis 故障或缓存缺失均返回 None。"""
-        try:
-            value = self._get_client().get(self._cache_key(namespace, key))
-            self._last_error = ""
-            return json.loads(value) if value else None
-        except (redis.RedisError, json.JSONDecodeError) as exc:
-            self._last_error = str(exc)
-            return None
-
-    def _cache_key(self, namespace: str, key: str) -> str:
-        return f"finance_cs:cache:{namespace}:{key}"
-
     def clear_conversation(self, conversation_id: str) -> bool:
         """清除指定对话的记忆数据（窗口 + 摘要）。"""
         try:
@@ -240,7 +186,7 @@ class AgentMemoryContext:
     """按对话隔离的 Agent 记忆上下文。
 
     三层记忆：
-    1. 用户档案卡 —— checkpoint 持久化，跨对话共享（风险偏好、预算等）
+    1. 用户档案卡 —— Postgres 业务库持久化，跨对话共享（风险偏好、预算等）
     2. 对话摘要 —— 当前对话的压缩历史（Redis，按 conversation_id）
     3. 滑动窗口 —— 当前对话的最近 N 条消息（Redis，按 conversation_id）
 

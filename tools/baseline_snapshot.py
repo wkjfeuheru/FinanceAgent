@@ -65,7 +65,6 @@ def _build_system() -> AdvisorSystem:
     system.stock_agent = StockAnalysisAgent(pipeline=ResearchPipeline(
         snapshot_builder=SnapshotBuilder(Gateway()), rule_engine=RuleEngine.default(),
     ))
-    system.allocation_agent = type("A", (), {"invoke": lambda self, s: s})()
     system.product_agent = type("P", (), {"invoke": lambda self, s: s})()
     system.casual_chat_agent = type("C", (), {"invoke": lambda self, s: s})()
     system.slot_extractor = type("Slots", (), {"extract": lambda self, s: s})()
