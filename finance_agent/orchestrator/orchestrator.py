@@ -96,6 +96,52 @@ class AdvisorSystem:
             return manager
         return ManagerAgent()
 
+    def _get_async_run_repository(self):
+        if getattr(self, "_async_run_repository", None) is None:
+            from finance_agent.config import get_postgres_connection_factory
+            from finance_agent.faq.repository import PostgresAsyncRunRepository
+
+            self._async_run_repository = PostgresAsyncRunRepository(
+                get_postgres_connection_factory()
+            )
+        return self._async_run_repository
+
+    def _get_quant_gateway(self):
+        if getattr(self, "_quant_gateway", None) is None:
+            from finance_agent.orchestrator.quant import CeleryQuantGateway
+
+            self._quant_gateway = CeleryQuantGateway(
+                async_repository=self._get_async_run_repository()
+            )
+        return self._quant_gateway
+
+    # 查询异步运行状态：先校验客户归属，再读取状态并尝试恢复。
+    def resolve_run_status(self, task_id: str, customer_id: str) -> Dict[str, Any]:
+        repository = self._get_async_run_repository()
+        job = repository.get_job_ref(task_id, customer_id)
+        if job is None:
+            return {
+                "run_status": "not_found",
+                "task_id": task_id,
+                "response": "",
+                "conversation_id": "",
+            }
+        status = self._get_quant_gateway().status(task_id)
+        run_status = {
+            "queued": "processing",
+            "running": "processing",
+            "completed": "completed",
+            "failed": "failed",
+            "cancelled": "cancelled",
+        }.get(status, "processing")
+        return {
+            "run_status": run_status,
+            "task_id": task_id,
+            "response": "" if run_status != "completed" else "量化任务已完成。",
+            "conversation_id": "",
+            "warnings": [],
+        }
+
     def _get_faq_retriever(self):
         if getattr(self, "_faq_retriever", None) is None:
             from finance_agent.config import get_postgres_connection_factory

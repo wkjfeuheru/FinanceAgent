@@ -54,6 +54,7 @@ class RootState(TypedDict, total=False):
     warnings: list[str]
     task_results: dict[str, dict[str, Any]]
     domain_outcomes: dict[str, dict[str, Any]]
+    compliance: dict[str, Any]
     single_task_id: str
 
 
@@ -256,12 +257,35 @@ def build_root_graph(dependencies: RootGraphDependencies):
             return "plan"
         return "conversation"
 
+    def compliance_node(state: RootState) -> dict[str, Any]:
+        """所有执行模式的成功/部分/降级输出都必须经过合规出口。"""
+        from finance_agent.orchestrator.compliance import run_compliance
+
+        outcome_refs: list[dict[str, Any]] = []
+        for value in (state.get("task_results", {}) or {}).values():
+            if isinstance(value, dict):
+                for ref in value.get("evidence", []) or []:
+                    if isinstance(ref, dict):
+                        outcome_refs.append(
+                            {"fact_id": str(ref.get("uri", "")), "value": ref.get("content_hash", "")}
+                        )
+        result = run_compliance(draft=str(state.get("final_response", "")), evidence=outcome_refs)
+        updates: dict[str, Any] = {
+            "compliance": result.model_dump(mode="json"),
+            "final_response": result.response,
+        }
+        if result.action == "blocked":
+            updates["run_status"] = "failed"
+            updates["warnings"] = list(state.get("warnings", []) or []) + ["compliance_blocked"]
+        return updates
+
     graph = StateGraph(RootState)
     graph.add_node("classify", classify_node)
     graph.add_node("conversation", conversation_node)
     graph.add_node("clarify", clarify_node)
     graph.add_node("single_domain", single_domain_node)
     graph.add_node("plan", plan_node)
+    graph.add_node("compliance", compliance_node)
     graph.add_edge(START, "classify")
     graph.add_conditional_edges(
         "classify",
@@ -274,7 +298,8 @@ def build_root_graph(dependencies: RootGraphDependencies):
         },
     )
     for node in ("conversation", "clarify", "single_domain", "plan"):
-        graph.add_edge(node, END)
+        graph.add_edge(node, "compliance")
+    graph.add_edge("compliance", END)
     return graph.compile()
 
 

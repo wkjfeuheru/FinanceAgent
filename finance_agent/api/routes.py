@@ -235,6 +235,17 @@ def _require_customer_id(request: Request) -> str:
     return customer_id
 
 
+@router.get("/api/runs/{task_id}")
+async def get_run_status(http_request: Request, task_id: str) -> dict[str, Any]:
+    """查询异步运行状态；先校验客户归属再读取异步状态或恢复图。"""
+    customer_id = _require_customer_id(http_request)
+    system = get_system()
+    resolver = getattr(system, "resolve_run_status", None)
+    if resolver is None:
+        raise HTTPException(status_code=404, detail="运行不存在")
+    return resolver(task_id, customer_id)
+
+
 def _authorize_customer(request: Request, path_customer_id: str) -> str:
     """要求已登录，且路径中的 customer_id 必须等于登录用户，否则 403。"""
     current = _require_customer_id(request)
