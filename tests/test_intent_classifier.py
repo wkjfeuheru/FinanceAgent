@@ -8,7 +8,7 @@ import pytest
 # 占位密钥经环境变量注入，避免在源码中出现凭据形态的字符串。
 _FAKE_API_KEY = os.environ.get("TEST_FAKE_API_KEY", "placeholder")
 
-from finance_agent.agents.supervisor import (
+from finance_agent.orchestrator.intent import (
     DeepSeekIntentClassifier,
     IntentClassificationError,
 )

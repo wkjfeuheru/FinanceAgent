@@ -1,4 +1,4 @@
-"""产品专家确定性流水线接入测试。"""
+"""产品领域确定性流水线接入测试（面向领域模块）。"""
 
 from __future__ import annotations
 
@@ -7,7 +7,11 @@ from finance_agent.product_research.contracts import (
     ProductFieldEvidence,
     ProductResearchResult,
 )
-from finance_agent.agents.product_analysis import ProductAnalysisAgent
+from finance_agent.orchestrator.domains.product import (
+    ProductDomainDeps,
+    build_product_request,
+    invoke_product,
+)
 
 
 class _StaticPipeline:
@@ -50,9 +54,9 @@ def _one_product_result() -> ProductResearchResult:
     )
 
 
-def test_product_agent_does_not_construct_product_snapshot_from_message_code():
+def test_product_domain_does_not_construct_snapshot_from_message_code():
     pipeline = _StaticPipeline(_empty_result())
-    state = ProductAnalysisAgent(pipeline=pipeline).invoke({
+    state = invoke_product(ProductDomainDeps(pipeline=pipeline), {
         "user_message": "请分析110011基金",
         "intent_slots": {"product_analysis": {"product_codes": ["110011"]}},
         "user_profile": {},
@@ -64,9 +68,9 @@ def test_product_agent_does_not_construct_product_snapshot_from_message_code():
     assert state["intent_results"]["product_analysis"]["status"] == "degraded"
 
 
-def test_product_agent_writes_typed_result_and_product_facts():
+def test_product_domain_writes_typed_result_and_product_facts():
     pipeline = _StaticPipeline(_one_product_result())
-    state = ProductAnalysisAgent(pipeline=pipeline).invoke({
+    state = invoke_product(ProductDomainDeps(pipeline=pipeline), {
         "user_message": "分析示例基金",
         "intent_slots": {"product_analysis": {"product_names": ["示例基金"]}},
         "user_profile": {},
@@ -81,9 +85,8 @@ def test_product_agent_writes_typed_result_and_product_facts():
     assert state["agent_response"].startswith("示例基金")
 
 
-def test_product_agent_reads_profile_from_task_context_when_state_projection_is_minimal():
-    pipeline = _StaticPipeline(_empty_result())
-    ProductAnalysisAgent(pipeline=pipeline).invoke({
+def test_product_request_reads_profile_from_task_context_when_state_projection_is_minimal():
+    request = build_product_request({
         "user_message": "分析示例基金",
         "task_context": {
             "slots": {"product_codes": ["P001"]},
@@ -92,6 +95,5 @@ def test_product_agent_reads_profile_from_task_context_when_state_projection_is_
         "facts": [],
     })
 
-    request = pipeline.requests[0]
     assert request.product_codes == ["P001"]
     assert request.profile == {"risk_preference": "稳健", "holding_period": "long"}

@@ -2,7 +2,7 @@
 
 import uuid
 
-from finance_agent.contracts import ExpertResult, ExpertStatus, IntentKind, RequestEnvelope, Task, generate_identifiers
+from finance_agent.contracts import RequestEnvelope, generate_identifiers
 from finance_agent.data.postgres_repository import PostgresAuditStore
 
 
@@ -89,35 +89,8 @@ def test_audit_store_create_run_flow():
     assert any("finance.agent_runs" in s for s in statements)
 
 
-def test_orchestrator_audit_expert_result():
-    from finance_agent.orchestrator.orchestrator import AdvisorSystem
-
-    class _RecordingAudit:
-        def __init__(self):
-            self.calls = []
-
-        def is_available(self):
-            return True
-
-        def upsert_expert_result(self, run_id, trace_id, result):
-            self.calls.append((run_id, trace_id, result.expert_name))
-
-    system = object.__new__(AdvisorSystem)
-    system.audit = _RecordingAudit()
-    state = {"run_id": "run-1", "trace_id": "trace-1", "stock_analysis": {"600519": {}}}
-    system._audit_expert_result(state, "stock_analysis")
-
-    assert len(system.audit.calls) == 1
-    assert system.audit.calls[0] == ("run-1", "trace-1", "stock_analysis")
-
-
 def test_orchestrator_persists_structured_stock_research_with_snapshot_manifest():
-    """防止专家审计只保存文本而遗漏确定性研究的重放输入。
-
-    研究审计由 ``_audit_research_results`` 负责（调用方在合并回本任务状态后
-    触发一次），``_audit_expert_result`` 不再自行触发它——否则会用尚未合并的
-    共享状态写库。
-    """
+    """防止审计只保存文本而遗漏确定性研究的重放输入。"""
     from datetime import datetime, timezone
     from finance_agent.contracts import FactSnapshot
     from finance_agent.orchestrator.orchestrator import AdvisorSystem
@@ -162,84 +135,9 @@ def test_orchestrator_persists_structured_stock_research_with_snapshot_manifest(
     assert manifest[0]["payload"] == {"code": "600519"}
 
 
-def test_expert_result_audit_does_not_write_research_rows():
-    """股票专家审计不得自行触发研究审计（避免用未合并状态覆盖历史行）。
-
-    研究审计只在任务结果合并回共享状态后由调用方触发一次。
-    """
-    from finance_agent.orchestrator.orchestrator import AdvisorSystem
-
-    class _RecordingAudit:
-        def __init__(self):
-            self.expert_calls = 0
-            self.research_calls = 0
-
-        def is_available(self):
-            return True
-
-        def upsert_expert_result(self, *args):
-            self.expert_calls += 1
-
-        def save_research_result(self, *args, **kwargs):
-            self.research_calls += 1
-
-        def save_research_run(self, **kwargs):
-            self.research_calls += 1
-
-    system = object.__new__(AdvisorSystem)
-    system.audit = _RecordingAudit()
-    state = {
-        "run_id": "run-1", "trace_id": "trace-1", "stock_analysis": {"600519": {}},
-        "analysis_results": [{
-            "request": {"kind": "single_stock", "stock_codes": ["600519"]},
-            "action": "关注", "data_quality": "complete", "rule_version": "research_rules/v1",
-            "scores": {}, "evidence_ids": [], "personalization_status": "research_candidate",
-            "restrictions": [], "narrative": "", "report_mode": "deterministic",
-        }],
-    }
-
-    system._audit_expert_result(state, "stock_analysis")
-
-    assert system.audit.expert_calls == 1
-    assert system.audit.research_calls == 0, "研究审计不由专家审计触发"
-
-
-def test_task_result_keeps_research_rule_and_snapshot_fact_ids():
-    """股票研究审计必须直接引用规则版本和原始快照事实。"""
-    from datetime import datetime, timezone
-    from finance_agent.contracts import FactSnapshot
-    from finance_agent.orchestrator.orchestrator import AdvisorSystem
-
-    system = object.__new__(AdvisorSystem)
-    task = Task(
-        task_id="task-1",
-        intent=IntentKind.STOCK_ANALYSIS,
-        expert_name="stock_analysis",
-    )
-    state = {
-        "intent_results": {"stock_analysis": {"status": "success", "content": "完成"}},
-        "analysis_results": [{
-            "rule_version": "research_rules/v1",
-            "evidence_ids": ["stock_snapshot:600519:fixture"],
-        }],
-        "facts": [FactSnapshot(
-            fact_id="stock_snapshot:600519:fixture",
-            domain="stock_research_snapshot",
-            source="fixture",
-            fetched_at=datetime.now(timezone.utc),
-            payload={"code": "600519"},
-        )],
-    }
-
-    result = system._make_task_result(state, task, "stock_analysis")
-
-    assert result.result_data["analysis_results"][0]["rule_version"] == "research_rules/v1"
-    assert "stock_snapshot:600519:fixture" in result.fact_ids
-
-
-def test_audit_manifest_written_by_stock_agent_can_be_replayed():
+def test_audit_manifest_written_by_stock_domain_can_be_replayed():
     """审计写入的清单必须自带重放输入，且能复算出同一结论。"""
-    from finance_agent.agents.stock_analysis import StockAnalysisAgent
+    from finance_agent.orchestrator.domains.stock import StockDeps, invoke_stock
     from finance_agent.orchestrator.orchestrator import AdvisorSystem
     from finance_agent.research.pipeline import ResearchPipeline
     from finance_agent.research.replay import replay_research_run
@@ -263,10 +161,13 @@ def test_audit_manifest_written_by_stock_agent_can_be_replayed():
                                "fetched_at": fetched_at},
             }
 
-    agent = StockAnalysisAgent(pipeline=ResearchPipeline(
-        snapshot_builder=SnapshotBuilder(Gateway()), rule_engine=RuleEngine.default(),
-    ))
-    state = agent.invoke({
+    deps = StockDeps(
+        pipeline=ResearchPipeline(
+            snapshot_builder=SnapshotBuilder(Gateway()), rule_engine=RuleEngine.default(),
+        ),
+        injected_pipeline=True,
+    )
+    state = invoke_stock(deps, {
         "requirement": "分析600519", "resolved_stocks": [{"code": "600519"}],
         "user_profile": {}, "intent_results": {}, "current_task_intent": "stock_analysis",
         "run_id": "run-1", "trace_id": "trace-1", "customer_id": "CUST001", "thread_id": "conv-1",

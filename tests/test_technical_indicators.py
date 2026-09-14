@@ -6,9 +6,9 @@ K 线不足或字段缺失时诚实跳过，绝不因此让整批任务失败。
 
 from __future__ import annotations
 
-from finance_agent.agents.stock_analysis import (
+from finance_agent.orchestrator.domains.stock import (
     _MIN_TECHNICAL_BARS,
-    StockAnalysisAgent,
+    compute_technical_indicators,
 )
 from finance_agent.orchestrator.tools.technical import (
     calc_macd,
@@ -37,8 +37,7 @@ def _stock_data(code: str, bars: int = 120, **kwargs) -> dict:
 
 def test_indicators_computed_for_requested_code():
     """足够的 OHLC 历史应产出六类指标与汇总信号。"""
-    agent = StockAnalysisAgent()
-    result = agent._compute_technical_indicators(_stock_data("600519"), ["600519"])
+    result = compute_technical_indicators(_stock_data("600519"), ["600519"])
 
     assert set(result) == {"600519"}
     indicators = result["600519"]
@@ -50,8 +49,7 @@ def test_indicators_computed_for_requested_code():
 
 def test_indicators_skip_when_history_insufficient():
     """K 线不足最小根数时跳过该标的，不抛错。"""
-    agent = StockAnalysisAgent()
-    result = agent._compute_technical_indicators(
+    result = compute_technical_indicators(
         _stock_data("600519", bars=_MIN_TECHNICAL_BARS - 1), ["600519"],
     )
 
@@ -60,33 +58,30 @@ def test_indicators_skip_when_history_insufficient():
 
 def test_indicators_skip_when_ohlc_missing():
     """只有收盘价（无 high/low）时跳过，避免算出误导性的 KDJ/WR。"""
-    agent = StockAnalysisAgent()
     data = {"600519": {"history": {
         "adjustment": "forward",
         "data": [{"date": f"2026-01-{i % 28 + 1:02d}", "close": 10.0 + i * 0.1}
                  for i in range(120)],
     }}}
 
-    assert agent._compute_technical_indicators(data, ["600519"]) == {}
+    assert compute_technical_indicators(data, ["600519"]) == {}
 
 
 def test_indicators_isolated_per_code():
     """一只历史不足不影响另一只；异常被隔离在单只标的。"""
-    agent = StockAnalysisAgent()
     data = {
         "600519": {"history": _history("600519", 120)},
         "000001": {"history": {"adjustment": "forward", "data": [{"close": 1.0}]}},
     }
 
-    result = agent._compute_technical_indicators(data, ["600519", "000001"])
+    result = compute_technical_indicators(data, ["600519", "000001"])
 
     assert set(result) == {"600519"}
 
 
 def test_indicators_are_display_layer_only():
     """指标输出只含技术字段，不携带评分/证据键（不污染研究管线）。"""
-    agent = StockAnalysisAgent()
-    result = agent._compute_technical_indicators(_stock_data("600519"), ["600519"])
+    result = compute_technical_indicators(_stock_data("600519"), ["600519"])
 
     summary = result["600519"]["summary"]
     assert set(summary) == {"trend", "signals", "risks", "latest_price"}
@@ -124,8 +119,7 @@ def test_compute_all_indicators_subset_selection():
 
 def test_fundamental_mode_suppresses_technical_panel():
     """analysis_type=fundamental 时不展示技术面板（用户只要基本面）。"""
-    agent = StockAnalysisAgent()
-    result = agent._compute_technical_indicators(
+    result = compute_technical_indicators(
         _stock_data("600519"), ["600519"], "fundamental",
     )
 
@@ -134,9 +128,8 @@ def test_fundamental_mode_suppresses_technical_panel():
 
 def test_both_and_technical_modes_produce_panel():
     """both 与 technical 模式都产出技术面板。"""
-    agent = StockAnalysisAgent()
     for analysis_type in ("both", "technical"):
-        result = agent._compute_technical_indicators(
+        result = compute_technical_indicators(
             _stock_data("600519"), ["600519"], analysis_type,
         )
         assert set(result) == {"600519"}, analysis_type

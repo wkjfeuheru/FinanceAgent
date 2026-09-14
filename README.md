@@ -211,8 +211,7 @@ POLICY_NEWS_MAX_DAYS=3
 POLICY_NEWS_MAX_ITEMS=50
 PRODUCT_ANALYSIS_TEMPERATURE=0.2
 
-# 混合 LangGraph 编排（默认启用 V2 根图；设为 false 才回退旧路径）
-ORCHESTRATION_V2_ENABLED=true
+# 混合 LangGraph 编排预算（单一执行路径：Root Graph）
 ORCHESTRATION_REACT_STEPS=4
 ORCHESTRATION_PLAN_TASKS=8
 ORCHESTRATION_REPLANS=2
@@ -239,7 +238,7 @@ FAQ_MIN_SCORE=0.3
 - 匿名模式已关闭，`AUTH_REQUIRED` 不需要配置，也不能通过环境变量重新开启匿名访问。
 - PostgreSQL 是唯一的关系型存储；未配置、驱动缺失或无法连接时，服务会显式失败，不会回退到 SQLite。
 - 首次连接时程序会自动创建所需 schema（含 pgvector、FAQ 与异步任务表）。
-- 混合编排默认走 V2 根图（分类 → 单领域 Domain ReAct / 复合 Plan-and-Execute → 统一合规出口）；`ORCHESTRATION_V2_ENABLED=false` 时才使用旧编排。V2 异常显式返回 `run_status="failed"`，不会静默回退旧路径。
+- 混合编排只有一条执行路径：Root Graph（分类 → 单领域 Domain ReAct / 复合 Plan-and-Execute → 统一合规出口）。异常显式返回 `run_status="failed"`，不会静默回退到任何旧路径。
 - 不要将包含真实密钥的 `.env` 文件提交到版本库。
 
 ### 3.1 FAQ 索引、Celery worker 与异步状态

@@ -1,52 +1,84 @@
-"""V2 生产路径与旧编排退役边界。
+"""V2 生产编排与旧编排退役边界。
 
-生产默认启用 V2 根图；旧路径仅在显式关闭开关时使用。此处不依赖 PostgreSQL/网络，
-只验证执行路径选择与合规出口存在。
+生产只有一条执行路径（Root Graph）；旧 Supervisor/专家 Agent、旧 DAG 调度器与
+``ORCHESTRATION_V2_ENABLED`` 开关都已删除。此处不依赖 PostgreSQL/网络。
 """
 
 from __future__ import annotations
 
-import threading
+import importlib
+import inspect
 
-from finance_agent import config
 from finance_agent.orchestrator.orchestrator import AdvisorSystem
 
 
-def test_v2_is_the_production_default():
-    """生产默认走 V2 根图；旧路径需显式关闭开关。"""
-    assert config.ORCHESTRATION_V2_ENABLED is True
+def test_legacy_agent_modules_are_deleted():
+    for legacy in (
+        "finance_agent.agents",
+        "finance_agent.agents.supervisor",
+        "finance_agent.agents.stock_analysis",
+        "finance_agent.agents.market_insight",
+        "finance_agent.agents.product_analysis",
+        "finance_agent.agents.casual_chat",
+        "finance_agent.agents.base",
+        "finance_agent.orchestrator.scheduler",
+        "finance_agent.orchestrator.context_builder",
+        "finance_agent.orchestrator.slots",
+    ):
+        try:
+            importlib.import_module(legacy)
+        except ModuleNotFoundError:
+            continue
+        raise AssertionError(f"遗留模块仍存在：{legacy}")
 
 
-def test_handle_message_dispatches_to_v2_when_enabled(monkeypatch):
+def test_orchestration_switch_is_removed():
+    from finance_agent import config
+
+    assert not hasattr(config, "ORCHESTRATION_V2_ENABLED")
+    source = inspect.getsource(AdvisorSystem)
+    assert "ORCHESTRATION_V2_ENABLED" not in source
+    assert "_handle_message_legacy" not in source
+    assert "_build_graph" not in source
+
+
+def test_handle_message_has_a_single_v2_path(monkeypatch):
+    """handle_message 直接走根图，不存在旧路径分支。"""
     system = object.__new__(AdvisorSystem)
-    system._orchestration_v2 = True
+    system._workflow_lock = __import__("threading").RLock()
     called = {}
 
-    def fake_v2(message, **kwargs):
-        called["v2"] = message
-        return {"response": "v2", "run_status": "completed"}
+    class _Root:
+        def invoke(self, state, config=None):
+            called["state"] = state
+            return {"final_response": "ok", "run_status": "completed", "task_results": {}}
 
-    monkeypatch.setattr(system, "handle_message_v2", fake_v2)
-    result = system.handle_message("你好")
+    system.root = _Root()
+    system._failed_output = lambda cid: {"response": "failed", "run_status": "failed"}
+    system._persist = lambda *a, **k: None
+    system._progress_lock = __import__("threading").Lock()
+    system._progress_callbacks = {}
+    system._progress_context = type("Ctx", (), {"callback": None})()
+    system._trace_lock = __import__("threading").Lock()
+    system._trace_sequences = {}
+    system._stop_lock = __import__("threading").Lock()
+    system._stop_requests = {}
+    system._active_runs = {}
+    system.memory = type("M", (), {
+        "window_size": 10,
+        "load_context": lambda self, c, conv, fb: {"profile": {}, "context_text": "", "sliding_window": []},
+    })()
+    system.audit = type("A", (), {"create_run": lambda *a, **k: None})()
+    system.get_checkpoint_conversation_messages = lambda *a, **k: []
+    system._emit_progress = lambda *a, **k: None
+    system._trace_agent = lambda *a, **k: None
+    from finance_agent.middleware import find_sensitive_word
+    assert find_sensitive_word("你好") is None
 
-    assert called["v2"] == "你好"
-    assert result["response"] == "v2"
+    output = system.handle_message("你好", conversation_id="c1")
 
-
-def test_handle_message_falls_back_only_when_flag_disabled(monkeypatch):
-    system = object.__new__(AdvisorSystem)
-    system._orchestration_v2 = False
-    called = {}
-
-    def legacy(message, **kwargs):
-        called["legacy"] = message
-        return {"response": "legacy"}
-
-    monkeypatch.setattr(system, "_handle_message_legacy", legacy)
-    result = system.handle_message("你好")
-
-    assert called["legacy"] == "你好"
-    assert result["response"] == "legacy"
+    assert output["response"] == "ok"
+    assert called["state"]["user_message"] == "你好"
 
 
 def test_v2_root_graph_has_mandatory_compliance_exit():

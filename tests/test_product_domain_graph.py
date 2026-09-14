@@ -45,7 +45,7 @@ def test_product_domain_returns_uniform_outcome():
     assert outcome.domain == BusinessDomain.PRODUCT_RESEARCH
     assert outcome.structured_data["mode"] == "product_lookup"
     assert "product_analysis" in outcome.structured_data
-    assert outcome.structured_data["product_analysis"]["type"] == "question"
+    assert outcome.structured_data["product_analysis"]["type"] == "deep_dive"
 
 
 def test_product_domain_pipeline_failure_returns_safe_limitations():
@@ -58,4 +58,4 @@ def test_product_domain_pipeline_failure_returns_safe_limitations():
     outcome = graph.invoke({"context": _context("分析基金000001")})["domain_outcome"]
 
     assert outcome.status == "failed"
-    assert outcome.limitations == ["tool_failed:product_lookup"]
+    assert outcome.limitations == ["product_pipeline_failed"]

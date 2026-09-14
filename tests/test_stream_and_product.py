@@ -3,26 +3,50 @@
 import asyncio
 from uuid import uuid4
 
-from finance_agent.agents.product_analysis import ProductAnalysisAgent
 from finance_agent.api.sse import build_final_response_event
 from finance_agent.contracts import ExpertResult, ExpertStatus, ResponseEnvelope
+from finance_agent.orchestrator.domains.product import ProductDomainDeps, build_product_domain_graph
 from finance_agent.orchestrator.orchestrator import AdvisorSystem
 
 
-def test_product_agent_build_result_without_pipeline_output_is_empty_not_fabricated():
-    """无流水线结果时构造兼容空结果，绝不从消息正则伪造产品代码。"""
-    agent = ProductAnalysisAgent()
-    result = agent._build_result({
-        "user_message": "请比较110011和000001基金",
-        "agent_response": "产品库暂无该产品数据",
-    })
+def test_product_domain_without_pipeline_output_is_empty_not_fabricated():
+    """无流水线结果时返回空数据，绝不从消息正则伪造产品代码。"""
+    from finance_agent.orchestrator.contracts import BusinessDomain, DomainTaskContext, PlanTask
 
-    assert result["type"] == "comparison"
-    # 代码只能来自产品库解析；消息里的数字不得被当作已解析产品。
-    assert result["product_codes"] == []
-    assert result["products"] == []
-    assert result["data_quality"] == "critical_missing"
-    assert result["report"] == "产品库暂无该产品数据"
+    class _EmptyPipeline:
+        def analyze(self, request):
+            from finance_agent.product_research.contracts import ProductResearchResult
+
+            return ProductResearchResult(
+                kind="comparison",
+                product_codes=list(request.product_codes),
+                assessments=[],
+                report="产品库暂无该产品数据。",
+                data_quality="critical_missing",
+            )
+
+    context = DomainTaskContext(
+        task=PlanTask(
+            task_id="single:run-1:product_research",
+            domain=BusinessDomain.PRODUCT_RESEARCH,
+            goal="请比较110011和000001基金",
+            instruction="请比较110011和000001基金",
+            expected_output="domain_outcome",
+        ),
+        thread_id="v1:CUST1:conv-1",
+        customer_id="CUST1",
+        conversation_id="conv-1",
+        user_message="请比较110011和000001基金",
+    )
+    graph = build_product_domain_graph(deps=ProductDomainDeps(pipeline=_EmptyPipeline()))
+
+    outcome = graph.invoke({"context": context})["domain_outcome"]
+    payload = outcome.structured_data["product_analysis"]
+
+    assert payload["type"] == "comparison"
+    assert payload["products"] == []
+    assert payload["data_quality"] == "critical_missing"
+    assert payload["report"] == "产品库暂无该产品数据。"
 
 
 def test_final_sse_event_keeps_legacy_response_shape():

@@ -1,8 +1,8 @@
-"""监督者 Agent。
+"""领域意图分类器（原 Supervisor 的分类职责）。
 
-职责：根据用户当前问题选择需要执行的子 Agent，并给出执行顺序。
-
-不处理具体业务，仅做编排决策。
+只负责“属于哪个业务领域”，不再承担任务生成或响应拼装——那两项分别由
+Root Graph 的路由（``orchestrator/root_graph.py``）与合规出口
+（``orchestrator/compliance.py``）承担。分类协议错误必须显式上报，不得静默猜测。
 """
 
 from __future__ import annotations
@@ -11,27 +11,19 @@ import json
 import logging
 import math
 import time
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict
 
 import requests
 
-from finance_agent.agents.base import ProceduralAgent
-from finance_agent.contracts.adapters import (
-    dispatch_plan_to_legacy,
-    normalize_dispatch_plan,
-    task_plan_to_legacy,
-)
 from finance_agent.config import (
+    INTENT_MODEL,
     INTENT_MODEL_API_KEY,
     INTENT_MODEL_BASE_URL,
     INTENT_MODEL_DEADLINE,
     INTENT_MODEL_MAX_RETRIES,
     INTENT_MODEL_MAX_TOKENS,
-    INTENT_MODEL,
     INTENT_MODEL_TIMEOUT,
 )
-from finance_agent.middleware import OUTPUT_BLOCKED_RESPONSE, check_sensitive_words
-
 
 _INTENT_CLASSIFIER_PROMPT = """你是金融工作流的多意图分类器，只分类当前用户消息，不回答问题。
 近期上下文摘要只能用于解析“它、这些股票”等指代，不得从上下文新增当前消息未表达的意图。
@@ -69,7 +61,7 @@ _INTENT_CONFIDENCE_THRESHOLD = 0.9
 
 
 class IntentClassificationError(RuntimeError):
-    """DeepSeek 意图识别不可用或返回非法协议。"""
+    """意图识别不可用或返回非法协议。"""
 
     def __init__(self, message: str, *, error_code: str, cause: str) -> None:
         super().__init__(message)
@@ -78,7 +70,7 @@ class IntentClassificationError(RuntimeError):
 
 
 class DeepSeekIntentClassifier:
-    """通过 Qwen OpenAI 兼容接口执行多轮上下文意图分类。"""
+    """通过 OpenAI 兼容接口执行多轮上下文意图分类。"""
 
     def __init__(
         self,
@@ -255,7 +247,7 @@ _LOGGER = logging.getLogger(__name__)
 def normalize_intent_item(
     item: Dict[str, Any], fallback_query: str,
 ) -> Dict[str, Any] | None:
-    """Validate one supervisor intent and attach its executable routing plan."""
+    """校验单条意图并补齐其可执行路由字段。"""
     intent = str(item.get("intent", "")).strip()
     if intent not in _INTENTS:
         return None
@@ -302,15 +294,11 @@ def normalize_intent_item(
     }
 
 
-class ManagerAgent(ProceduralAgent):
-    """总管 Agent —— 负责意图识别、路由和最终响应合成。"""
+class IntentClassifier:
+    """合并本轮全部意图，产出三领域路由所需的分类结果。"""
 
-    agent_name: str = "supervisor"
-
-    def __init__(self, checkpointer=None):
-        super().__init__()
-        self._checkpointer = checkpointer
-        self._intent_classifier = None
+    def __init__(self, *, classifier: Any = None) -> None:
+        self._intent_classifier = classifier
 
     @property
     def intent_classifier(self) -> DeepSeekIntentClassifier:
@@ -326,11 +314,7 @@ class ManagerAgent(ProceduralAgent):
             )
         return self._intent_classifier
 
-    def _classify_with_deepseek(
-        self,
-        message: str,
-        context_summary: str,
-    ) -> Dict[str, Any]:
+    def _classify_with_model(self, message: str, context_summary: str) -> Dict[str, Any]:
         return self.intent_classifier.classify(message, context_summary)
 
     def classify_intents(
@@ -338,14 +322,14 @@ class ManagerAgent(ProceduralAgent):
         message: str,
         context_summary: str = "",
     ) -> Dict[str, Any]:
-        """使用 DeepSeek 结合近期摘要识别并合并本轮全部意图。"""
+        """结合近期摘要识别并合并本轮全部意图。"""
         source = "deepseek"
         classification_error = False
         classification_error_details: dict[str, str] = {}
         try:
-            parsed = self._classify_with_deepseek(message, context_summary)
+            parsed = self._classify_with_model(message, context_summary)
         except Exception as exc:
-            _LOGGER.warning("intent_deepseek_unavailable error=%s", exc)
+            _LOGGER.warning("intent_classifier_unavailable error=%s", exc)
             parsed = {}
             classification_error = True
             classification_error_details = {
@@ -364,7 +348,6 @@ class ManagerAgent(ProceduralAgent):
                 if not isinstance(raw_item, dict):
                     continue
                 candidate = dict(raw_item)
-                intent = str(candidate.get("intent", "")).strip()
                 item = normalize_intent_item(candidate, message)
                 if item is None:
                     continue
@@ -395,9 +378,8 @@ class ManagerAgent(ProceduralAgent):
             finance_related = False
             uncertain = []
         elif not merged and not uncertain:
-            # 模型返回了 intents，但没有一条通过校验（未知意图/非当前轮证据/
-            # 置信度<=0）。这是分类失败，必须带上原因，否则编排层只看到空字典
-            # 会误判成功，落到含糊的"暂时无法生成回复"。
+            # 模型返回了 intents，但没有一条通过校验。必须标记分类失败，
+            # 否则编排层只看到空字典会误判成功。
             source = "classification_error"
             finance_related = False
             classification_error_details = {
@@ -427,72 +409,10 @@ class ManagerAgent(ProceduralAgent):
             "classification_error": classification_error_details,
         }
 
-    def dispatch_tasks(self, state: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """在单一总管节点内识别意图并生成轻量专家路由。"""
-        message = str(state.get("user_message", ""))
-        classified = self.classify_intents(
-            message,
-            str(state.get("memory_context", "")),
-        )
-        plan = normalize_dispatch_plan(classified.get("intents", []), message)
-        state["tasks"] = plan.tasks
-        dispatch = dispatch_plan_to_legacy(plan)
-        state["detected_intents"] = classified.get("intents", [])
-        state["uncertain_intents"] = classified.get("uncertain_intents", [])
-        state["finance_related"] = classified.get("finance_related", False)
-        state["classification_error"] = classified.get("classification_error", {})
-        state["task_dispatch"] = dispatch
-        state["task_plan"] = task_plan_to_legacy(plan)
-        return dispatch
 
-    def synthesize_response(self, state: Dict[str, Any]) -> str:
-        """按用户友好顺序合并专家结果，并附加风险提示。"""
-        task_results = state.get("task_results", {}) or {}
-        tasks = state.get("tasks", []) or []
-        if task_results and tasks:
-            sections = []
-            for task in tasks:
-                result = task_results.get(task.task_id)
-                if not result:
-                    continue
-                if hasattr(result, "summary"):
-                    content = result.summary
-                    status = result.status.value
-                else:
-                    content = str(result.get("summary", result.get("content", ""))).strip()
-                    status = str(result.get("status", "success"))
-                if content:
-                    sections.append(content)
-                elif status in {"failed", "degraded", "timeout", "blocked"}:
-                    sections.append(f"{task.intent.value if task.intent else task.task_id}：暂无可用数据。")
-            response = "\n\n".join(sections).strip()
-            if response:
-                if check_sensitive_words(response):
-                    response = OUTPUT_BLOCKED_RESPONSE
-                elif "风险提示" not in response:
-                    response += "\n\n### 风险提示\n以上内容仅供参考，不构成投资建议。投资有风险，决策需谨慎。"
-                state["agent_response"] = response
-                return response
-        results = state.get("intent_results", {}) or {}
-        sections = []
-        for intent in ("casual_chat", "market_insight", "stock_analysis", "stock_recommendation", "product_analysis"):
-            result = results.get(intent, {})
-            if not isinstance(result, dict):
-                continue
-            content = str(result.get("content", "")).strip()
-            if content:
-                sections.append(content)
-            elif result.get("status") in {"error", "degraded"}:
-                sections.append(f"{intent}：暂无可用数据。")
-        response = "\n\n".join(sections).strip()
-        if not response:
-            response = str(state.get("agent_response", "")).strip() or "暂时无法生成回复。"
-        # 输出侧合规校验：命中敏感词则整体拦截
-        if check_sensitive_words(response):
-            response = OUTPUT_BLOCKED_RESPONSE
-        elif "风险提示" not in response:
-            response += "\n\n### 风险提示\n以上内容仅供参考，不构成投资建议。投资有风险，决策需谨慎。"
-        state["agent_response"] = response
-        return response
-
-
+__all__ = [
+    "DeepSeekIntentClassifier",
+    "IntentClassificationError",
+    "IntentClassifier",
+    "normalize_intent_item",
+]

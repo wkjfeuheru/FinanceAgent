@@ -405,6 +405,8 @@ def project_root_state(state: dict[str, Any], *, conversation_id: str = "") -> d
                 "theme_screening",
                 "theme_candidates",
                 "analysis_results",
+                "facts",
+                "research_request",
             ):
                 if key in data:
                     output[key] = data[key]

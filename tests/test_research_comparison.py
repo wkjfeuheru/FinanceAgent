@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from finance_agent.agents.stock_analysis import StockAnalysisAgent
+from finance_agent.orchestrator.domains.stock import StockDeps, invoke_stock
 from finance_agent.orchestrator.orchestrator import AdvisorSystem
 from finance_agent.research.contracts import AnalysisKind, AnalysisRequest
 from finance_agent.research.legacy_adapter import project_legacy_many
@@ -90,10 +90,9 @@ def test_comparison_legacy_projection_keeps_per_code_conclusions():
     assert projected["analysis_results"][0]["request"]["stock_codes"] == ["600519"]
 
 
-def test_stock_agent_publishes_two_conclusions_and_run_level_request():
-    agent = StockAnalysisAgent(pipeline=_pipeline())
-
-    state = agent.invoke({
+def test_stock_domain_publishes_two_conclusions_and_run_level_request():
+    state = invoke_stock(
+        StockDeps(pipeline=_pipeline(), injected_pipeline=True), {
         "requirement": "比较600519和600036哪个好",
         "resolved_stocks": [{"code": "600519"}, {"code": "600036"}],
         "user_profile": {}, "intent_results": {}, "current_task_intent": "stock_analysis",
@@ -110,8 +109,7 @@ def test_stock_agent_publishes_two_conclusions_and_run_level_request():
 
 
 def _audit_state() -> tuple[dict, dict]:
-    agent = StockAnalysisAgent(pipeline=_pipeline())
-    state = agent.invoke({
+    state = invoke_stock(StockDeps(pipeline=_pipeline(), injected_pipeline=True), {
         "requirement": "比较600519和600036哪个好",
         "resolved_stocks": [{"code": "600519"}, {"code": "600036"}],
         "user_profile": {}, "intent_results": {}, "current_task_intent": "stock_analysis",

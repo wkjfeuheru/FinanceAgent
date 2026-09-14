@@ -8,7 +8,11 @@ from finance_agent.research.contracts import AnalysisKind, AnalysisRequest
 from finance_agent.research.pipeline import ResearchPipeline
 from finance_agent.research.snapshot_builder import SnapshotBuilder
 from finance_agent.research.rule_engine import RuleEngine
-from finance_agent.agents.stock_analysis import StockAnalysisAgent
+from finance_agent.orchestrator.domains.stock import (
+    StockDeps,
+    invoke_stock,
+    resolve_candidate_codes,
+)
 from finance_agent.research.screener import ThemeScreener
 from finance_agent.research.theme_models import ThemeLead
 from finance_agent.research.theme_repository import InMemoryThemeRepository
@@ -162,8 +166,7 @@ def test_pipeline_facts_carry_replay_inputs_and_stable_ids():
     assert [fact.fact_id for fact in first_facts] == [fact.fact_id for fact in second_facts]
 
 
-def test_stock_agent_projects_critical_result_as_degraded():
-    agent = StockAnalysisAgent(pipeline=CriticalPipeline())
+def test_stock_domain_projects_critical_result_as_degraded():
     state = {
         "requirement": "分析600519",
         "user_message": "分析600519",
@@ -174,15 +177,16 @@ def test_stock_agent_projects_critical_result_as_degraded():
         "current_task_intent": "stock_analysis",
     }
 
-    result = agent.invoke(state)
+    result = invoke_stock(
+        StockDeps(pipeline=CriticalPipeline(), injected_pipeline=True), state,
+    )
 
     assert result["intent_results"]["stock_analysis"]["status"] == "degraded"
     assert result["stock_analysis"]["600519"]["rating"] == "数据不足"
     assert result["analysis_results"][0]["rule_version"] == "research_rules/v1"
 
 
-def test_stock_agent_publishes_pipeline_facts_for_audit():
-    agent = StockAnalysisAgent(pipeline=_pipeline())
+def test_stock_domain_publishes_pipeline_facts_for_audit():
     state = {
         "requirement": "分析600519",
         "resolved_stocks": [{"code": "600519"}],
@@ -191,7 +195,7 @@ def test_stock_agent_publishes_pipeline_facts_for_audit():
         "current_task_intent": "stock_analysis",
     }
 
-    result = agent.invoke(state)
+    result = invoke_stock(StockDeps(pipeline=_pipeline(), injected_pipeline=True), state)
 
     evidence_ids = result["analysis_results"][0]["evidence_ids"]
     assert evidence_ids
@@ -218,7 +222,7 @@ class ThemeGateway(CompleteGateway):
     pass
 
 
-def test_stock_agent_routes_theme_request_without_candidate_search(monkeypatch):
+def test_stock_domain_routes_theme_request_without_candidate_search():
     """主题筛选不能先调用外部候选搜索。"""
     class CandidateSearch:
         called = False
@@ -228,7 +232,6 @@ def test_stock_agent_routes_theme_request_without_candidate_search(monkeypatch):
             return []
 
     search = CandidateSearch()
-    monkeypatch.setattr("finance_agent.agents.stock_analysis.search_candidates", search)
     repo = _theme_repo(5)
     lead = ThemeLead(
         theme_id="ai_compute", stock_code="601000", industry="行业0",
@@ -238,9 +241,12 @@ def test_stock_agent_routes_theme_request_without_candidate_search(monkeypatch):
     )
     repo.ingest_lead(lead)
     screener = ThemeScreener(repo, ThemeGateway())
-    agent = StockAnalysisAgent(pipeline=_pipeline(), theme_screener=screener)
+    deps = StockDeps(
+        pipeline=_pipeline(), injected_pipeline=True,
+        theme_screener=screener, candidate_search=search,
+    )
 
-    result = agent.invoke({
+    result = invoke_stock(deps, {
         "requirement": "推荐人工智能主题股票",
         "resolved_stocks": [], "intent_slots": {}, "user_profile": {},
         "intent_results": {}, "current_task_intent": "stock_recommendation",
@@ -254,11 +260,12 @@ def test_stock_agent_routes_theme_request_without_candidate_search(monkeypatch):
     assert search.called is False
 
 
-def test_stock_agent_reports_theme_coverage_shortage():
-    agent = StockAnalysisAgent(
-        pipeline=_pipeline(), theme_screener=ThemeScreener(_theme_repo(4), ThemeGateway())
+def test_stock_domain_reports_theme_coverage_shortage():
+    deps = StockDeps(
+        pipeline=_pipeline(), injected_pipeline=True,
+        theme_screener=ThemeScreener(_theme_repo(4), ThemeGateway()),
     )
-    result = agent.invoke({
+    result = invoke_stock(deps, {
         "requirement": "推荐人工智能主题股票", "resolved_stocks": [],
         "intent_slots": {}, "user_profile": {}, "intent_results": {},
         "current_task_intent": "stock_recommendation",
@@ -267,15 +274,18 @@ def test_stock_agent_reports_theme_coverage_shortage():
     assert result["theme_screening"]["candidates"] == []
 
 
-def test_stock_agent_returns_clarification_when_unknown_theme_has_no_candidates(monkeypatch):
+def test_stock_domain_returns_clarification_when_unknown_theme_has_no_candidates():
     """未注册主题改用候选搜索；无候选时澄清，且不泄露内部异常。"""
     class EmptySearch:
         def invoke(self, _payload):
             return []
 
-    monkeypatch.setattr("finance_agent.agents.stock_analysis.search_candidates", EmptySearch())
-    agent = StockAnalysisAgent(pipeline=_pipeline(), theme_screener=ThemeScreener(_theme_repo(5), ThemeGateway()))
-    result = agent.invoke({
+    deps = StockDeps(
+        pipeline=_pipeline(), injected_pipeline=True,
+        theme_screener=ThemeScreener(_theme_repo(5), ThemeGateway()),
+        candidate_search=EmptySearch(),
+    )
+    result = invoke_stock(deps, {
         "requirement": "推荐新能源主题股票", "resolved_stocks": [], "intent_slots": {},
         "user_profile": {}, "intent_results": {}, "current_task_intent": "stock_recommendation",
     })
@@ -284,7 +294,7 @@ def test_stock_agent_returns_clarification_when_unknown_theme_has_no_candidates(
     assert "validation error" not in result["agent_response"]
 
 
-def test_representative_codes_take_priority_over_keyword_search(monkeypatch):
+def test_representative_codes_take_priority_over_keyword_search():
     """主题代表股优先于关键词搜索：命中"消费"后不再调用 search_candidates。"""
     from finance_agent.research.theme_registry import InMemoryThemeRegistry, ThemeEntry
 
@@ -292,17 +302,16 @@ def test_representative_codes_take_priority_over_keyword_search(monkeypatch):
         def invoke(self, _payload):
             raise AssertionError("命中代表股时不应再做关键词搜索")
 
-    monkeypatch.setattr("finance_agent.agents.stock_analysis.search_candidates", ForbiddenSearch())
     registry = InMemoryThemeRegistry([
         ThemeEntry(theme_id="consumer", display_name="消费",
                    aliases=["消费龙头"], representative_codes=["600519", "000858"]),
     ])
-    agent = StockAnalysisAgent(pipeline=_pipeline(), theme_registry=registry)
+    deps = StockDeps(theme_registry=registry, candidate_search=ForbiddenSearch())
 
-    assert agent._resolve_candidate_codes("推荐几个消费龙头股") == ["600519", "000858"]
+    assert resolve_candidate_codes(deps, "推荐几个消费龙头股") == ["600519", "000858"]
 
 
-def test_keyword_search_used_when_no_theme_matches(monkeypatch):
+def test_keyword_search_used_when_no_theme_matches():
     """未命中任何主题时回退到关键词搜索（名称直击仍有效）。"""
     from finance_agent.research.theme_registry import InMemoryThemeRegistry
 
@@ -310,8 +319,7 @@ def test_keyword_search_used_when_no_theme_matches(monkeypatch):
         def invoke(self, _payload):
             return json.dumps([{"code": "600519", "name": "贵州茅台"}])
 
-    monkeypatch.setattr("finance_agent.agents.stock_analysis.search_candidates", FakeSearch())
-    agent = StockAnalysisAgent(pipeline=_pipeline(), theme_registry=InMemoryThemeRegistry())
+    deps = StockDeps(theme_registry=InMemoryThemeRegistry(), candidate_search=FakeSearch())
 
-    assert agent._resolve_candidate_codes("分析一下贵州茅台") == ["600519"]
+    assert resolve_candidate_codes(deps, "分析一下贵州茅台") == ["600519"]
 

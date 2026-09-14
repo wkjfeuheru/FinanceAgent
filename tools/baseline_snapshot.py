@@ -1,26 +1,20 @@
-"""行为等价基准：记录重构前后同一组输入的结构化产出，供 diff 对照。
+"""行为基准：记录一组固定输入在 V2 编排下的结构化产出，供回归对照。
 
 用法（在仓库根目录）：
-    python tools/baseline_snapshot.py > .cache/baseline_before.json
-    # 重构后
-    python tools/baseline_snapshot.py > .cache/baseline_after.json
-    # 再逐项比较两个 JSON
+    python tools/baseline_snapshot.py > .cache/baseline_v2.json
 
-使用固定的夹具数据与注入流水线，不触网、不调模型，因此结果可逐字节比较。
+使用固定夹具数据与注入流水线，不触网、不调模型，因此结果可逐字节比较。
 """
 
 from __future__ import annotations
 
 import json
 import sys
-import threading
 from typing import Any
 
-from langgraph.checkpoint.memory import MemorySaver
-
-from finance_agent.agents.stock_analysis import StockAnalysisAgent
-from finance_agent.agents.supervisor import ManagerAgent
-from finance_agent.orchestrator.orchestrator import AdvisorSystem
+from finance_agent.orchestrator.contracts import BusinessDomain, DomainTaskContext
+from finance_agent.orchestrator.domains.stock import StockDeps, build_stock_domain_graph
+from finance_agent.orchestrator.root_graph import RootGraphDependencies, build_root_graph
 from finance_agent.research.pipeline import ResearchPipeline
 from finance_agent.research.rule_engine import RuleEngine
 from finance_agent.research.snapshot_builder import SnapshotBuilder
@@ -55,96 +49,63 @@ class Gateway:
         }
 
 
-def _build_system() -> AdvisorSystem:
-    system = object.__new__(AdvisorSystem)
-    system.checkpointer = MemorySaver()
-    system.manager = ManagerAgent()
-    # 注意：注入 pipeline 是为了离线可比；但它会让专家跳过取数，
-    # 因此 `stock_analysis.basic_info` 不会出现（生产路径会合并）。
-    # 比较语义字段（结论/评分/证据ID）时应忽略该差异。
-    system.stock_agent = StockAnalysisAgent(pipeline=ResearchPipeline(
-        snapshot_builder=SnapshotBuilder(Gateway()), rule_engine=RuleEngine.default(),
-    ))
-    system.product_agent = type("P", (), {"invoke": lambda self, s: s})()
-    system.casual_chat_agent = type("C", (), {"invoke": lambda self, s: s})()
-    system.slot_extractor = type("Slots", (), {"extract": lambda self, s: s})()
-    system._progress_context = type("Context", (), {})()
-    system._progress_callbacks = {}
-    system._progress_lock = threading.Lock()
-    system._trace_lock = threading.Lock()
-    system._trace_sequences = {}
-    system._workflow_lock = threading.RLock()
-    system._stop_requests = {}
-    system._active_runs = {}
-    system._stop_lock = threading.Lock()
-    system.audit = type("_NoopAudit", (), {"is_available": lambda self: False})()
-    system._trace_agent = lambda *a, **k: None
-    system._emit_progress = lambda *a, **k: None
-    return system
+class _StaticClassifier:
+    def __init__(self, intents: list[dict]) -> None:
+        self._intents = intents
+
+    def classify_intents(self, message: str, context_summary: str = "") -> dict:
+        return {
+            "intents": self._intents,
+            "uncertain_intents": [],
+            "finance_related": True,
+            "intent_source": "fixture",
+            "classification_error": {},
+        }
 
 
-_CASES: list[tuple[str, str, list[dict], list[dict]]] = [
+def _build_root(intents: list[dict]) -> Any:
+    stock_deps = StockDeps(
+        pipeline=ResearchPipeline(
+            snapshot_builder=SnapshotBuilder(Gateway()), rule_engine=RuleEngine.default(),
+        ),
+        injected_pipeline=True,
+    )
+
+    def domain_runner(context: DomainTaskContext):
+        assert context.task.domain is BusinessDomain.STOCK_RESEARCH
+        return build_stock_domain_graph(stock_deps).invoke({"context": context})["domain_outcome"]
+
+    return build_root_graph(
+        RootGraphDependencies(classifier=_StaticClassifier(intents), domain_runner=domain_runner)
+    )
+
+
+_CASES: list[tuple[str, str, list[dict]]] = [
     ("single", "分析600519",
      [{"intent": "stock_analysis", "query": "分析600519", "confidence": 0.99,
-       "execution_mode": "stock_analysis", "evidence": "分析600519"}],
-     [{"code": "600519"}]),
+       "execution_mode": "stock_analysis", "evidence": "分析600519"}]),
     ("comparison", "比较600519和600036",
      [{"intent": "stock_recommendation", "query": "比较600519和600036", "confidence": 0.99,
-       "execution_mode": "stock_comparison", "evidence": "比较600519和600036"}],
-     [{"code": "600519"}, {"code": "600036"}]),
-    ("candidates", "推荐几只股票",
-     [{"intent": "stock_recommendation", "query": "推荐几只股票", "confidence": 0.99,
-       "execution_mode": "candidate_search", "evidence": "推荐几只股票"}],
-     []),
-    ("multi_stock_tasks", "分析600519并推荐几只股票",
-     [{"intent": "stock_analysis", "query": "分析600519", "confidence": 0.99,
-       "execution_mode": "stock_analysis", "evidence": "分析600519"},
-      {"intent": "stock_recommendation", "query": "推荐几只股票", "confidence": 0.99,
-       "execution_mode": "candidate_search", "evidence": "推荐几只股票"}],
-     [{"code": "600519"}]),
+       "execution_mode": "stock_comparison", "evidence": "比较600519和600036"}]),
 ]
 
 
 def _record(result: dict) -> dict:
     return {
-        "agent_response": result.get("agent_response", ""),
-        "analysis_results": result.get("analysis_results", []),
-        "stock_analysis": result.get("stock_analysis", {}),
-        "task_results": {
-            k: {"status": v.status.value, "summary": v.summary,
-                "expert_name": v.expert_name, "intent": v.intent.value if v.intent else None}
-            for k, v in (result.get("task_results") or {}).items()
-        },
-        "run_status": getattr(result.get("run_status"), "value", result.get("run_status")),
-        "warnings": sorted(result.get("warnings", [])),
-        "fact_ids": sorted(getattr(f, "fact_id", "") for f in (result.get("facts") or [])),
+        "final_response": result.get("final_response", ""),
+        "run_status": result.get("run_status"),
+        "task_results": result.get("task_results", {}),
+        "warnings": sorted(result.get("warnings", []) or []),
     }
 
 
 def main() -> None:
-    import finance_agent.agents.stock_analysis as sa
-    import finance_agent.orchestrator.orchestrator as orch
-
-    # 候选发现完全离线：固定返回 000858。
-    class _StubSearch:
-        def invoke(self, _payload):
-            return json.dumps([{"code": "000858", "name": "测试000858", "industry": "白酒Ⅱ"}])
-
-    sa.search_candidates = _StubSearch()
-    # 取数完全离线：图形取数与专家内部取数都走同一夹具。
-    orch.fetch_stock_data = lambda codes: {c: Gateway().get_security_data(c) for c in codes}
-    sa.fetch_stock_data = orch.fetch_stock_data
-
     snapshot: dict[str, Any] = {}
-    for name, message, intents, resolved in _CASES:
-        system = _build_system()
-        system.manager._intent_classifier = type(
-            "C", (), {"classify": lambda self, *a, **k: {"finance_related": True, "intents": intents}},
-        )()
-        graph = system._build_graph()
-        state = {"user_message": message, "completed_experts": [], "intent_results": {},
-                 "intent_slots": {}, "resolved_stocks": resolved}
-        result = graph.invoke(state, config={"configurable": {"thread_id": f"baseline-{name}"}})
+    for name, message, intents in _CASES:
+        root = _build_root(intents)
+        result = root.invoke(
+            {"user_message": message, "run_id": f"baseline-{name}", "task_results": {}}
+        )
         snapshot[name] = _record(result)
 
     json.dump(snapshot, sys.stdout, ensure_ascii=False, indent=2, sort_keys=True, default=str)

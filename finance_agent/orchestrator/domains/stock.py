@@ -608,6 +608,12 @@ def _stock_research(deps: StockDeps, context: DomainTaskContext) -> OperationRes
         "theme_candidates": result_state.get("theme_candidates", []) or [],
         "pending_leads": result_state.get("pending_leads", []) or [],
         "personalization_status": result_state.get("personalization_status", "") or "",
+        "research_request": result_state.get("research_request"),
+        "facts": [
+            fact.model_dump(mode="json")
+            for fact in result_state.get("facts", []) or []
+            if hasattr(fact, "model_dump")
+        ],
     }
     summary = str(result_state.get("agent_response", "") or "")
     intent_results = result_state.get("intent_results", {}) or {}

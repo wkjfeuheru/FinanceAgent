@@ -1,4 +1,4 @@
-"""V2 端到端：复合请求经 Plan-and-Execute 再到合规出口，不依赖外部服务。"""
+"""端到端：复合请求经 Plan-and-Execute 再到合规出口，不依赖外部服务。"""
 
 from __future__ import annotations
 
@@ -46,12 +46,14 @@ def _domain_runner(context):
 
 def _v2_system(monkeypatch, intents):
     system = object.__new__(AdvisorSystem)
-    system._orchestration_v2 = True
+    system._workflow_lock = threading.RLock()
     system._stop_lock = threading.Lock()
     system._stop_requests = {}
     system._active_runs = {}
     system._progress_lock = threading.Lock()
     system._progress_callbacks = {}
+    system._trace_lock = threading.Lock()
+    system._trace_sequences = {}
     system._progress_context = type("Ctx", (), {"callback": None})()
     system.memory = type("M", (), {
         "window_size": 10,
@@ -64,10 +66,12 @@ def _v2_system(monkeypatch, intents):
     system.audit = type("A", (), {
         "create_run": lambda *a, **k: None,
         "complete_run": lambda *a, **k: None,
+        "is_available": lambda self: False,
     })()
     system.get_checkpoint_conversation_messages = lambda *a, **k: []
     system._emit_progress = lambda *a, **k: None
-    system._v2_root = build_root_graph(
+    system._trace_agent = lambda *a, **k: None
+    system.root = build_root_graph(
         RootGraphDependencies(
             classifier=_FakeClassifier(intents),
             conversation_runner=lambda state: {"final_response": "你好。", "status": "success"},
@@ -113,7 +117,7 @@ def test_violating_output_is_rewritten_or_blocked_not_shown_raw(monkeypatch):
             summary="该股稳赚不赔，必涨。",
         )
 
-    system._v2_root = build_root_graph(
+    system.root = build_root_graph(
         RootGraphDependencies(
             classifier=_FakeClassifier(["stock_analysis"]),
             domain_runner=violating_runner,
