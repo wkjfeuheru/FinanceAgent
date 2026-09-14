@@ -123,11 +123,57 @@ class AdvisorSystem:
             history=str(state.get("history", "") or ""),
         )
 
+    # 单领域 Domain ReAct 执行器：按领域分发到对应子图。
+    def _v2_domain_runner(self, context: DomainTaskContext) -> DomainOutcome:
+        from finance_agent.orchestrator.domains.market import build_market_domain_graph
+        from finance_agent.orchestrator.domains.product import build_product_domain_graph
+        from finance_agent.orchestrator.domains.stock import StockDeps, build_stock_domain_graph
+
+        if context.task.domain == BusinessDomain.STOCK_RESEARCH:
+            graph = build_stock_domain_graph(StockDeps())
+        elif context.task.domain == BusinessDomain.MARKET_INSIGHT:
+            graph = build_market_domain_graph()
+        else:
+            graph = build_product_domain_graph()
+        result = graph.invoke({"context": context})
+        return result["domain_outcome"]
+
+    # 跨领域 Plan-and-Execute：Planner 生成计划，统一 Send 调度执行。
+    def _v2_plan_runner(self, state: Dict[str, Any], domains: list) -> list[DomainOutcome]:
+        from finance_agent.orchestrator.plan_execute import deterministic_planner, run_plan_execute
+
+        plan = deterministic_planner(state, list(domains))
+        result = run_plan_execute(
+            domain_runner=self._v2_domain_runner,
+            initial_plan=plan,
+            thread_id=str(state.get("thread_id", "")),
+            run_id=str(state.get("run_id", "")),
+            customer_id=str(state.get("customer_id", "")),
+            conversation_id=str(state.get("conversation_id", "")),
+            user_message=str(state.get("user_message", "")),
+        )
+        return result["outcomes"]
+
+    def _get_v2_planner(self):
+        # 复用 INTENT_MODEL；未配置时返回 None，由确定性回退计划兜底。
+        from finance_agent.config import get_intent_model
+        from finance_agent.orchestrator.plan_execute import build_llm_planner
+
+        model = get_intent_model()
+        if model is None:
+            return None
+        return build_llm_planner(model)
+
     def _build_v2_root(self):
+        from finance_agent.orchestrator.plan_execute import deterministic_planner
+
         return build_root_graph(
             RootGraphDependencies(
                 classifier=self._get_v2_classifier(),
                 conversation_runner=self._v2_conversation_runner,
+                domain_runner=self._v2_domain_runner,
+                plan_runner=self._v2_plan_runner,
+                planner=self._get_v2_planner() or deterministic_planner,
             )
         )
 

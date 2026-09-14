@@ -106,6 +106,8 @@ class RootGraphDependencies:
     conversation_runner: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     domain_runner: Callable[[DomainTaskContext], DomainOutcome] | None = None
     plan_runner: Callable[[dict[str, Any], list[BusinessDomain]], list[DomainOutcome]] | None = None
+    planner: Callable[[dict[str, Any], list[BusinessDomain]], ExecutionPlan] | None = None
+    replan_limit: int = 2
     extra_warnings: list[str] = field(default_factory=list)
 
 
@@ -125,6 +127,26 @@ def _single_task(goal: str, instruction: str, domain: BusinessDomain, task_id: s
 
 def build_root_graph(dependencies: RootGraphDependencies):
     """编译 Root Graph；节点只做分类、路由和执行器编排。"""
+
+    plan_runner = dependencies.plan_runner
+    if plan_runner is None and dependencies.domain_runner is not None and dependencies.planner is not None:
+        # 未显式提供计划执行器时，用统一的 Send 调度执行 Planner 产出的计划。
+        from finance_agent.orchestrator.plan_execute import run_plan_execute
+
+        def plan_runner(state: dict[str, Any], domains: list[BusinessDomain]):
+            plan = dependencies.planner(state, domains)
+            result = run_plan_execute(
+                domain_runner=dependencies.domain_runner,
+                initial_plan=plan,
+                planner=dependencies.planner,
+                thread_id=str(state.get("thread_id", "")),
+                run_id=str(state.get("run_id", "")),
+                customer_id=str(state.get("customer_id", "")),
+                conversation_id=str(state.get("conversation_id", "")),
+                user_message=str(state.get("user_message", "")),
+                replan_limit=dependencies.replan_limit,
+            )
+            return [DomainOutcome.model_validate(value) for value in result["task_results"].values()]
 
     def classify_node(state: RootState) -> dict[str, Any]:
         routing = classify_domains(
@@ -203,13 +225,13 @@ def build_root_graph(dependencies: RootGraphDependencies):
     def plan_node(state: RootState) -> dict[str, Any]:
         routing = state.get("routing", {}) or {}
         domains = [BusinessDomain(value) for value in routing.get("domains", [])]
-        if dependencies.plan_runner is None:
+        if plan_runner is None:
             return {
                 "final_response": "跨领域规划能力暂不可用，请拆分为单个领域分别提问。",
                 "run_status": "failed",
                 "warnings": ["plan_runner_unavailable"],
             }
-        outcomes = dependencies.plan_runner(dict(state), domains)
+        outcomes = plan_runner(dict(state), domains)
         responses = [outcome.summary for outcome in outcomes if outcome.summary]
         statuses = {_status_from_outcome(outcome) for outcome in outcomes}
         run_status = "completed" if statuses == {"completed"} else ("failed" if statuses == {"failed"} else "partial")

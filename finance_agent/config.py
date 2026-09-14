@@ -212,6 +212,29 @@ def get_supervisor_model():
     )
 
 
+def get_intent_model(*, max_tokens: int | None = None):
+    """返回意图分类/跨领域规划用的轻量 OpenAI 兼容模型。
+
+    未配置 intent API key 时返回 ``None``，调用方必须回退到确定性实现。
+    """
+    if not INTENT_MODEL_API_KEY:
+        return None
+    base_url = INTENT_MODEL_BASE_URL
+    for suffix in ("/chat/completions", "/completions", "/chat"):
+        if base_url.endswith(suffix):
+            base_url = base_url[: -len(suffix)]
+            break
+    return init_chat_model(
+        f"openai:{INTENT_MODEL}",
+        api_key=INTENT_MODEL_API_KEY,
+        base_url=base_url,
+        temperature=0,
+        timeout=INTENT_MODEL_TIMEOUT,
+        max_retries=INTENT_MODEL_MAX_RETRIES,
+        max_tokens=max_tokens or INTENT_MODEL_MAX_TOKENS,
+    )
+
+
 # ── PostgreSQL Checkpoint Saver ─────────────────────────────────
 
 _checkpoint_saver: Any | None = None
