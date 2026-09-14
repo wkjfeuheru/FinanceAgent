@@ -1,4 +1,8 @@
-"""确定性金融产品研究专家。"""
+"""确定性金融产品研究专家。
+
+确定性逻辑位于 ``finance_agent.orchestrator.domains.product``；本模块保留
+``ProductAnalysisAgent`` 的构造签名与旧状态投影，供旧编排路径与既有测试使用。
+"""
 
 from __future__ import annotations
 
@@ -9,6 +13,7 @@ from typing import Any
 
 from finance_agent.agents.base import AgentProtocol
 from finance_agent.contracts import FactSnapshot
+from finance_agent.orchestrator.domains.product import _payload
 from finance_agent.product_research.contracts import ProductResearchRequest, ProductResearchResult
 from finance_agent.product_research.pipeline import ProductResearchPipeline
 
@@ -94,16 +99,7 @@ class ProductAnalysisAgent(AgentProtocol):
 
     @staticmethod
     def _payload(result: ProductResearchResult) -> dict[str, Any]:
-        payload = result.model_dump(mode="json")
-        if not payload["evidence_ids"]:
-            payload["evidence_ids"] = list(dict.fromkeys(
-                evidence.fact_id
-                for assessment in result.assessments
-                for evidence in assessment.evidences.values()
-            ))
-        payload["type"] = result.kind
-        payload["products"] = [item.model_dump(mode="json") for item in result.assessments]
-        return payload
+        return _payload(result)
 
     @staticmethod
     def _write_facts(state: dict[str, Any], result: ProductResearchResult) -> None:
@@ -158,7 +154,6 @@ class ProductAnalysisAgent(AgentProtocol):
         try:
             result = self._pipeline.analyze(self._request(state))
         except Exception:  # noqa: BLE001 - 失败只给固定文案，细节进日志
-            # 异常原文可能含连接串/校验细节，不得进入用户可见报告。
             logger.exception(
                 "产品研究失败 requirement=%s", state.get("requirement") or state.get("user_message"),
             )
