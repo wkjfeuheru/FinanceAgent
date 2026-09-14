@@ -51,6 +51,10 @@ ORCHESTRATION_GRAPH_STEPS = int(os.getenv("ORCHESTRATION_GRAPH_STEPS", "32"))
 
 CELERY_REDIS_DB = int(os.getenv("CELERY_REDIS_DB", "1"))
 CELERY_QUANT_QUEUE = os.getenv("CELERY_QUANT_QUEUE", "finance.quant").strip()
+# 量化任务的软/硬超时与结果 TTL（秒）：CPU 计算不得无限占用 worker。
+CELERY_TASK_SOFT_TIME_LIMIT = int(os.getenv("CELERY_TASK_SOFT_TIME_LIMIT", "60"))
+CELERY_TASK_HARD_TIME_LIMIT = int(os.getenv("CELERY_TASK_HARD_TIME_LIMIT", "120"))
+CELERY_RESULT_EXPIRES = int(os.getenv("CELERY_RESULT_EXPIRES", "3600"))
 
 FAQ_EMBEDDING_MODEL = os.getenv("FAQ_EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5").strip()
 FAQ_EMBEDDING_DEVICE = os.getenv("FAQ_EMBEDDING_DEVICE", "cpu").strip()

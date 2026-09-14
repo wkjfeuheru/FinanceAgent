@@ -78,6 +78,9 @@ class StockDeps:
     fetch: Callable[..., dict[str, Any]] | None = None
     candidate_search: Any = None
     emit_progress: Callable[[dict[str, Any], str], None] | None = None
+    # CPU 密集技术指标可卸载到 QuantGateway；None 表示在线内联计算。
+    quant_gateway: Any = None
+    quant_wait_seconds: float = 0.0
     defaults: list[Any] = field(default_factory=list)
 
 
@@ -256,34 +259,87 @@ def compute_technical_indicators(
     if analysis_type == "fundamental" or not isinstance(stock_data, dict):
         return result
     for code in codes or []:
-        raw = stock_data.get(code)
-        history = raw.get("history") if isinstance(raw, dict) else None
-        rows = history.get("data") if isinstance(history, dict) else None
-        if not isinstance(rows, list) or len(rows) < _MIN_TECHNICAL_BARS:
+        series = _technical_series(stock_data, code)
+        if series is None:
             continue
-        close: list[float] = []
-        high: list[float] = []
-        low: list[float] = []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            c, h, low_value = (
-                _as_float(row.get("close")),
-                _as_float(row.get("high")),
-                _as_float(row.get("low")),
-            )
-            if c is None or h is None or low_value is None:
-                continue
-            close.append(c)
-            high.append(h)
-            low.append(low_value)
-        if len(close) < _MIN_TECHNICAL_BARS:
-            continue
+        high, low, close = series
         try:
             result[code] = compute_all_indicators(high, low, close)
         except Exception:  # noqa: BLE001 - 指标计算失败只跳过该标的
             logger.warning("技术指标计算失败 code=%s", code, exc_info=True)
     return result
+
+
+def _technical_series(stock_data: Any, code: str) -> tuple[list[float], list[float], list[float]] | None:
+    raw = stock_data.get(code)
+    history = raw.get("history") if isinstance(raw, dict) else None
+    rows = history.get("data") if isinstance(history, dict) else None
+    if not isinstance(rows, list) or len(rows) < _MIN_TECHNICAL_BARS:
+        return None
+    close: list[float] = []
+    high: list[float] = []
+    low: list[float] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        c, h, low_value = (
+            _as_float(row.get("close")),
+            _as_float(row.get("high")),
+            _as_float(row.get("low")),
+        )
+        if c is None or h is None or low_value is None:
+            continue
+        close.append(c)
+        high.append(h)
+        low.append(low_value)
+    if len(close) < _MIN_TECHNICAL_BARS:
+        return None
+    return high, low, close
+
+
+def compute_technical_via_gateway(
+    deps: StockDeps, stock_data: Any, codes: Any, analysis_type: str = "both",
+) -> tuple[dict[str, Any], bool]:
+    """经 QuantGateway 卸载技术指标计算。
+
+    返回 ``(indicators, pending)``：``pending=True`` 表示任务仍在预算内未完成，
+    调用方应写入 ``AsyncJobRef`` 并中断图（``awaiting_quant``），不得伪造结果。
+    """
+    if analysis_type == "fundamental" or not isinstance(stock_data, dict):
+        return {}, False
+    gateway = deps.quant_gateway
+    indicators: dict[str, Any] = {}
+    for code in codes or []:
+        series = _technical_series(stock_data, code)
+        if series is None:
+            continue
+        high, low, close = series
+        ref = gateway.submit(
+            "technical_indicators",
+            {"high": high, "low": low, "close": close},
+            f"technical_indicators:{code}",
+        )
+        if _wait_for_job(gateway, ref.job_id, deps.quant_wait_seconds):
+            result = gateway.result(ref.job_id) or {}
+            indicators[code] = result.get("indicators", {})
+        else:
+            return indicators, True
+    return indicators, False
+
+
+def _wait_for_job(gateway: Any, job_id: str, budget_seconds: float) -> bool:
+    import time
+
+    deadline = time.monotonic() + max(0.0, budget_seconds)
+    while True:
+        status = gateway.status(job_id)
+        if status == "completed":
+            return True
+        if status in {"failed", "cancelled"}:
+            return False
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
 
 
 def _emit_progress(deps: StockDeps, state: dict[str, Any], message: str) -> None:
@@ -561,6 +617,27 @@ def _stock_research(deps: StockDeps, context: DomainTaskContext) -> OperationRes
             status = "partial"
             break
     limitations = [str(result_state.get("clarification_question"))] if result_state.get("clarification_question") else []
+
+    # CPU 密集技术指标：若已配置 QuantGateway，则卸载并支持异步中断。
+    if deps.quant_gateway is not None:
+        codes = [code for code in (result_state.get("stock_analysis", {}) or {})]
+        try:
+            indicators, pending = compute_technical_via_gateway(
+                deps, structured["stock_data"], codes,
+            )
+        except Exception:  # noqa: BLE001 - 网关异常不阻断研究结论
+            logger.warning("quant gateway 技术指标失败", exc_info=True)
+        else:
+            if indicators:
+                structured["technical_analysis"] = indicators
+            if pending:
+                return OperationResult(
+                    structured_data=structured,
+                    summary=summary,
+                    status="processing",
+                    limitations=[*limitations, "awaiting_quant"],
+                )
+
     return OperationResult(structured_data=structured, summary=summary, status=status, limitations=limitations)
 
 

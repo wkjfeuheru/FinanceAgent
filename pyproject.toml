@@ -40,6 +40,7 @@ dependencies = [
     "mcp>=1.0.0",
     "httpx2>=2.0.0",
     "sentence-transformers>=3.0.0",
+    "celery>=5.3.0",
 ]
 
 [project.optional-dependencies]
@@ -61,4 +62,5 @@ testpaths = ["tests"]
 pythonpath = ["."]
 markers = [
     "network: 需要真实第三方接口的冒烟测试（默认跳过，设置 RUN_NETWORK_TESTS=1 启用）",
+    "celery_integration: 需要 Redis 与 Celery worker 的集成测试（默认跳过，设置 RUN_CELERY_INTEGRATION=1 启用）",
 ]

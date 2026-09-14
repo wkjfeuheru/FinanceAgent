@@ -270,3 +270,24 @@ class PostgresAsyncRunRepository(_PostgresRepository):
         if row is None:
             return None
         return AsyncJobRef(job_id=row[0], kind=row[1], status=row[2], task_id=row[3])
+
+    def list_job_refs(self, thread_id: str) -> list[AsyncJobRef]:
+        """列出某线程下的异步任务引用，供恢复协调器扫描。"""
+        self._ensure_schema()
+        with self._transaction() as connection:
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    """SELECT job_id, kind, status, task_id
+                       FROM finance.async_jobs
+                       WHERE thread_id = %s
+                       ORDER BY created_at""",
+                    (thread_id,),
+                )
+                rows = cursor.fetchall()
+            finally:
+                cursor.close()
+        return [
+            AsyncJobRef(job_id=row[0], kind=row[1], status=row[2], task_id=row[3])
+            for row in rows
+        ]
