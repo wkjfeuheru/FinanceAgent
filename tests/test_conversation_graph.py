@@ -1,0 +1,84 @@
+"""会话子图：仅暴露 faq_search，非白名单工具被安全拒绝。"""
+
+from __future__ import annotations
+
+from typing import Any, Sequence
+
+from finance_agent.faq.contracts import FaqSearchMatch, FaqSearchResult
+from finance_agent.orchestrator.conversation_graph import build_conversation_graph
+
+
+class _FakeRetriever:
+    def __init__(self, result: FaqSearchResult) -> None:
+        self._result = result
+
+    def search(self, query: str, top_k: int | None = None) -> FaqSearchResult:
+        del query, top_k
+        return self._result
+
+
+def _found_retriever() -> _FakeRetriever:
+    return _FakeRetriever(
+        FaqSearchResult(
+            status="found",
+            matches=[
+                FaqSearchMatch(
+                    faq_id="FAQ-001",
+                    chunk_id="c1",
+                    score=0.9,
+                    index_version="index-1",
+                    source_path="docs/faq/investment-basics.md",
+                    content="任何声称“保证收益”的宣传都涉嫌违规。",
+                )
+            ],
+        )
+    )
+
+
+def _not_found_retriever() -> _FakeRetriever:
+    return _FakeRetriever(FaqSearchResult(status="not_found", matches=[]))
+
+
+def _base_state() -> dict[str, Any]:
+    return {
+        "user_message": "什么是保证收益？",
+        "customer_id": "CUST1",
+        "conversation_id": "conv-1",
+    }
+
+
+def _model_calling(tool_name: str) -> Any:
+    def model(messages: Sequence[dict[str, Any]]) -> dict[str, Any]:
+        if not any(message.get("role") == "observation" for message in messages):
+            return {"action": "tool", "tool_name": tool_name, "tool_input": {"query": "保证收益"}}
+        observation = next(m for m in messages if m.get("role") == "observation")
+        return {"action": "final", "final_text": f"根据 FAQ：{observation['content']}"}
+
+    return model
+
+
+def test_conversation_graph_rejects_non_whitelisted_tool():
+    graph = build_conversation_graph(_found_retriever(), _model_calling("stock_quote"))
+
+    result = graph.invoke(_base_state())
+
+    assert result["final_response"] == "暂时无法执行该操作。"
+    assert result["status"] == "failed"
+
+
+def test_conversation_graph_answers_with_faq_evidence():
+    graph = build_conversation_graph(_found_retriever(), _model_calling("faq_search"))
+
+    result = graph.invoke(_base_state())
+
+    assert "保证收益" in result["final_response"]
+    assert result["tool_trace"] == ["faq_search"]
+
+
+def test_conversation_graph_no_match_observation_discloses_no_reliable_answer():
+    graph = build_conversation_graph(_not_found_retriever(), _model_calling("faq_search"))
+
+    result = graph.invoke(_base_state())
+
+    assert result["observations"][0]["text"].find("没有可靠") != -1
+    assert "没有可靠" in result["final_response"]
