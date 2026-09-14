@@ -130,16 +130,20 @@ def build_root_graph(dependencies: RootGraphDependencies):
     """编译 Root Graph；节点只做分类、路由和执行器编排。"""
 
     plan_runner = dependencies.plan_runner
-    if plan_runner is None and dependencies.domain_runner is not None and dependencies.planner is not None:
-        # 未显式提供计划执行器时，用统一的 Send 调度执行 Planner 产出的计划。
-        from finance_agent.orchestrator.plan_execute import run_plan_execute
+    planner = dependencies.planner
+    if plan_runner is None and dependencies.domain_runner is not None:
+        # 未显式提供计划执行器时，用统一的 Send 调度执行计划；
+        # 未提供 Planner 时回退确定性的每领域一任务计划。
+        from finance_agent.orchestrator.plan_execute import deterministic_planner, run_plan_execute
+
+        planner = planner or deterministic_planner
 
         def plan_runner(state: dict[str, Any], domains: list[BusinessDomain]):
-            plan = dependencies.planner(state, domains)
+            plan = planner(state, domains)
             result = run_plan_execute(
                 domain_runner=dependencies.domain_runner,
                 initial_plan=plan,
-                planner=dependencies.planner,
+                planner=planner,
                 thread_id=str(state.get("thread_id", "")),
                 run_id=str(state.get("run_id", "")),
                 customer_id=str(state.get("customer_id", "")),

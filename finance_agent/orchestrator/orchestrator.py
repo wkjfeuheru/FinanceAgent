@@ -761,13 +761,38 @@ class AdvisorSystem:
                 "blocked": True,
             }
 
+        # 与旧路径一致的停止语义：进入新一轮时清除上轮停止标记。
+        with self._stop_lock:
+            self._stop_requests.pop(conversation_id, None)
+        if progress_callback is not None:
+            with self._progress_lock:
+                self._progress_callbacks[conversation_id] = progress_callback
+        self._progress_context.callback = progress_callback
+        self._emit_progress("manager", "正在识别业务领域", conversation_id)
+
         fallback_history = chat_history or self.get_checkpoint_conversation_messages(
             conversation_id, self.memory.window_size,
         )
+        identifiers = generate_identifiers(conversation_id)
+        run_id = str(identifiers.run_id)
+        try:
+            self.audit.create_run(
+                RequestEnvelope(
+                    run_id=identifiers.run_id,
+                    trace_id=identifiers.trace_id,
+                    user_id=uuid.uuid4(),
+                    customer_id=customer_id,
+                    conversation_id=conversation_id,
+                    message_id=identifiers.message_id,
+                    message=message,
+                )
+            )
+        except Exception:
+            pass
+
         try:
             memory_data = self.memory.load_context(customer_id, conversation_id, fallback_history)
             history = memory_data.get("sliding_window") or fallback_history[-self.memory.window_size:]
-            identifiers = generate_identifiers(conversation_id)
             root = getattr(self, "_v2_root", None) or self._build_v2_root()
             result = root.invoke(
                 {
@@ -778,7 +803,8 @@ class AdvisorSystem:
                     "customer_id": customer_id,
                     "conversation_id": conversation_id,
                     "thread_id": build_thread_id(customer_id, conversation_id),
-                    "run_id": str(identifiers.run_id),
+                    "run_id": run_id,
+                    "memory_context": memory_data.get("context_text", ""),
                     "warnings": [],
                     "task_results": {},
                     "domain_outcomes": {},

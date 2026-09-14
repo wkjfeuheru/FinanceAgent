@@ -1,7 +1,13 @@
 # LangGraph 分层混合 Agent 编排重构设计
 
 日期：2026-09-14
-状态：已由用户确认
+状态：已由用户确认；已按计划实现（V2 根图为生产默认路径）
+
+> 实现说明：契约、持久化、FAQ RAG、受限 ReAct、根图路由、三个领域子图、
+> Plan-and-Execute、Celery 量化与恢复、统一合规出口与异步状态端点均已落地。
+> `ORCHESTRATION_V2_ENABLED` 默认开启；旧编排仅在该开关显式关闭时使用，
+> 五个旧 Agent 模块暂时保留为兼容层（其确定性逻辑已抽取到
+> `finance_agent/orchestrator/domains/` 与 `finance_agent/faq/`）。
 
 ## 1. 背景
 

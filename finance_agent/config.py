@@ -41,8 +41,8 @@ REDIS_MEMORY_TTL_SECONDS = int(os.getenv("REDIS_MEMORY_TTL_SECONDS", "3600"))
 # 已关闭匿名模式，所有业务请求必须携带有效 Bearer token。
 AUTH_REQUIRED = True
 
-# V2 编排在迁移期间默认关闭；保留旧路径作为回退。
-ORCHESTRATION_V2_ENABLED = os.getenv("ORCHESTRATION_V2_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+# V2 编排为生产默认路径；仅在显式关闭时回退旧路径（迁移期兼容开关）。
+ORCHESTRATION_V2_ENABLED = os.getenv("ORCHESTRATION_V2_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 ORCHESTRATION_REACT_STEPS = int(os.getenv("ORCHESTRATION_REACT_STEPS", "4"))
 ORCHESTRATION_PLAN_TASKS = int(os.getenv("ORCHESTRATION_PLAN_TASKS", "8"))
 ORCHESTRATION_REPLANS = int(os.getenv("ORCHESTRATION_REPLANS", "2"))

@@ -210,14 +210,63 @@ FINAL_SYNTHESIS_TIMEOUT=20
 POLICY_NEWS_MAX_DAYS=3
 POLICY_NEWS_MAX_ITEMS=50
 PRODUCT_ANALYSIS_TEMPERATURE=0.2
+
+# 混合 LangGraph 编排（默认启用 V2 根图；设为 false 才回退旧路径）
+ORCHESTRATION_V2_ENABLED=true
+ORCHESTRATION_REACT_STEPS=4
+ORCHESTRATION_PLAN_TASKS=8
+ORCHESTRATION_REPLANS=2
+ORCHESTRATION_COMPLIANCE_REWRITES=1
+ORCHESTRATION_GRAPH_STEPS=32
+
+# Celery 量化计算：独立 Redis DB + 专用队列
+CELERY_REDIS_DB=1
+CELERY_QUANT_QUEUE=finance.quant
+CELERY_TASK_SOFT_TIME_LIMIT=60
+CELERY_TASK_HARD_TIME_LIMIT=120
+CELERY_RESULT_EXPIRES=3600
+
+# 本地 FAQ 中文 embedding（默认 CPU，不在启动时联网下载）
+FAQ_EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
+FAQ_EMBEDDING_DEVICE=cpu
+FAQ_EMBEDDING_MODEL_CACHE_DIR=.cache/models
+# 归一化 RRF 融合分阈值；低于该值的 FAQ 命中判为 not_found
+FAQ_MIN_SCORE=0.3
 ```
 
 说明：
 
 - 匿名模式已关闭，`AUTH_REQUIRED` 不需要配置，也不能通过环境变量重新开启匿名访问。
 - PostgreSQL 是唯一的关系型存储；未配置、驱动缺失或无法连接时，服务会显式失败，不会回退到 SQLite。
-- 首次连接时程序会自动创建所需 schema。
+- 首次连接时程序会自动创建所需 schema（含 pgvector、FAQ 与异步任务表）。
+- 混合编排默认走 V2 根图（分类 → 单领域 Domain ReAct / 复合 Plan-and-Execute → 统一合规出口）；`ORCHESTRATION_V2_ENABLED=false` 时才使用旧编排。V2 异常显式返回 `run_status="failed"`，不会静默回退旧路径。
 - 不要将包含真实密钥的 `.env` 文件提交到版本库。
+
+### 3.1 FAQ 索引、Celery worker 与异步状态
+
+FAQ 原文位于 `docs/faq/*.md`，每个问答以 `## FAQ-001 标题` 的二级标题组织（一个问答一个 chunk）。发布索引版本：
+
+```bash
+python -m finance_agent.faq index --root docs/faq --model-cache-dir .cache/models
+```
+
+该命令先校验全部文档，再在单事务内写入向量与全文值、切换活跃版本；任一文档校验失败则整批不发布。
+
+启动 CPU 密集量化计算的独立 worker（使用 `CELERY_REDIS_DB` 的独立 Redis DB 与 `CELERY_QUANT_QUEUE` 队列）：
+
+```bash
+celery -A finance_agent.celery_app:celery_app worker -Q finance.quant -l info
+```
+
+Celery 任务只计算并写结果，不调用 LangGraph；未在同步预算内完成的量化任务会写入 `AsyncJobRef` 并中断图（`awaiting_quant`），可经鉴权的异步状态端点查询并恢复：
+
+```text
+GET /api/runs/{task_id}
+```
+
+该端点先校验 `(customer_id, conversation_id)` 归属，再读取异步状态或恢复原始 `thread_id` 的图。
+
+checkpoint 的 `thread_id` 为复合键 `v1:{authenticated_user_id}:{conversation_id}`：不同用户的相同 `conversation_id` 不共享状态；旧键仅在确认会话归属后才会被读取并迁移到新键。
 
 ### 4. 启动 Redis
 
