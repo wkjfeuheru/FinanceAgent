@@ -74,6 +74,43 @@ def _render_output(spec: ToolSpec, output: BaseModel) -> str:
     return json.dumps(output.model_dump(), ensure_ascii=False)
 
 
+def _to_langchain_messages(messages: Sequence[dict[str, Any]]) -> list[Any]:
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+    converted: list[Any] = []
+    for message in messages:
+        role = str(message.get("role", "human"))
+        content = str(message.get("content", ""))
+        if role == "system":
+            converted.append(SystemMessage(content=content))
+        elif role == "assistant":
+            converted.append(AIMessage(content=content))
+        else:
+            # observation 也以人类消息回灌，避免模型把它当作自身输出。
+            converted.append(HumanMessage(content=content))
+    return converted
+
+
+def build_chat_model_callable(chat_model: Any, *, require_json: bool = True) -> Callable[[list[dict[str, Any]]], Any]:
+    """把 LangChain chat model 适配为 ``run_bounded_react`` 需要的 messages→decision 函数。"""
+
+    def call(messages: list[dict[str, Any]]) -> Any:
+        bound = chat_model
+        if require_json:
+            bind = getattr(chat_model, "bind", None)
+            if callable(bind):
+                bound = bind(response_format={"type": "json_object"})
+        response = bound.invoke(_to_langchain_messages(messages))
+        content = getattr(response, "content", response)
+        if isinstance(content, list):
+            content = "".join(
+                part.get("text", "") if isinstance(part, dict) else str(part) for part in content
+            )
+        return content
+
+    return call
+
+
 def run_bounded_react(
     *,
     model: Callable[[list[dict[str, Any]]], Any],

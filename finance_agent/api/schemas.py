@@ -42,6 +42,9 @@ class ChatResponse(BaseModel):
     task_results: dict[str, Any] = Field(default_factory=dict)
     run_status: str = "completed"
     warnings: list[str] = Field(default_factory=list)
+    # V2 追加字段：异步任务标识与安全进度信息（不删除既有字段）。
+    task_id: str = ""
+    pending_task_ids: list[str] = Field(default_factory=list)
 
 
 def to_chat_response(result: ResponseEnvelope | Mapping[str, Any] | ChatResponse) -> ChatResponse:

@@ -85,6 +85,8 @@ class RoutingDecision(BaseModel):
     domains: list[BusinessDomain]
     execution_mode: Literal["conversation", "domain_react", "plan_execute", "clarify"]
     clarification: str = ""
+    # 分类协议错误或模型不可用时置为非空；此时不得静默猜测业务领域。
+    error_code: str = ""
 
 
 class ReactDecision(BaseModel):

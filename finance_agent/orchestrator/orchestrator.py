@@ -18,7 +18,8 @@ from finance_agent.agents.market_insight import MarketInsightAgent
 from finance_agent.agents.product_analysis import ProductAnalysisAgent
 from finance_agent.agents.stock_analysis import StockAnalysisAgent
 from finance_agent.agents.supervisor import ManagerAgent
-from finance_agent.config import get_checkpoint_saver
+from finance_agent import config as app_config
+from finance_agent.config import get_checkpoint_saver, get_supervisor_model
 from finance_agent.contracts import (
     ExpertResult,
     ExpertStatus,
@@ -29,6 +30,14 @@ from finance_agent.contracts import (
     generate_identifiers,
 )
 from finance_agent.data.postgres_repository import PostgresAuditStore
+from finance_agent.orchestrator.contracts import DomainOutcome, DomainTaskContext
+from finance_agent.orchestrator.root_graph import (
+    RootGraphDependencies,
+    build_root_graph,
+    project_root_state,
+)
+from finance_agent.orchestrator.run_state import RunStateStore
+from finance_agent.orchestrator.thread_key import build_thread_id
 from finance_agent.orchestrator.tools.stockdata import fetch_stock_data
 from finance_agent.research.contracts import AnalysisRequest, AnalysisResult
 from finance_agent.orchestrator.database import get_database
@@ -74,6 +83,53 @@ class AdvisorSystem:
         self._stop_lock = threading.Lock()
         self.audit = PostgresAuditStore.from_config()
         self.graph = self._build_graph()
+        # V2 编排默认关闭；开启时根图为唯一执行路径，异常不得静默回退旧路径。
+        self._orchestration_v2 = bool(app_config.ORCHESTRATION_V2_ENABLED)
+        self._v2_root = None
+        if self._orchestration_v2:
+            self._v2_root = self._build_v2_root()
+
+    # 构造 V2 根图的运行依赖（分类器 + 会话执行器；领域/计划执行器在后续任务接入）。
+    def _get_v2_classifier(self):
+        manager = getattr(self, "manager", None)
+        if manager is not None and hasattr(manager, "classify_intents"):
+            return manager
+        return ManagerAgent()
+
+    def _get_faq_retriever(self):
+        if getattr(self, "_faq_retriever", None) is None:
+            from finance_agent.config import get_postgres_connection_factory
+            from finance_agent.faq.embeddings import SentenceTransformerEmbeddingProvider
+            from finance_agent.faq.repository import PostgresFaqRepository
+            from finance_agent.faq.retriever import FaqRetriever
+
+            self._faq_retriever = FaqRetriever(
+                PostgresFaqRepository(get_postgres_connection_factory()),
+                SentenceTransformerEmbeddingProvider(),
+            )
+        return self._faq_retriever
+
+    # 会话 ReAct 执行器：FAQ 检索 + 受约束补充叙述。
+    def _v2_conversation_runner(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        from finance_agent.orchestrator.conversation_graph import run_conversation
+        from finance_agent.orchestrator.react import build_chat_model_callable
+
+        retriever = self._get_faq_retriever()
+        model = build_chat_model_callable(get_supervisor_model())
+        return run_conversation(
+            retriever,
+            model,
+            user_message=str(state.get("user_message", "")),
+            history=str(state.get("history", "") or ""),
+        )
+
+    def _build_v2_root(self):
+        return build_root_graph(
+            RootGraphDependencies(
+                classifier=self._get_v2_classifier(),
+                conversation_runner=self._v2_conversation_runner,
+            )
+        )
 
     # 向当前请求注册并发送阶段进度。
     def _emit_progress(self, stage: str, message: str, thread_id: str = "") -> None:
@@ -558,8 +614,127 @@ class AdvisorSystem:
         except Exception:
             pass
 
-    # 处理一轮同步消息，保持既有公共签名。
-    def handle_message(
+    def _v2_failed_output(self, conversation_id: str, message: str) -> Dict[str, Any]:
+        """V2 异常时的安全失败响应；绝不回退旧路径。"""
+        return {
+            "response": "处理请求时发生内部错误，请稍后重试。",
+            "task_plan": [],
+            "task_dispatch": [],
+            "tasks": [],
+            "task_results": {},
+            "run_status": "failed",
+            "warnings": ["v2_execution_failed"],
+            "conversation_id": conversation_id or uuid.uuid4().hex,
+        }
+
+    # 处理一轮消息，按功能开关选择 V2 根图或旧路径。
+    def handle_message(self, message, chat_history=None, customer_id="CUST001", progress_callback=None, conversation_id=""):
+        if getattr(self, "_orchestration_v2", False):
+            return self.handle_message_v2(
+                message,
+                chat_history=chat_history,
+                customer_id=customer_id,
+                progress_callback=progress_callback,
+                conversation_id=conversation_id,
+            )
+        return self._handle_message_legacy(
+            message,
+            chat_history=chat_history,
+            customer_id=customer_id,
+            progress_callback=progress_callback,
+            conversation_id=conversation_id,
+        )
+
+    # V2：根图为唯一执行路径；任何异常显式失败，不回退旧路径。
+    def handle_message_v2(
+        self,
+        message: str,
+        chat_history: List[Dict[str, str]] | None = None,
+        customer_id: str = "CUST001",
+        progress_callback: Callable[[str, str], None] | None = None,
+        conversation_id: str = "",
+    ) -> Dict[str, Any]:
+        conversation_id = conversation_id or uuid.uuid4().hex
+        if find_sensitive_word(message) is not None:
+            return {
+                "response": BLOCKED_RESPONSE,
+                "task_plan": [],
+                "task_dispatch": [],
+                "tasks": [],
+                "task_results": {},
+                "run_status": "completed",
+                "warnings": [],
+                "conversation_id": conversation_id,
+                "compliance_result": {},
+                "blocked": True,
+            }
+
+        fallback_history = chat_history or self.get_checkpoint_conversation_messages(
+            conversation_id, self.memory.window_size,
+        )
+        try:
+            memory_data = self.memory.load_context(customer_id, conversation_id, fallback_history)
+            history = memory_data.get("sliding_window") or fallback_history[-self.memory.window_size:]
+            identifiers = generate_identifiers(conversation_id)
+            root = getattr(self, "_v2_root", None) or self._build_v2_root()
+            result = root.invoke(
+                {
+                    "user_message": message,
+                    "history": "\n".join(
+                        str(item.get("content", "")) for item in history if isinstance(item, dict)
+                    ),
+                    "customer_id": customer_id,
+                    "conversation_id": conversation_id,
+                    "thread_id": build_thread_id(customer_id, conversation_id),
+                    "run_id": str(identifiers.run_id),
+                    "warnings": [],
+                    "task_results": {},
+                    "domain_outcomes": {},
+                }
+            )
+        except Exception:
+            logger.exception("orchestration_v2_failed conversation_id=%s", conversation_id)
+            output = self._v2_failed_output(conversation_id, message)
+        else:
+            output = project_root_state(result, conversation_id=conversation_id)
+            output["customer_id"] = customer_id
+
+        self._v2_persist(customer_id, conversation_id, message, output)
+        return output
+
+    # V2 运行后的会话落库与记忆更新（失败静默，保持与旧路径一致）。
+    def _v2_persist(
+        self, customer_id: str, conversation_id: str, message: str, output: Dict[str, Any],
+    ) -> None:
+        try:
+            self.audit.complete_run(
+                str(uuid.uuid4()), conversation_id, output.get("response", ""),
+                message_id=str(uuid.uuid4()), status=output.get("run_status", "completed"),
+                metadata={"task_plan": output.get("task_plan", [])},
+            )
+        except Exception:
+            pass
+        try:
+            db = get_database()
+            db.append_conversation_message(conversation_id, "user", message)
+            db.append_conversation_message(
+                conversation_id, "assistant", output.get("response", ""),
+                {"task_plan": output.get("task_plan", [])},
+            )
+        except Exception:
+            pass
+        try:
+            self.memory.append_window_message(conversation_id, "user", message)
+            self.memory.append_window_message(
+                conversation_id, "assistant", output.get("response", ""),
+                {"task_plan": output.get("task_plan", [])},
+            )
+            self.memory.update_profile_from_result(customer_id, message, output)
+        except Exception:
+            pass
+
+    # 处理一轮同步消息，保持既有公共签名（旧路径）。
+    def _handle_message_legacy(
         self,
         message: str,
         chat_history: List[Dict[str, str]] | None = None,
