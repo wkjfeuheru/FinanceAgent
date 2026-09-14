@@ -17,6 +17,9 @@ numpy
 pydantic
 requests
 
+# FAQ 本地中文 embedding（默认 CPU，不联网下载模型）
+sentence-transformers>=3.0.0
+
 # 可选本地股票数据源：pip install akshare baostock（Tushare 走 MCP，无需额外安装）
 # akshare>=1.10.0
 # baostock>=0.8.8

@@ -166,7 +166,7 @@ class PostgresFaqRepository(_PostgresRepository):
         query_text: str,
         limit: int,
     ) -> list[dict[str, Any]]:
-        """返回活跃分块及其原始向量、全文信号，融合策略由调用层决定。"""
+        """返回向量与关键词两个通道各 limit 条的候选并集，融合由调用层决定。"""
         if len(query_embedding) != 512:
             raise ValueError("FAQ query embedding must contain 512 dimensions")
         if limit < 1:
@@ -176,14 +176,42 @@ class PostgresFaqRepository(_PostgresRepository):
             cursor = connection.cursor()
             try:
                 cursor.execute(
-                    """SELECT chunk_id, faq_id, index_version, source_path, content,
-                              embedding <=> %s::vector AS vector_distance,
-                              ts_rank_cd(search_text, websearch_to_tsquery('simple', %s)) AS keyword_score
-                       FROM finance.faq_chunks
-                       WHERE is_active
-                       ORDER BY embedding <=> %s::vector
-                       LIMIT %s""",
-                    (json.dumps(list(query_embedding)), query_text, json.dumps(list(query_embedding)), limit),
+                    """WITH vector_candidates AS (
+                           SELECT chunk_id, faq_id, index_version, source_path, content,
+                                  embedding <=> %s::vector AS vector_distance,
+                                  NULL::double precision AS keyword_score
+                           FROM finance.faq_chunks
+                           WHERE is_active
+                           ORDER BY embedding <=> %s::vector
+                           LIMIT %s
+                       ), keyword_candidates AS (
+                           SELECT chunk_id, faq_id, index_version, source_path, content,
+                                  embedding <=> %s::vector AS vector_distance,
+                                  ts_rank_cd(search_text, websearch_to_tsquery('simple', %s)) AS keyword_score
+                           FROM finance.faq_chunks
+                           WHERE is_active
+                             AND search_text @@ websearch_to_tsquery('simple', %s)
+                           ORDER BY keyword_score DESC
+                           LIMIT %s
+                       )
+                       SELECT DISTINCT ON (chunk_id)
+                              chunk_id, faq_id, index_version, source_path, content,
+                              vector_distance, keyword_score
+                       FROM (
+                           SELECT * FROM vector_candidates
+                           UNION ALL
+                           SELECT * FROM keyword_candidates
+                       ) combined
+                       ORDER BY chunk_id, vector_distance""",
+                    (
+                        json.dumps(list(query_embedding)),
+                        json.dumps(list(query_embedding)),
+                        limit,
+                        json.dumps(list(query_embedding)),
+                        query_text,
+                        query_text,
+                        limit,
+                    ),
                 )
                 rows = cursor.fetchall()
                 columns = [description[0] for description in (cursor.description or [])]
