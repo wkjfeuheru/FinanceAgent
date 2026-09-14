@@ -41,6 +41,21 @@ REDIS_MEMORY_TTL_SECONDS = int(os.getenv("REDIS_MEMORY_TTL_SECONDS", "3600"))
 # 已关闭匿名模式，所有业务请求必须携带有效 Bearer token。
 AUTH_REQUIRED = True
 
+# V2 编排在迁移期间默认关闭；保留旧路径作为回退。
+ORCHESTRATION_V2_ENABLED = os.getenv("ORCHESTRATION_V2_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+ORCHESTRATION_REACT_STEPS = int(os.getenv("ORCHESTRATION_REACT_STEPS", "4"))
+ORCHESTRATION_PLAN_TASKS = int(os.getenv("ORCHESTRATION_PLAN_TASKS", "8"))
+ORCHESTRATION_REPLANS = int(os.getenv("ORCHESTRATION_REPLANS", "2"))
+ORCHESTRATION_COMPLIANCE_REWRITES = int(os.getenv("ORCHESTRATION_COMPLIANCE_REWRITES", "1"))
+ORCHESTRATION_GRAPH_STEPS = int(os.getenv("ORCHESTRATION_GRAPH_STEPS", "32"))
+
+CELERY_REDIS_DB = int(os.getenv("CELERY_REDIS_DB", "1"))
+CELERY_QUANT_QUEUE = os.getenv("CELERY_QUANT_QUEUE", "finance.quant").strip()
+
+FAQ_EMBEDDING_MODEL = os.getenv("FAQ_EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5").strip()
+FAQ_EMBEDDING_DEVICE = os.getenv("FAQ_EMBEDDING_DEVICE", "cpu").strip()
+FAQ_EMBEDDING_MODEL_CACHE_DIR = os.getenv("FAQ_EMBEDDING_MODEL_CACHE_DIR", ".cache/models").strip()
+
 # 管理员 customer_id 白名单（逗号分隔）；用于限制管理接口（如清空全库记录）。
 ADMIN_CUSTOMER_IDS = {
     cid.strip().upper()
