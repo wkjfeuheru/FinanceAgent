@@ -61,13 +61,18 @@ class _PostgresBaseStore:
     def _ensure_schema(self) -> None:
         if self._schema_ready:
             return
-        from finance_agent.data.postgres_schema import AGENT_RUNTIME_SCHEMA_SQL, BASE_SCHEMA_SQL
+        from finance_agent.data.postgres_schema import (
+            AGENT_RUNTIME_SCHEMA_SQL,
+            BASE_SCHEMA_SQL,
+            HYBRID_ORCHESTRATION_SCHEMA_SQL,
+        )
 
         with self._transaction() as connection:
             cursor = connection.cursor()
             try:
                 cursor.execute(BASE_SCHEMA_SQL)
                 cursor.execute(AGENT_RUNTIME_SCHEMA_SQL)
+                cursor.execute(HYBRID_ORCHESTRATION_SCHEMA_SQL)
             finally:
                 cursor.close()
         self._schema_ready = True
@@ -293,6 +298,25 @@ class PostgresBusinessStore(_PostgresBaseStore):
             finally:
                 cursor.close()
         return count > 0
+
+
+def load_checkpoint_with_legacy_fallback(
+    customer_id: str,
+    conversation_id: str,
+    *,
+    checkpointer: Any,
+    business_store: PostgresBusinessStore,
+) -> Any:
+    """读取客户隔离 checkpoint，并在确认会话归属后迁移旧键。
+
+    委托给 ``RunStateStore``（设计 §6.9）；保留该模块级函数以兼容既有调用。
+    """
+    from finance_agent.orchestrator.run_state import RunStateStore
+
+    return RunStateStore(
+        checkpointer=checkpointer,
+        business_store=business_store,
+    ).load(customer_id, conversation_id)
 
 
 class PostgresAuthStore(_PostgresBaseStore):
