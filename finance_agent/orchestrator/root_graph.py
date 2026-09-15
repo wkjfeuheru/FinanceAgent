@@ -78,10 +78,18 @@ def classify_domains(
 
     intents = classified.get("intents", []) or []
     domains: list[BusinessDomain] = []
+    domain_queries: dict[str, str] = {}
     for item in intents:
         domain = _INTENT_TO_DOMAIN.get(str(item.get("intent", "")))
-        if domain is not None and domain not in domains:
+        if domain is None:
+            continue
+        if domain not in domains:
             domains.append(domain)
+        # 记录该领域的子请求：复合请求下每个领域只处理属于自己的那部分，
+        # 避免把整句（含其它领域实体）丢给单一领域而解析失败。
+        query = str(item.get("query", "")).strip()
+        if query and not domain_queries.get(domain.value):
+            domain_queries[domain.value] = query
     domains.sort(key=_DOMAIN_ORDER.index)
 
     if not domains:
@@ -95,8 +103,12 @@ def classify_domains(
         return RoutingDecision(domains=[], execution_mode="conversation")
 
     if len(domains) == 1:
-        return RoutingDecision(domains=domains, execution_mode="domain_react")
-    return RoutingDecision(domains=domains, execution_mode="plan_execute")
+        return RoutingDecision(
+            domains=domains, execution_mode="domain_react", domain_queries=domain_queries,
+        )
+    return RoutingDecision(
+        domains=domains, execution_mode="plan_execute", domain_queries=domain_queries,
+    )
 
 
 @dataclass
@@ -204,11 +216,15 @@ def build_root_graph(dependencies: RootGraphDependencies):
             )
             return updates
 
+        # 单领域直达也使用该领域的子请求：多意图里只要有一个领域时，query 已
+        # 是该领域的精确子请求，避免整句干扰解析。
+        scoped = str((routing.get("domain_queries") or {}).get(domain.value) or "").strip() \
+            or str(state.get("user_message", ""))
         outcome = dependencies.domain_runner(
             DomainTaskContext(
                 task=_single_task(
-                    goal=str(state.get("user_message", "")),
-                    instruction=str(state.get("user_message", "")),
+                    goal=scoped,
+                    instruction=scoped,
                     domain=domain,
                     task_id=task_id,
                 ),

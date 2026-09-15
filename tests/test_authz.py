@@ -109,3 +109,42 @@ def test_chat_stop_allows_owned_conversation(auth_store, monkeypatch):
     ))
     assert result["stopped"] is True
     assert stopped["conversation_id"] == "my-conv"
+
+
+def test_delete_user_clears_research_rows_before_user():
+    """注销账号必须先清理 research_results/research_runs，否则外键会让注销 500。"""
+    from finance_agent.data.postgres_stores import PostgresAuthStore
+
+    executed: list[str] = []
+
+    class _Cursor:
+        rowcount = 1
+
+        def execute(self, statement, params=()):
+            executed.append(statement)
+
+        def close(self):
+            pass
+
+    class _Conn:
+        def cursor(self):
+            return _Cursor()
+
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
+
+        def close(self):
+            pass
+
+    store = PostgresAuthStore(lambda: _Conn())
+    store._schema_ready = True
+    store.delete_user("CUST1")
+
+    joined = "\n".join(executed)
+    assert "finance.research_results" in joined
+    assert "finance.research_runs" in joined
+    # 顺序：先结果、再运行、最后用户
+    assert joined.index("finance.research_results") < joined.index("finance.research_runs") < joined.index("finance.users")

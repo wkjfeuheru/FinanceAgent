@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -34,6 +35,14 @@ logger = logging.getLogger(__name__)
 
 _MAX_FETCH_WORKERS = 5
 _MIN_TECHNICAL_BARS = 60
+
+# A 股 6 位代码（与原 SlotExtractor 一致的口径）。
+_VALID_CODE_RE = re.compile(r"(?<!\d)(?:60\d{4}|00\d{4}|30\d{4}|68\d{4}|8\d{5}|4\d{5})(?!\d)")
+
+
+def _codes_in_text(message: str) -> list[str]:
+    """提取消息中的 A 股 6 位代码（去重、保序）。"""
+    return list(dict.fromkeys(_VALID_CODE_RE.findall(message or "")))
 
 _MODE_KEYWORDS = {
     "theme_screening": ("主题", "板块", "概念", "龙头", "题材"),
@@ -184,6 +193,36 @@ def request_from_codes(profile: dict[str, Any], codes: list[str]) -> AnalysisReq
     )
 
 
+def resolve_named_stock_code(deps: StockDeps, message: str) -> list[str]:
+    """把消息中的股票**名称**解析为代码（确定性最佳匹配）。
+
+    旧编排由已退役的 SlotExtractor 负责名称→代码；V2 单领域直达必须自行补齐，
+    否则"分析贵州茅台"这类只有名称、没有 6 位代码的请求会被判为无法识别。
+    只接受**名称与代码可对应**的候选，避免把无关结果当成本轮标的。
+    """
+    if not message.strip():
+        return []
+    try:
+        raw = _search(deps).invoke({"user_query": message, "max_results": 5})
+        candidates = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return []
+    if not isinstance(candidates, list):
+        return []
+
+    named: list[str] = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        code = str(item.get("code", "")).strip()
+        name = str(item.get("name", "")).strip()
+        # 候选的名称必须真的出现在消息里，才算本轮提及的标的。
+        if code and name and name in message:
+            if code not in named:
+                named.append(code)
+    return named[:5]
+
+
 def resolve_stock_request(
     deps: StockDeps, state: dict[str, Any], message: str,
 ) -> tuple[AnalysisRequest | None, dict[str, Any] | None]:
@@ -209,26 +248,36 @@ def resolve_stock_request(
             }
         return request_from_codes(profile, codes), None
     except ValueError as exc:
-        can_discover_candidates = (
-            str(state.get("current_task_intent", "")) == "stock_recommendation"
-            and "单股分析必须且只能包含一只股票" in str(exc)
-        )
-        if not can_discover_candidates:
-            logger.debug("股票请求解析失败 intent=%s error=%s",
-                         state.get("current_task_intent"), exc)
+        # 请求形态不合法：单股请求必须恰好一只代码。按意图决定补救方式：
+        # - stock_recommendation：走候选发现（代表股优先，其次关键词搜索）；
+        # - stock_analysis：消息里只有股票名称（无 6 位代码）时，用名称→代码补齐。
+        single_stock_shape_error = "单股分析必须且只能包含一只股票" in str(exc)
+        intent = str(state.get("current_task_intent", ""))
+        if single_stock_shape_error and intent == "stock_recommendation":
+            codes = resolve_candidate_codes(deps, message)
+            if not codes:
+                return None, {
+                    "content": "股票研究暂不可用：未找到匹配的候选股票。",
+                    "status": "degraded",
+                    "clarification": None,
+                }
+            return request_from_codes(profile, codes), None
+        if single_stock_shape_error and not _codes_in_text(message):
+            named_codes = resolve_named_stock_code(deps, message)
+            if named_codes:
+                return request_from_codes(profile, named_codes), None
             return None, {
-                "content": "股票研究暂不可用：请求无法识别，请明确提供股票名称或6位代码。",
+                "content": "股票研究暂不可用：未识别到股票名称或代码，请提供股票名称或6位代码。",
                 "status": "degraded",
-                "clarification": None,
+                "clarification": "未找到与您提到的名称匹配的股票，请补充股票名称或6位代码。",
             }
-        codes = resolve_candidate_codes(deps, message)
-        if not codes:
-            return None, {
-                "content": "股票研究暂不可用：未找到匹配的候选股票。",
-                "status": "degraded",
-                "clarification": None,
-            }
-        return request_from_codes(profile, codes), None
+        logger.debug("股票请求解析失败 intent=%s error=%s",
+                     state.get("current_task_intent"), exc)
+        return None, {
+            "content": "股票研究暂不可用：请求无法识别，请明确提供股票名称或6位代码。",
+            "status": "degraded",
+            "clarification": None,
+        }
     if request.kind.value == "theme_screening":
         return request, None
     if not request.stock_codes:
@@ -589,10 +638,14 @@ def _resolve_stock_mode(context: DomainTaskContext) -> str:
 
 
 def _stock_research(deps: StockDeps, context: DomainTaskContext) -> OperationResult:
+    # 领域内的 goal→意图映射：推荐/主题类请求必须走 stock_recommendation，
+    # 否则候选发现（代表股优先、其次关键词搜索）不会触发，只会报"请求无法识别"。
+    mode = _resolve_stock_mode(context)
+    intent = "stock_recommendation" if mode in {"candidate_search", "theme_screening"} else "stock_analysis"
     state: dict[str, Any] = {
         "requirement": context.task.goal,
         "user_message": context.user_message,
-        "current_task_intent": "stock_analysis",
+        "current_task_intent": intent,
         "intent_results": {},
         "user_profile": {},
         "facts": [],

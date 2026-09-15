@@ -189,3 +189,68 @@ def test_deterministic_planner_creates_one_task_per_domain():
         BusinessDomain.PRODUCT_RESEARCH,
     ]
     assert validate_execution_plan(plan).valid
+
+
+def test_llm_planner_over_decomposition_is_normalized_to_one_task_per_domain():
+    """LLM 把请求拆成领域内多子任务时必须收敛为每领域一个任务，且保留原始请求。"""
+    from finance_agent.orchestrator.plan_execute import build_llm_planner
+
+    message = "分析贵州茅台并比较合适的基金产品"
+    payload = {
+        "tasks": [
+            {"task_id": "t1", "domain": "stock_research", "goal": "基本面", "instruction": "基本面", "expected_output": "x"},
+            {"task_id": "t2", "domain": "stock_research", "goal": "技术面", "instruction": "技术面", "depends_on": ["t1"], "expected_output": "x"},
+            {"task_id": "t3", "domain": "product_research", "goal": "基金", "instruction": "基金", "expected_output": "x"},
+            {"task_id": "t4", "domain": "product_research", "goal": "比较基金", "instruction": "比较基金", "depends_on": ["t3"], "expected_output": "x"},
+        ]
+    }
+
+    class _Model:
+        def bind(self, **kwargs):
+            return self
+
+        def invoke(self, messages):
+            import json as _json
+
+            class _R:
+                content = _json.dumps(payload, ensure_ascii=False)
+
+            return _R()
+
+    planner = build_llm_planner(_Model())
+    plan = planner(
+        {"user_message": message},
+        [BusinessDomain.STOCK_RESEARCH, BusinessDomain.PRODUCT_RESEARCH],
+    )
+
+    assert len(plan.tasks) == 2
+    assert {t.domain for t in plan.tasks} == {BusinessDomain.STOCK_RESEARCH, BusinessDomain.PRODUCT_RESEARCH}
+    assert all(t.goal == message for t in plan.tasks), "任务必须携带原始请求，避免丢失标的"
+    assert validate_execution_plan(plan).valid
+
+
+def test_llm_planner_falls_back_when_a_domain_is_missing():
+    from finance_agent.orchestrator.plan_execute import build_llm_planner
+
+    payload = {"tasks": [
+        {"task_id": "t1", "domain": "stock_research", "goal": "x", "instruction": "x", "expected_output": "x"},
+    ]}
+
+    class _Model:
+        def bind(self, **kwargs):
+            return self
+
+        def invoke(self, messages):
+            import json as _json
+
+            class _R:
+                content = _json.dumps(payload)
+
+            return _R()
+
+    plan = build_llm_planner(_Model())(
+        {"user_message": "分析贵州茅台并比较合适的基金产品"},
+        [BusinessDomain.STOCK_RESEARCH, BusinessDomain.PRODUCT_RESEARCH],
+    )
+
+    assert {t.domain for t in plan.tasks} == {BusinessDomain.STOCK_RESEARCH, BusinessDomain.PRODUCT_RESEARCH}

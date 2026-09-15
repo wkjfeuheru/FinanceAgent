@@ -351,20 +351,22 @@ def run_plan_execute(
 def deterministic_planner(
     state: dict[str, Any], domains: list[BusinessDomain],
 ) -> ExecutionPlan:
-    """确定性回退计划：每个业务领域一个任务。"""
+    """确定性回退计划：每个业务领域一个任务（使用该领域的子请求，若有）。"""
     message = str(state.get("user_message", ""))
+    queries = (state.get("routing") or {}).get("domain_queries") or {}
     seen: set[str] = set()
     tasks: list[PlanTask] = []
     for domain in domains:
         if domain in seen:
             continue
         seen.add(domain)
+        scoped = str(queries.get(domain.value) or "").strip() or message
         tasks.append(
             PlanTask(
                 task_id=f"plan:{domain.value}",
                 domain=domain,
-                goal=message,
-                instruction=message,
+                goal=scoped,
+                instruction=scoped,
                 expected_output="domain_outcome",
             )
         )
@@ -372,18 +374,59 @@ def deterministic_planner(
 
 
 _PLANNER_PROMPT = """你是投研编排规划器。用户请求同时涉及以下业务领域：{domains}。
-请把请求拆分为不超过 {limit} 个跨领域任务，只做领域级分解，不规划领域内部工具。
+
+本系统的每个业务领域由一条**确定性的单次流水线**承载，因此规划只做**领域级分解**：
+每个业务领域恰好一个任务，不拆分领域内部步骤，不增加重复任务。
 
 只输出 JSON，形如：
 {{"tasks": [{{"task_id": "t1", "domain": "stock_research", "goal": "…",
   "instruction": "…", "depends_on": [], "expected_output": "domain_outcome"}}]}}
 
 硬约束：
-- domain 只能是 {domains} 之一；
+- domain 只能取 {domains} 之一，且**每个领域最多出现一次**；
+- 任务数不超过 {limit}，通常等于业务领域个数；
 - task_id 唯一且非空；
 - depends_on 只能引用本计划内已出现的 task_id；
 - 每个任务必须有非空 expected_output。
 用户请求：{message}"""
+
+
+def _normalize_plan(
+    plan: ExecutionPlan,
+    domains: list[BusinessDomain],
+    message: str,
+    domain_queries: dict[str, str] | None = None,
+) -> ExecutionPlan | None:
+    """把规划结果规范为「每个业务领域恰好一个任务」，并保留该领域的子请求。
+
+    LLM 可能把请求拆成领域内部的多个子任务（本架构下等于重复执行同一条
+    确定性流水线）。这里按领域去重；每个任务的 goal/instruction 使用该领域
+    自己的子请求（来自分类器 per-intent query），无子请求时回退整句消息。
+    """
+    wanted = list(dict.fromkeys(domains))
+    queries = domain_queries or {}
+    by_domain: dict[BusinessDomain, PlanTask] = {}
+    for task in plan.tasks:
+        by_domain.setdefault(task.domain, task)
+
+    if set(by_domain) != set(wanted):
+        return None
+
+    tasks: list[PlanTask] = []
+    for domain in wanted:
+        source = by_domain[domain]
+        scoped = str(queries.get(domain.value) or "").strip() or message
+        tasks.append(
+            PlanTask(
+                task_id=f"plan:{domain.value}",
+                domain=domain,
+                goal=scoped,
+                instruction=scoped,
+                depends_on=[],
+                expected_output=source.expected_output or "domain_outcome",
+            )
+        )
+    return ExecutionPlan(tasks=tasks)
 
 
 def build_llm_planner(model: Any, *, fallback: bool = True):
@@ -393,18 +436,22 @@ def build_llm_planner(model: Any, *, fallback: bool = True):
     call = build_chat_model_callable(model, require_json=True)
 
     def planner(state: dict[str, Any], domains: list[BusinessDomain]) -> ExecutionPlan:
+        message = str(state.get("user_message", ""))
+        domain_queries = (state.get("routing") or {}).get("domain_queries") or {}
         domain_values = [domain.value for domain in domains]
         prompt = _PLANNER_PROMPT.format(
             domains="、".join(domain_values),
             limit=PLAN_TASK_LIMIT,
-            message=str(state.get("user_message", "")),
+            message=message,
         )
         try:
             raw = call([{"role": "system", "content": prompt}])
             payload = json.loads(raw) if isinstance(raw, str) else raw
             plan = ExecutionPlan.model_validate(payload)
             if validate_execution_plan(plan).valid:
-                return plan
+                normalized = _normalize_plan(plan, domains, message, domain_queries)
+                if normalized is not None:
+                    return normalized
         except Exception:  # noqa: BLE001 - 规划失败回退确定性计划
             pass
         if fallback:

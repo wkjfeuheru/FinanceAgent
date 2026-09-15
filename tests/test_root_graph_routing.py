@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from finance_agent.orchestrator.contracts import BusinessDomain
 from finance_agent.orchestrator.root_graph import (
     CLASSIFICATION_FAILED_RESPONSE,
     RootGraphDependencies,
@@ -132,3 +133,74 @@ def test_missing_domain_runner_fails_explicitly_instead_of_silent_success():
 
     assert result["run_status"] == "failed"
     assert "domain_runner_unavailable:stock_research" in result["warnings"]
+
+
+def test_composite_routing_carries_per_domain_sub_requests():
+    """复合请求必须为每个领域保留其子请求，避免整句下发给单一领域。"""
+    payload = {
+        "intents": [
+            {"intent": "stock_analysis", "query": "分析贵州茅台", "confidence": 0.99},
+            {"intent": "product_analysis", "query": "比较合适的基金产品", "confidence": 0.99},
+        ],
+        "uncertain_intents": [],
+        "finance_related": True,
+        "intent_source": "deepseek",
+        "classification_error": {},
+    }
+    decision = classify_domains("分析贵州茅台并比较合适的基金产品", classifier=_FakeClassifier(payload))
+
+    assert decision.execution_mode == "plan_execute"
+    assert decision.domain_queries["stock_research"] == "分析贵州茅台"
+    assert decision.domain_queries["product_research"] == "比较合适的基金产品"
+
+
+def test_single_domain_routing_uses_scoped_query_for_task():
+    """单领域直达时，任务 goal 使用该领域子请求而非整句。"""
+    payload = {
+        "intents": [
+            {"intent": "stock_analysis", "query": "分析600519", "confidence": 0.99},
+            {"intent": "casual_chat", "query": "随便聊聊", "confidence": 0.99},
+        ],
+        "uncertain_intents": [],
+        "finance_related": True,
+        "intent_source": "deepseek",
+        "classification_error": {},
+    }
+    captured = {}
+
+    def domain_runner(context):
+        captured["goal"] = context.task.goal
+        from finance_agent.orchestrator.contracts import DomainOutcome
+
+        return DomainOutcome(
+            task_id=context.task.task_id, domain=context.task.domain,
+            status="success", summary="ok",
+        )
+
+    graph = build_root_graph(
+        RootGraphDependencies(classifier=_FakeClassifier(payload), domain_runner=domain_runner)
+    )
+    graph.invoke({"user_message": "分析600519，另外随便聊聊", "run_id": "run-1"})
+
+    assert captured["goal"] == "分析600519"
+
+
+def test_deterministic_plan_uses_scoped_domain_queries():
+    from finance_agent.orchestrator.plan_execute import deterministic_planner
+
+    plan = deterministic_planner(
+        {
+            "user_message": "分析贵州茅台并比较合适的基金产品",
+            "routing": {
+                "domain_queries": {
+                    "stock_research": "分析贵州茅台",
+                    "product_research": "比较合适的基金产品",
+                }
+            },
+        },
+        [BusinessDomain.STOCK_RESEARCH, BusinessDomain.PRODUCT_RESEARCH],
+    )
+
+    goals = {t.domain.value: t.goal for t in plan.tasks}
+    assert goals["stock_research"] == "分析贵州茅台"
+    assert goals["product_research"] == "比较合适的基金产品"

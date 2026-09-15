@@ -133,6 +133,9 @@ def run_bounded_react(
         {
             "role": "system",
             "content": (
+                # 显式要求 JSON 输出：OpenAI 兼容接口在 response_format=json_object 时
+                # 要求提示词中出现 "json" 字样，否则直接 400。
+                "你每一轮都必须只输出一个 JSON 对象，不要输出其它文字或 Markdown 代码块。"
                 "只允许调用这些工具：" + ", ".join(sorted(tools)) + "。"
                 "需要工具时输出 {\"action\":\"tool\",\"tool_name\":...,\"tool_input\":{...}}；"
                 "可以作答时输出 {\"action\":\"final\",\"final_text\":...}。"
@@ -148,7 +151,21 @@ def run_bounded_react(
     while steps < max_steps:
         steps += 1
         try:
-            decision = _coerce_decision(model(list(messages)))
+            raw_decision = model(list(messages))
+        except Exception as exc:  # noqa: BLE001 - LLM 不可用时降级，不让整轮请求崩溃
+            return ReactOutcome(
+                status="failed",
+                final_text=refusal_text,
+                observations=observations,
+                tool_trace=tool_trace,
+                metadata={
+                    "react_steps": steps,
+                    "error": "model_unavailable",
+                    "detail": type(exc).__name__,
+                },
+            )
+        try:
+            decision = _coerce_decision(raw_decision)
         except ReactProtocolError as exc:
             return ReactOutcome(
                 status="failed",
@@ -201,7 +218,21 @@ def run_bounded_react(
             )
             continue
 
-        raw_output = spec.handler(tool_input)
+        try:
+            raw_output = spec.handler(tool_input)
+        except Exception as exc:  # noqa: BLE001 - 工具失败降级，不让整轮请求崩溃
+            return ReactOutcome(
+                status="failed",
+                final_text=refusal_text,
+                observations=observations,
+                tool_trace=tool_trace + [spec.name],
+                metadata={
+                    "react_steps": steps,
+                    "error": "tool_failed",
+                    "tool": spec.name,
+                    "detail": type(exc).__name__,
+                },
+            )
         try:
             tool_output = spec.output_model.model_validate(raw_output)
         except ValidationError as exc:

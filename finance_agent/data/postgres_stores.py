@@ -450,13 +450,38 @@ class PostgresAuthStore(_PostgresBaseStore):
         return result
 
     def delete_user(self, customer_id: str) -> bool:
+        """删除用户，并先清理其研究审计数据。
+
+        ``research_runs`` 没有指向 ``users`` 的外键，且 ``research_runs.agent_run_id``
+        → ``agent_runs`` 未声明级联，因此仅靠 ``users`` 的级联会因外键约束失败，
+        导致"注销账号"对已产生研究记录的用户直接 500。这里按依赖顺序显式清理。
+        """
         self._ensure_schema()
+        cid = customer_id.upper()
         with self._transaction() as connection:
             cursor = connection.cursor()
             try:
                 cursor.execute(
+                    """DELETE FROM finance.research_results WHERE research_run_id IN (
+                           SELECT research_run_id FROM finance.research_runs
+                           WHERE customer_id = %s
+                              OR agent_run_id IN (
+                                  SELECT run_id FROM finance.agent_runs WHERE customer_id = %s
+                              )
+                       )""",
+                    (cid, cid),
+                )
+                cursor.execute(
+                    """DELETE FROM finance.research_runs
+                       WHERE customer_id = %s
+                          OR agent_run_id IN (
+                              SELECT run_id FROM finance.agent_runs WHERE customer_id = %s
+                          )""",
+                    (cid, cid),
+                )
+                cursor.execute(
                     "DELETE FROM finance.users WHERE customer_id = %s",
-                    (customer_id.upper(),),
+                    (cid,),
                 )
                 count = cursor.rowcount
             finally:

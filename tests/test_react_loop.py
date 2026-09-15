@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from finance_agent.orchestrator.react import ToolSpec, run_bounded_react
+from finance_agent.orchestrator.react import ToolSpec, build_chat_model_callable, run_bounded_react
 
 
 class _Query(BaseModel):
@@ -126,3 +126,67 @@ def test_react_repairs_invalid_tool_input_once():
     assert len(outcome.observations) == 1
     assert outcome.metadata["react_steps"] == 3
     assert outcome.metadata["protocol_repairs"] == 1
+
+
+def test_react_degrades_when_model_call_raises():
+    """模型不可用/接口报错时必须降级为安全文案，而不是让整轮请求崩溃。"""
+    def exploding_model(messages: list[dict[str, Any]]) -> Any:
+        del messages
+        raise RuntimeError("openai.BadRequestError: 400")
+
+    outcome = run_bounded_react(
+        model=exploding_model,
+        tools={"faq_search": _faq_tool()},
+        system_prompt="system",
+        user_message="你好",
+        max_steps=4,
+        refusal_text="暂时无法执行该操作。",
+    )
+
+    assert outcome.status == "failed"
+    assert outcome.final_text == "暂时无法执行该操作。"
+    assert outcome.metadata["error"] == "model_unavailable"
+
+
+def test_react_system_prompt_mentions_json_for_response_format():
+    """OpenAI 兼容接口在 response_format=json_object 时要求提示词含 "json"。"""
+    captured: list[list[dict[str, Any]]] = []
+
+    def model(messages: list[dict[str, Any]]) -> Any:
+        captured.append(list(messages))
+        return {"action": "final", "final_text": "ok"}
+
+    run_bounded_react(
+        model=model,
+        tools={"faq_search": _faq_tool()},
+        system_prompt="你是投顾助手。",
+        user_message="你好",
+        max_steps=4,
+    )
+
+    joined = " ".join(str(m.get("content", "")) for m in captured[0])
+    assert "json" in joined.lower()
+
+
+def test_chat_model_callable_binds_json_object_response_format():
+    """适配器必须以 json_object 约束输出，供 _coerce_decision 解析。"""
+    seen: dict[str, Any] = {}
+
+    class _Model:
+        def bind(self, **kwargs):
+            seen.update(kwargs)
+            return self
+
+        def invoke(self, messages):
+            del messages
+
+            class _R:
+                content = '{"action": "final", "final_text": "hi"}'
+
+            return _R()
+
+    call = build_chat_model_callable(_Model(), require_json=True)
+    result = call([{"role": "user", "content": "hi"}])
+
+    assert seen.get("response_format") == {"type": "json_object"}
+    assert result == '{"action": "final", "final_text": "hi"}'
