@@ -90,6 +90,8 @@ class RoutingDecision(BaseModel):
     # 每个业务领域对应的**该领域子请求**（来自分类器的 per-intent query）。
     # 复合请求必须按领域下发子请求，否则某领域会拿到整句（含其它领域实体）。
     domain_queries: dict[str, str] = Field(default_factory=dict)
+    # 未执行部分的提示（如低置信度意图需澄清），用于向用户明示而非静默丢弃。
+    warnings: list[str] = Field(default_factory=list)
 
 
 class ReactDecision(BaseModel):

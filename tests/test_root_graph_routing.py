@@ -204,3 +204,61 @@ def test_deterministic_plan_uses_scoped_domain_queries():
     goals = {t.domain.value: t.goal for t in plan.tasks}
     assert goals["stock_research"] == "分析贵州茅台"
     assert goals["product_research"] == "比较合适的基金产品"
+
+
+def test_dropped_low_confidence_intent_is_surfaced_not_silent():
+    """有领域可执行、但另有低置信度意图被跳过时，必须向用户说明缺什么。"""
+    payload = {
+        "intents": [{"intent": "stock_analysis", "query": "分析贵州茅台", "confidence": 0.95}],
+        "uncertain_intents": [{
+            "intent": "product_analysis", "query": "比较合适的基金产品", "confidence": 0.85,
+            "clarification_question": "请补充具体基金名称",
+        }],
+        "finance_related": True,
+        "intent_source": "deepseek",
+        "classification_error": {},
+    }
+    captured = {}
+
+    def domain_runner(context):
+        from finance_agent.orchestrator.contracts import DomainOutcome
+
+        return DomainOutcome(
+            task_id=context.task.task_id, domain=context.task.domain,
+            status="success", summary="贵州茅台分析完成。",
+        )
+
+    graph = build_root_graph(
+        RootGraphDependencies(classifier=_FakeClassifier(payload), domain_runner=domain_runner)
+    )
+    result = graph.invoke({"user_message": "分析贵州茅台并比较合适的基金产品", "run_id": "run-1"})
+
+    # 已执行部分正常返回
+    assert "贵州茅台分析完成。" in result["final_response"]
+    # 未执行部分必须显式说明，不能静默丢弃
+    assert "比较合适的基金产品" in result["final_response"]
+    assert any(w.startswith("clarification_needed:") for w in result["warnings"])
+
+
+def test_fully_covered_request_has_no_clarification_note():
+    payload = {
+        "intents": [{"intent": "stock_analysis", "query": "分析600519", "confidence": 0.95}],
+        "uncertain_intents": [],
+        "finance_related": True, "intent_source": "deepseek", "classification_error": {},
+    }
+
+    def domain_runner(context):
+        from finance_agent.orchestrator.contracts import DomainOutcome
+
+        return DomainOutcome(
+            task_id=context.task.task_id, domain=context.task.domain,
+            status="success", summary="分析完成。",
+        )
+
+    graph = build_root_graph(
+        RootGraphDependencies(classifier=_FakeClassifier(payload), domain_runner=domain_runner)
+    )
+    result = graph.invoke({"user_message": "分析600519", "run_id": "run-1"})
+
+    assert "补充说明" not in result["final_response"]
+    assert result["warnings"] == []

@@ -122,45 +122,19 @@ class DeepSeekIntentClassifier:
                 "意图响应必须包含至少一个意图",
                 error_code="intent_protocol_error", cause="empty_intents",
             )
+        # 逐条筛选：只有“证据不在原文”属于本条不可用（防模型编造证据），丢弃该条
+        # 而不牵连其它条目。字段级问题（未知 intent、非法 execution_mode、置信度
+        # 越界、低置信度缺少澄清）一律留给下游 normalize_intent_item 容错处理：
+        # 未知 intent 会被丢弃、非法 mode 会被归一、低置信度会进入 uncertain。
+        # 若因为某一条的小问题就抛错，会把同一响应里**其它高置信度的有效意图一起
+        # 丢掉**（例如“分析贵州茅台并比较合适的基金产品”里合法的 stock 意图）。
         valid: list[dict[str, Any]] = []
         for item in raw_intents:
             if not isinstance(item, dict):
                 continue
-            intent = str(item.get("intent", "")).strip()
-            mode = str(item.get("execution_mode", "")).strip()
             evidence = str(item.get("evidence", "")).strip()
-            if intent not in _CLASSIFIER_MODES:
-                raise IntentClassificationError(
-                    f"返回非法 intent: {intent}",
-                    error_code="intent_protocol_error", cause="invalid_intent",
-                )
-            if mode not in _CLASSIFIER_MODES[intent]:
-                raise IntentClassificationError(
-                    f"返回非法 execution_mode: {mode}",
-                    error_code="intent_protocol_error", cause="invalid_execution_mode",
-                )
             if not evidence or evidence not in message:
                 continue
-            try:
-                confidence = float(item.get("confidence"))
-            except (TypeError, ValueError):
-                raise IntentClassificationError(
-                    "意图置信度必须是有限数值",
-                    error_code="intent_protocol_error", cause="invalid_confidence",
-                )
-            if not math.isfinite(confidence) or not 0 <= confidence <= 1:
-                raise IntentClassificationError(
-                    "意图置信度必须位于 0 到 1",
-                    error_code="intent_protocol_error", cause="invalid_confidence",
-                )
-            if (
-                confidence < _INTENT_CONFIDENCE_THRESHOLD
-                and not str(item.get("clarification_question", "")).strip()
-            ):
-                raise IntentClassificationError(
-                    "低置信度意图必须包含 clarification_question",
-                    error_code="intent_protocol_error", cause="missing_clarification",
-                )
             valid.append(dict(item))
         if raw_intents and not valid:
             raise IntentClassificationError(

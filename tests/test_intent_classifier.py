@@ -215,3 +215,70 @@ def test_prompt_defines_product_vs_knowledge_boundary():
         assert anchor in prompt, f"提示词缺少边界锚点：{anchor}"
     # 并且要显式禁止“见词即判”
     assert "不得因为句中出现" in prompt
+
+
+# ── 逐条容错：单条小问题不得拖垮整批意图 ────────────────────────────────────
+
+def _validate(payload, message):
+    from finance_agent.orchestrator.intent import DeepSeekIntentClassifier
+
+    return DeepSeekIntentClassifier._validate(payload, message)
+
+
+def test_low_confidence_item_does_not_discard_valid_siblings():
+    """复合请求里某条低置信度意图缺少澄清问题时，不得连带丢掉其它有效意图。"""
+    message = "分析贵州茅台并比较合适的基金产品"
+    payload = {"intents": [
+        {"intent": "stock_analysis", "query": "分析贵州茅台", "confidence": 0.95,
+         "evidence": "分析贵州茅台", "execution_mode": "stock_analysis"},
+        {"intent": "product_analysis", "query": "比较合适的基金产品", "confidence": 0.85,
+         "evidence": "比较合适的基金产品", "execution_mode": "product_analysis"},
+    ], "finance_related": True}
+
+    parsed = _validate(payload, message)
+
+    assert [i["intent"] for i in parsed["intents"]] == ["stock_analysis", "product_analysis"]
+
+
+def test_invalid_execution_mode_does_not_discard_valid_siblings():
+    """模型臆造 execution_mode 时归一化即可，不应让整批意图分类失败。"""
+    message = "华夏成长基金和易方达蓝筹哪个好"
+    payload = {"intents": [
+        {"intent": "product_analysis", "query": message, "confidence": 0.95,
+         "evidence": message, "execution_mode": "product_comparison"},
+    ], "finance_related": True}
+
+    parsed = _validate(payload, message)
+
+    assert len(parsed["intents"]) == 1
+
+
+def test_unknown_intent_is_dropped_downstream_not_fatal():
+    """未知 intent 由 normalize 丢弃，最终如实上报 no_valid_intents（而非崩溃）。"""
+    from finance_agent.orchestrator.intent import IntentClassifier
+
+    class _Model:
+        def classify(self, message, context_summary=""):
+            return {"intents": [
+                {"intent": "unknown_intent", "query": message, "confidence": 0.99, "evidence": message},
+            ], "finance_related": True}
+
+    result = IntentClassifier(classifier=_Model()).classify_intents("随便问问")
+
+    assert result["intents"] == []
+    assert result["classification_error"]["cause"] == "no_valid_intents"
+
+
+def test_evidence_not_in_message_still_dropped_per_item():
+    """证据必须逐字来自当前消息：单条编造证据只丢该条。"""
+    message = "分析600519"
+    payload = {"intents": [
+        {"intent": "stock_analysis", "query": "分析600519", "confidence": 0.95,
+         "evidence": "分析600519", "execution_mode": "stock_analysis"},
+        {"intent": "product_analysis", "query": "编造的", "confidence": 0.95,
+         "evidence": "这句不在原文里", "execution_mode": "product_analysis"},
+    ], "finance_related": True}
+
+    parsed = _validate(payload, message)
+
+    assert [i["intent"] for i in parsed["intents"]] == ["stock_analysis"]

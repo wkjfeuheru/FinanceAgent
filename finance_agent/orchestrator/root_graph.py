@@ -91,9 +91,9 @@ def classify_domains(
         if query and not domain_queries.get(domain.value):
             domain_queries[domain.value] = query
     domains.sort(key=_DOMAIN_ORDER.index)
+    uncertain = classified.get("uncertain_intents", []) or []
 
     if not domains:
-        uncertain = classified.get("uncertain_intents", []) or []
         if uncertain:
             return RoutingDecision(
                 domains=[],
@@ -102,12 +102,27 @@ def classify_domains(
             )
         return RoutingDecision(domains=[], execution_mode="conversation")
 
+    # 低置信度意图不进入执行，但**不得静默丢弃**：把被跳过的子请求与所需澄清
+    # 作为提示带回，让用户知道哪一部分没执行、需要补充什么。
+    dropped_notes: list[str] = []
+    for item in uncertain:
+        query = str(item.get("query", "")).strip()
+        ask = str(item.get("clarification_question", "")).strip()
+        if query:
+            note = f"「{query}」未执行：{ask}" if ask else f"「{query}」信息不足，请补充更具体的需求。"
+        else:
+            note = ask or CLARIFICATION_FALLBACK
+        if note not in dropped_notes:
+            dropped_notes.append(note)
+
     if len(domains) == 1:
         return RoutingDecision(
-            domains=domains, execution_mode="domain_react", domain_queries=domain_queries,
+            domains=domains, execution_mode="domain_react",
+            domain_queries=domain_queries, warnings=dropped_notes,
         )
     return RoutingDecision(
-        domains=domains, execution_mode="plan_execute", domain_queries=domain_queries,
+        domains=domains, execution_mode="plan_execute",
+        domain_queries=domain_queries, warnings=dropped_notes,
     )
 
 
@@ -289,14 +304,27 @@ def build_root_graph(dependencies: RootGraphDependencies):
                         outcome_refs.append(
                             {"fact_id": str(ref.get("uri", "")), "value": ref.get("content_hash", "")}
                         )
-        result = run_compliance(draft=str(state.get("final_response", "")), evidence=outcome_refs)
+        # 未执行的澄清提示必须出现在回复里（而非只进 warnings），否则用户会以为
+        # 整条请求都处理完了。先并入草稿再走合规，保证提示本身也受合规校验。
+        draft = str(state.get("final_response", ""))
+        notes = [str(n) for n in ((state.get("routing") or {}).get("warnings") or []) if str(n).strip()]
+        if notes:
+            hint = "补充说明：" + "；".join(notes)
+            draft = f"{draft}\n\n{hint}".strip() if draft.strip() else hint
+        result = run_compliance(draft=draft, evidence=outcome_refs)
         updates: dict[str, Any] = {
             "compliance": result.model_dump(mode="json"),
             "final_response": result.response,
         }
+        if notes:
+            updates["warnings"] = list(state.get("warnings", []) or []) + [
+                f"clarification_needed:{note}" for note in notes
+            ]
         if result.action == "blocked":
             updates["run_status"] = "failed"
-            updates["warnings"] = list(state.get("warnings", []) or []) + ["compliance_blocked"]
+            updates["warnings"] = list(updates.get("warnings") or state.get("warnings", []) or []) + [
+                "compliance_blocked"
+            ]
         return updates
 
     graph = StateGraph(RootState)
