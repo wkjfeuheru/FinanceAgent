@@ -1,5 +1,6 @@
--- 混合编排持久化：本地 FAQ 索引与可恢复的异步任务引用。
-CREATE EXTENSION IF NOT EXISTS vector;
+-- 混合编排持久化：FAQ 索引元数据与可恢复的异步任务引用。
+-- 本文件**不依赖 pgvector**，可在任何 PostgreSQL 上执行；向量分块见 009。
+-- 这样异步任务查询/恢复不会因为缺少 pgvector 而整体不可用。
 
 CREATE TABLE IF NOT EXISTS finance.faq_index_versions (
     index_version varchar(128) PRIMARY KEY,
@@ -16,24 +17,6 @@ CREATE TABLE IF NOT EXISTS finance.faq_documents (
     created_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (index_version, faq_id)
 );
-
-CREATE TABLE IF NOT EXISTS finance.faq_chunks (
-    chunk_id uuid PRIMARY KEY,
-    index_version varchar(128) NOT NULL REFERENCES finance.faq_index_versions(index_version),
-    faq_id varchar(128) NOT NULL,
-    source_path text NOT NULL,
-    chunk_ordinal integer NOT NULL,
-    content text NOT NULL,
-    content_hash varchar(128) NOT NULL,
-    embedding vector(512) NOT NULL,
-    search_text tsvector GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED,
-    is_active boolean NOT NULL DEFAULT false,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (index_version, faq_id, chunk_ordinal)
-);
-CREATE INDEX IF NOT EXISTS idx_faq_chunks_search_text ON finance.faq_chunks USING gin (search_text);
-CREATE INDEX IF NOT EXISTS idx_faq_chunks_embedding_cosine
-    ON finance.faq_chunks USING hnsw (embedding vector_cosine_ops);
 
 CREATE TABLE IF NOT EXISTS finance.async_jobs (
     job_id varchar(128) PRIMARY KEY,

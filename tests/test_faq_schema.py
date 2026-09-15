@@ -1,18 +1,30 @@
 """FAQ 和异步运行持久化的数据库契约。"""
 
-from finance_agent.data.postgres_schema import HYBRID_ORCHESTRATION_SCHEMA_SQL
+from finance_agent.data.postgres_schema import (
+    FAQ_VECTOR_SCHEMA_SQL,
+    HYBRID_ORCHESTRATION_SCHEMA_SQL,
+)
 from finance_agent.faq.repository import PostgresAsyncRunRepository
 from finance_agent.orchestrator.contracts import AsyncJobRef
 
 
-def test_faq_schema_contains_versioned_vector_chunks():
-    """避免迁移遗漏 pgvector 或 FAQ 分块索引需要的列。"""
+def test_faq_metadata_schema_has_no_pgvector_dependency():
+    """FAQ 元数据与异步任务表必须能在没有 pgvector 的库上创建。"""
     schema_sql = HYBRID_ORCHESTRATION_SCHEMA_SQL
 
-    assert "CREATE EXTENSION IF NOT EXISTS vector" in schema_sql
+    assert "CREATE EXTENSION" not in schema_sql
+    assert "USING hnsw" not in schema_sql
+    assert "finance.faq_chunks" not in schema_sql
     assert "finance.faq_documents" in schema_sql
-    assert "finance.faq_chunks" in schema_sql
     assert "finance.faq_index_versions" in schema_sql
+
+
+def test_faq_vector_schema_contains_versioned_vector_chunks():
+    """避免迁移遗漏 pgvector 或 FAQ 分块索引需要的列。"""
+    schema_sql = FAQ_VECTOR_SCHEMA_SQL
+
+    assert "CREATE EXTENSION IF NOT EXISTS vector" in schema_sql
+    assert "finance.faq_chunks" in schema_sql
     assert "embedding vector(512)" in schema_sql
     assert "content_hash" in schema_sql
     assert "source_path" in schema_sql

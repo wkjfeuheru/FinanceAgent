@@ -48,6 +48,7 @@ class _PostgresRepository:
     def __init__(self, connection_factory) -> None:
         self._connection_factory = connection_factory
         self._schema_ready = False
+        self._vector_ready = False
 
     @contextmanager
     def _transaction(self) -> Iterator[Any]:
@@ -62,6 +63,7 @@ class _PostgresRepository:
             connection.close()
 
     def _ensure_schema(self) -> None:
+        """建表：元数据与异步任务表不依赖 pgvector（`async_jobs` 只在此处需要）。"""
         if self._schema_ready:
             return
         from finance_agent.data.postgres_schema import HYBRID_ORCHESTRATION_SCHEMA_SQL
@@ -77,6 +79,32 @@ class _PostgresRepository:
 
 class PostgresFaqRepository(_PostgresRepository):
     """FAQ 版本发布和候选查询的 PostgreSQL 实现。"""
+
+    def _ensure_schema(self) -> None:
+        # 先建不依赖 pgvector 的元数据表，再建向量分块表；缺扩展时给出修复提示。
+        super()._ensure_schema()
+        if self._vector_ready:
+            return
+        from finance_agent.data.postgres_schema import FAQ_VECTOR_SCHEMA_SQL
+
+        with self._transaction() as connection:
+            cursor = connection.cursor()
+            try:
+                cursor.execute(FAQ_VECTOR_SCHEMA_SQL)
+            except Exception as exc:
+                message = str(exc)
+                if "vector" in message and (
+                    "is not available" in message or "vector.control" in message
+                ):
+                    raise RuntimeError(
+                        "PostgreSQL 缺少 pgvector 扩展，FAQ 索引与检索不可用。"
+                        "请安装 pgvector（例如 postgresql-15-pgvector）并在业务库执行 "
+                        "CREATE EXTENSION vector; 后重试。"
+                    ) from exc
+                raise
+            finally:
+                cursor.close()
+        self._vector_ready = True
 
     def publish_index(
         self,

@@ -42,7 +42,10 @@ AGENT_RUNTIME_SCHEMA_SQL = _load_sql("002_agent_runtime_schema.sql")
 IDENTITY_MIGRATION_SQL = _load_sql("003_identity_migration.sql")
 RESEARCH_GOVERNANCE_SCHEMA_SQL = _load_sql("004_research_governance.sql")
 THEME_REGISTRY_SCHEMA_SQL = _load_sql("005_theme_registry.sql")
+# FAQ 索引元数据与异步任务引用：不依赖 pgvector，可安全用于任意业务库。
 HYBRID_ORCHESTRATION_SCHEMA_SQL = _load_sql("008_hybrid_orchestration.sql")
+# FAQ 向量分块：依赖 pgvector 扩展，仅 FAQ 索引/检索路径需要。
+FAQ_VECTOR_SCHEMA_SQL = _load_sql("009_faq_vector.sql")
 
 
 def runtime_schema_jsonb_fields() -> dict[str, str]:

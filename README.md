@@ -237,11 +237,19 @@ FAQ_MIN_SCORE=0.3
 
 - 匿名模式已关闭，`AUTH_REQUIRED` 不需要配置，也不能通过环境变量重新开启匿名访问。
 - PostgreSQL 是唯一的关系型存储；未配置、驱动缺失或无法连接时，服务会显式失败，不会回退到 SQLite。
-- 首次连接时程序会自动创建所需 schema（含 pgvector、FAQ 与异步任务表）。
+- 首次连接时程序会自动创建认证、业务、审计、主题注册表与异步任务表。**pgvector 只在 FAQ 索引/检索时使用**（`sql/009_faq_vector.sql`），不属于启动前置条件；缺少 pgvector 只影响 FAQ，不影响登录、对话与管理接口。
+- 管理员接口（主题注册表、待审核线索、clear-records）依赖 `ADMIN_CUSTOMER_IDS` 白名单；未配置时所有管理员接口返回 403，前端会隐藏对应面板。
 - 混合编排只有一条执行路径：Root Graph（分类 → 单领域 Domain ReAct / 复合 Plan-and-Execute → 统一合规出口）。异常显式返回 `run_status="failed"`，不会静默回退到任何旧路径。
 - 不要将包含真实密钥的 `.env` 文件提交到版本库。
 
 ### 3.1 FAQ 索引、Celery worker 与异步状态
+
+FAQ 索引/检索需要 pgvector 扩展。安装（Debian/Ubuntu 示例）并在业务库启用：
+
+```bash
+apt-get install postgresql-15-pgvector   # 版本需与 PostgreSQL 主版本一致
+psql -d advisor -c 'CREATE EXTENSION IF NOT EXISTS vector;'
+```
 
 FAQ 原文位于 `docs/faq/*.md`，每个问答以 `## FAQ-001 标题` 的二级标题组织（一个问答一个 chunk）。发布索引版本：
 
@@ -249,7 +257,7 @@ FAQ 原文位于 `docs/faq/*.md`，每个问答以 `## FAQ-001 标题` 的二级
 python -m finance_agent.faq index --root docs/faq --model-cache-dir .cache/models
 ```
 
-该命令先校验全部文档，再在单事务内写入向量与全文值、切换活跃版本；任一文档校验失败则整批不发布。
+该命令先校验全部文档，再在单事务内写入向量与全文值、切换活跃版本；任一文档校验失败则整批不发布。缺少 pgvector 时命令会给出明确的安装提示，不会影响其它功能。
 
 启动 CPU 密集量化计算的独立 worker（使用 `CELERY_REDIS_DB` 的独立 Redis DB 与 `CELERY_QUANT_QUEUE` 队列）：
 

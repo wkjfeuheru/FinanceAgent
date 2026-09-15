@@ -64,7 +64,6 @@ class _PostgresBaseStore:
         from finance_agent.data.postgres_schema import (
             AGENT_RUNTIME_SCHEMA_SQL,
             BASE_SCHEMA_SQL,
-            HYBRID_ORCHESTRATION_SCHEMA_SQL,
         )
 
         with self._transaction() as connection:
@@ -72,7 +71,6 @@ class _PostgresBaseStore:
             try:
                 cursor.execute(BASE_SCHEMA_SQL)
                 cursor.execute(AGENT_RUNTIME_SCHEMA_SQL)
-                cursor.execute(HYBRID_ORCHESTRATION_SCHEMA_SQL)
             finally:
                 cursor.close()
         self._schema_ready = True
