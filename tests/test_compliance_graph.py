@@ -70,3 +70,40 @@ def test_compliance_graph_projects_decision():
 
     assert result["compliance"]["action"] in {"rewritten", "blocked"}
     assert result["compliance"]["rewrite_count"] in {0, 1}
+
+
+# ── 受信内容只审计不改写 ─────────────────────────────────────────────────────
+
+def test_audit_only_preserves_trusted_text_and_records_reasons():
+    """FAQ 原文属受信内容：命中风险词也只审计，不得删改（否则会变病句）。"""
+    draft = "什么是操纵市场？常见手法有哪些？\n\n操纵市场指通过虚假申报影响证券价格。"
+
+    result = run_compliance(draft=draft, audit_only=True)
+
+    assert result.action == "audited"
+    assert result.response == draft, "受信内容必须逐字保留"
+    assert result.reason_codes, "必须留下审计原因码"
+    assert result.audit["action"] == "audited"
+
+
+def test_audit_only_clean_text_still_passes():
+    result = run_compliance(draft="贵州茅台估值处于合理区间。", audit_only=True)
+
+    assert result.action == "passed"
+    assert result.response == "贵州茅台估值处于合理区间。"
+
+
+def test_audit_only_never_blocks():
+    """即使是 always_reject 策略，受信内容也不得被拦截。"""
+    result = run_compliance(draft="违规内容", policy=always_reject_policy(), audit_only=True)
+
+    assert result.action == "audited"
+    assert result.response == "违规内容"
+
+
+def test_non_trusted_text_still_rewritten_by_default():
+    """默认路径（非受信内容）合规改写行为不变。"""
+    result = run_compliance(draft="该股保证收益 10%。")
+
+    assert result.action == "rewritten"
+    assert "保证收益" not in result.response

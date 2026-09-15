@@ -56,6 +56,8 @@ class RootState(TypedDict, total=False):
     domain_outcomes: dict[str, dict[str, Any]]
     compliance: dict[str, Any]
     single_task_id: str
+    # 该轮回答是否来自受信来源（FAQ 原文）；为真时合规只审计、不改写。
+    trusted_content: bool
 
 
 def classify_domains(
@@ -200,6 +202,8 @@ def build_root_graph(dependencies: RootGraphDependencies):
             "final_response": result.get("final_response", ""),
             "run_status": "completed" if result.get("status") == "success" else "partial",
             "warnings": list(result.get("warnings", []) or []),
+            # 引用了 FAQ 知识库原文时，内容属于受信语料，合规出口只审计不改写。
+            "trusted_content": bool(result.get("cited_faq", False)),
         }
 
     def clarify_node(state: RootState) -> dict[str, Any]:
@@ -311,7 +315,12 @@ def build_root_graph(dependencies: RootGraphDependencies):
         if notes:
             hint = "补充说明：" + "；".join(notes)
             draft = f"{draft}\n\n{hint}".strip() if draft.strip() else hint
-        result = run_compliance(draft=draft, evidence=outcome_refs)
+        result = run_compliance(
+            draft=draft,
+            evidence=outcome_refs,
+            # FAQ 原文等受信内容：检查并记录审计，但不改写、不拦截。
+            audit_only=bool(state.get("trusted_content", False)),
+        )
         updates: dict[str, Any] = {
             "compliance": result.model_dump(mode="json"),
             "final_response": result.response,

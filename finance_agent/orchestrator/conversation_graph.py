@@ -40,6 +40,7 @@ class ConversationState(TypedDict, total=False):
     tool_trace: list[str]
     react_steps: int
     warnings: list[str]
+    cited_faq: bool
 
 
 def _render_faq(result: Any) -> str:
@@ -62,6 +63,20 @@ def build_faq_tool(retriever: Any) -> ToolSpec:
         handler=handler,
         render=_render_faq,
     )
+
+
+def _cited_faq(outcome: Any) -> bool:
+    """回答是否引用了 FAQ 知识库原文（有 found 命中）。
+
+    命中即代表内容来自运维审核过的受信语料，合规出口据此只审计、不改写：
+    风险词汇（如“保证收益”“操纵市场”）在解释规则的语境里合法，删词会把
+    答案改成病句（例：“什么是操纵市场？”会被删成“什么是？”）。
+    """
+    for observation in getattr(outcome, "observations", []) or []:
+        output = getattr(observation, "output", None) or {}
+        if output.get("status") == "found" and output.get("matches"):
+            return True
+    return False
 
 
 def run_conversation(
@@ -105,6 +120,7 @@ def run_conversation(
         "tool_trace": outcome.tool_trace,
         "react_steps": outcome.metadata.get("react_steps", 0),
         "warnings": warnings,
+        "cited_faq": _cited_faq(outcome),
     }
 
 

@@ -41,7 +41,9 @@ class EvidenceRef(BaseModel):
 class ComplianceResult(BaseModel):
     """合规子图终态。"""
 
-    action: Literal["passed", "rewritten", "blocked"]
+    # audited：内容来自受信来源（如运维审核过的 FAQ 原文），只做检查与审计记录，
+    # 不改写也不拦截——风险词汇在“解释规则”的语境里是合法且必要的表述。
+    action: Literal["passed", "rewritten", "blocked", "audited"]
     response: str
     reason_codes: list[str] = Field(default_factory=list)
     rewrite_count: int = 0
@@ -115,8 +117,15 @@ def run_compliance(
     evidence: list[EvidenceRef] | list[dict[str, Any]] | None = None,
     policy: CompliancePolicy | None = None,
     model: Any = None,
+    audit_only: bool = False,
 ) -> ComplianceResult:
-    """执行确定性规则、可选语义校验、一次改写与复检。"""
+    """执行确定性规则、可选语义校验、一次改写与复检。
+
+    ``audit_only=True`` 用于内容来自受信来源（运维审核过的 FAQ 原文）的场景：
+    仍然执行检查并把命中项写入审计，但**不改写、不拦截**。因为风险词汇在
+    “解释投资规则”的语境里是合法且必需的（例如 FAQ 条目名就是
+    “什么是操纵市场？”），删词会把答案改成病句。
+    """
     active = policy or default_policy()
     refs = [item if isinstance(item, EvidenceRef) else EvidenceRef.model_validate(item) for item in (evidence or [])]
     draft_hash = _draft_hash(draft)
@@ -124,6 +133,19 @@ def run_compliance(
     reasons = list(active.check(draft))
     if active.semantic_check is not None:
         reasons += list(active.semantic_check(draft))
+
+    if audit_only:
+        action = "audited" if reasons else "passed"
+        return ComplianceResult(
+            action=action,
+            response=draft,
+            reason_codes=reasons,
+            rewrite_count=0,
+            rule_version=active.version,
+            draft_hash=draft_hash,
+            evidence=refs,
+            audit=_audit(action, reasons, 0, active.version, draft_hash),
+        )
 
     if not reasons:
         return ComplianceResult(
@@ -228,7 +250,7 @@ def build_compliance_graph(policy: CompliancePolicy | None = None, model: Any = 
 
 
 def compliance_run_status(action: str) -> RunStatus:
-    return RunStatus.COMPLETED if action in {"passed", "rewritten"} else RunStatus.FAILED
+    return RunStatus.COMPLETED if action in {"passed", "rewritten", "audited"} else RunStatus.FAILED
 
 
 __all__ = [

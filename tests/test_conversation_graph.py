@@ -112,3 +112,20 @@ def test_conversation_failure_reason_does_not_leak_exception_text():
     joined = " ".join(result["warnings"])
     assert "sentence_transformers" not in joined
     assert "ModuleNotFoundError" not in joined
+
+
+def test_conversation_marks_faq_citations_as_trusted():
+    """引用到 FAQ 原文时，结果需标记为受信内容，供合规出口只审计不改写。"""
+    graph = build_conversation_graph(_found_retriever(), _model_calling("faq_search"))
+
+    result = graph.invoke(_base_state())
+
+    assert result["cited_faq"] is True
+
+
+def test_conversation_without_faq_hit_is_not_trusted():
+    graph = build_conversation_graph(_not_found_retriever(), _model_calling("faq_search"))
+
+    result = graph.invoke(_base_state())
+
+    assert result["cited_faq"] is False

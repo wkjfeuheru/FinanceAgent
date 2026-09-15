@@ -102,7 +102,7 @@ class ReactDecision(BaseModel):
 
 
 class ComplianceDecision(BaseModel):
-    action: Literal["passed", "rewritten", "blocked"]
+    action: Literal["passed", "rewritten", "blocked", "audited"]
     response: str
     reason_codes: list[str]
     rewrite_count: int
