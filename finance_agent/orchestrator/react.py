@@ -8,10 +8,13 @@ observation。预算由调用方注入，只递减，LLM 无权修改。
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Literal, Mapping, Sequence
 
 from pydantic import BaseModel, Field, ValidationError
+
+_LOGGER = logging.getLogger(__name__)
 
 from finance_agent.orchestrator.contracts import ReactDecision
 
@@ -221,6 +224,9 @@ def run_bounded_react(
         try:
             raw_output = spec.handler(tool_input)
         except Exception as exc:  # noqa: BLE001 - 工具失败降级，不让整轮请求崩溃
+            # 带完整堆栈记日志：工具失败（如依赖缺失、模型加载失败）若只在用户侧
+            # 表现为笼统兜底文案，运维将无从定位，因此服务端必须留下可诊断记录。
+            _LOGGER.exception("react_tool_failed tool=%s error=%s", spec.name, type(exc).__name__)
             return ReactOutcome(
                 status="failed",
                 final_text=refusal_text,

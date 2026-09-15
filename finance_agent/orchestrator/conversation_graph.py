@@ -39,6 +39,7 @@ class ConversationState(TypedDict, total=False):
     observations: list[dict[str, Any]]
     tool_trace: list[str]
     react_steps: int
+    warnings: list[str]
 
 
 def _render_faq(result: Any) -> str:
@@ -82,10 +83,17 @@ def run_conversation(
         refusal_text=CONVERSATION_REFUSAL,
     )
 
+    warnings: list[str] = []
     if outcome.status == "success":
         final_response = outcome.final_text
     elif outcome.status == "failed":
         final_response = outcome.final_text or CONVERSATION_REFUSAL
+        # 失败原因必须可诊断：只暴露安全的原因码与工具名（不含异常原文，
+        # 避免把内部细节/连接串等泄露给用户），否则下次同类问题只能看到
+        # 笼统的“暂时无法执行该操作”，无从定位（例如依赖缺失）。
+        error = str(outcome.metadata.get("error", "unknown"))
+        tool = str(outcome.metadata.get("tool", "") or "")
+        warnings.append(f"conversation_failed:{error}" + (f":{tool}" if tool else ""))
     else:
         # 达到四轮上限：保留可靠 observation，明确缺失项。
         final_response = outcome.observations[-1].text if outcome.observations else _NO_RELIABLE_ANSWER
@@ -96,6 +104,7 @@ def run_conversation(
         "observations": [observation.model_dump() for observation in outcome.observations],
         "tool_trace": outcome.tool_trace,
         "react_steps": outcome.metadata.get("react_steps", 0),
+        "warnings": warnings,
     }
 
 

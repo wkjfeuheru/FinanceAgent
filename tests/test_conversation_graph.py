@@ -82,3 +82,33 @@ def test_conversation_graph_no_match_observation_discloses_no_reliable_answer():
 
     assert result["observations"][0]["text"].find("没有可靠") != -1
     assert "没有可靠" in result["final_response"]
+
+
+class _BoomRetriever:
+    """模拟 FAQ 工具不可用（如依赖缺失/模型加载失败）。"""
+
+    def search(self, query, top_k=None):
+        del query, top_k
+        raise ModuleNotFoundError("No module named 'sentence_transformers'")
+
+
+def test_conversation_failure_exposes_diagnosable_reason_code():
+    """工具失败时必须给出可诊断的原因码，而不是只有笼统兜底文案。"""
+    graph = build_conversation_graph(_BoomRetriever(), _model_calling("faq_search"))
+
+    result = graph.invoke(_base_state())
+
+    assert result["status"] == "failed"
+    assert result["final_response"] == "暂时无法执行该操作。"
+    assert any(w.startswith("conversation_failed:tool_failed:faq_search") for w in result["warnings"]), result["warnings"]
+
+
+def test_conversation_failure_reason_does_not_leak_exception_text():
+    """原因码只含错误类别与工具名，不得回显异常原文。"""
+    graph = build_conversation_graph(_BoomRetriever(), _model_calling("faq_search"))
+
+    result = graph.invoke(_base_state())
+
+    joined = " ".join(result["warnings"])
+    assert "sentence_transformers" not in joined
+    assert "ModuleNotFoundError" not in joined
