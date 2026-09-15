@@ -81,6 +81,7 @@ async function handleLogin() {
       token: res.token,
       expires_in: res.expires_in,
       login_at: Date.now(),
+      is_admin: res.is_admin === true,
     }
     saveUser(user)
     ElMessage.success(`欢迎回来，${user.display_name}！`)

@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref } from 'vue'
-import { ChatLineRound, Refresh, Plus, ArrowLeft, User, Headset, Delete } from '@element-plus/icons-vue'
+import { ref, watch } from 'vue'
+import { ChatLineRound, Refresh, Plus, Delete } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { createConversation, deleteConversation, getConversationMessages, getConversations } from '@/api/chat'
 import type { Conversation, HistoryMessage } from '@/types'
@@ -12,11 +12,8 @@ const emit = defineEmits<{
   (e: 'conversation-deleted', conversationId: string): void
 }>()
 
-const visible = ref(false)
 const loading = ref(false)
 const conversations = ref<Conversation[]>([])
-const selected = ref<Conversation | null>(null)
-const messages = ref<HistoryMessage[]>([])
 
 function formatDate(value?: string): string {
   if (!value) return '时间未知'
@@ -26,7 +23,12 @@ function formatDate(value?: string): string {
   })
 }
 
+function titleOf(item: Conversation): string {
+  return item.title?.trim() || '未命名对话'
+}
+
 async function loadConversations() {
+  if (!props.customerId) return
   loading.value = true
   try {
     conversations.value = (await getConversations(props.customerId)).conversations
@@ -37,35 +39,29 @@ async function loadConversations() {
   }
 }
 
-async function openConversation(item: Conversation) {
+async function handleNewConversation() {
+  if (!props.customerId) return
   loading.value = true
   try {
-    const result = await getConversationMessages(props.customerId, item.conversation_id)
-    selected.value = item
-    messages.value = result.messages
+    const item = await createConversation(props.customerId)
+    conversations.value = [item, ...conversations.value]
+    emit('new-conversation', item.conversation_id)
   } catch {
-    ElMessage.error('对话内容加载失败')
+    ElMessage.error('新对话创建失败')
   } finally {
     loading.value = false
   }
 }
 
-function useConversation() {
-  if (!selected.value) return
-  emit('select-conversation', selected.value.conversation_id, messages.value)
-  visible.value = false
-}
-
-async function handleNewConversation() {
+/** 选中会话：拉取消息并交给对话区展示；列表中高亮当前会话。 */
+async function openConversation(item: Conversation) {
+  if (item.conversation_id === props.activeConversationId) return
   loading.value = true
   try {
-    const item = await createConversation(props.customerId)
-    emit('new-conversation', item.conversation_id)
-    selected.value = null
-    messages.value = []
-    visible.value = false
+    const result = await getConversationMessages(props.customerId, item.conversation_id)
+    emit('select-conversation', item.conversation_id, result.messages)
   } catch {
-    ElMessage.error('新对话创建失败')
+    ElMessage.error('对话内容加载失败')
   } finally {
     loading.value = false
   }
@@ -74,7 +70,7 @@ async function handleNewConversation() {
 async function handleDelete(item: Conversation) {
   try {
     await ElMessageBox.confirm(
-      `确定删除“${item.title}”吗？该对话的全部消息将一并删除。`,
+      `确定删除“${titleOf(item)}”吗？该对话的全部消息将一并删除。`,
       '删除历史对话',
       { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' },
     )
@@ -96,113 +92,86 @@ async function handleDelete(item: Conversation) {
   }
 }
 
-async function openHistory() {
-  selected.value = null
-  visible.value = true
-  await loadConversations()
-}
+// 首条消息发送后 App 会更新 activeConversationId：此时列表需要刷出标题与消息数。
+// 仅在 id 变化时刷新，避免每次渲染都请求。
+watch(() => props.activeConversationId, (next, prev) => {
+  if (next && next !== prev) loadConversations()
+})
+
+// 客户切换（登录/切换账号）时重新加载。
+watch(() => props.customerId, (next) => {
+  if (next) loadConversations()
+  else conversations.value = []
+}, { immediate: true })
 </script>
 
 <template>
-  <el-card class="history-panel" shadow="never">
-    <button class="history-entry" type="button" @click="openHistory">
-      <span class="entry-label"><el-icon><ChatLineRound /></el-icon>历史对话</span>
-      <span class="entry-action">查看</span>
-    </button>
-  </el-card>
-
-  <el-drawer v-model="visible" direction="rtl" size="min(520px, 92vw)" append-to-body>
-    <template #header>
-      <div class="drawer-header">
-        <div class="drawer-title">
-          <el-button v-if="selected" :icon="ArrowLeft" text circle @click="selected = null" />
-          <el-icon v-else><ChatLineRound /></el-icon>
-          <span>{{ selected?.title || '历史对话' }}</span>
-        </div>
-        <el-button v-if="!selected" :icon="Plus" type="primary" @click="handleNewConversation">
-          新对话
-        </el-button>
-        <el-button v-else type="primary" @click="useConversation">继续此对话</el-button>
+  <el-card class="history-panel" shadow="never" v-loading="loading">
+    <div class="panel-heading">
+      <div>
+        <p class="eyebrow">会话</p>
+        <h2><el-icon><ChatLineRound /></el-icon>历史对话</h2>
       </div>
-    </template>
-
-    <div v-loading="loading" class="drawer-body">
-      <template v-if="!selected">
-        <div class="list-tools">
-          <span>共 {{ conversations.length }} 个对话</span>
-          <el-button :icon="Refresh" text :loading="loading" @click="loadConversations">刷新</el-button>
-        </div>
-        <el-empty v-if="!loading && !conversations.length" description="暂无历史对话" />
-        <div
-          v-for="item in conversations"
-          :key="item.conversation_id"
-          class="conversation-item"
-          :class="{ active: item.conversation_id === activeConversationId }"
-          role="button"
-          tabindex="0"
-          @click="openConversation(item)"
-          @keydown.enter="openConversation(item)"
-        >
-          <span class="conversation-main">
-            <strong>{{ item.title }}</strong>
-            <small>{{ item.message_count }} 条消息</small>
-          </span>
-          <span class="conversation-actions">
-            <span class="view-link">查看</span>
-            <el-button
-              class="delete-button"
-              :icon="Delete"
-              text
-              circle
-              type="danger"
-              aria-label="删除对话"
-              @click.stop="handleDelete(item)"
-            />
-          </span>
-        </div>
-      </template>
-
-      <template v-else>
-        <el-empty v-if="!loading && !messages.length" description="该对话暂无消息" />
-        <article v-for="(message, index) in messages" :key="index" class="history-message" :class="message.role">
-          <div class="message-meta">
-            <span><el-icon><User v-if="message.role === 'user'" /><Headset v-else /></el-icon>{{ message.role === 'user' ? '我' : '智能投顾' }}</span>
-            <time>{{ formatDate(message.timestamp) }}</time>
-          </div>
-          <div class="message-content" v-text="message.content"></div>
-        </article>
-      </template>
+      <span class="conversation-count">{{ conversations.length }}</span>
     </div>
-  </el-drawer>
+
+    <div class="panel-tools">
+      <el-button type="primary" size="small" :icon="Plus" @click="handleNewConversation">新建对话</el-button>
+      <el-button size="small" text :icon="Refresh" :loading="loading" @click="loadConversations">刷新</el-button>
+    </div>
+
+    <el-empty
+      v-if="!loading && !conversations.length"
+      :image-size="48"
+      description="暂无历史对话，点击“新建对话”开始"
+    />
+
+    <ul v-else class="conversation-list">
+      <li
+        v-for="item in conversations"
+        :key="item.conversation_id"
+        class="conversation-item"
+        :class="{ active: item.conversation_id === activeConversationId }"
+      >
+        <button
+          type="button"
+          class="conversation-main"
+          :aria-current="item.conversation_id === activeConversationId"
+          @click="openConversation(item)"
+        >
+          <strong>{{ titleOf(item) }}</strong>
+          <small>{{ item.message_count }} 条消息 · {{ formatDate(item.updated_at) }}</small>
+        </button>
+        <el-button
+          class="delete-button"
+          :icon="Delete"
+          text
+          circle
+          type="danger"
+          aria-label="删除对话"
+          @click.stop="handleDelete(item)"
+        />
+      </li>
+    </ul>
+  </el-card>
 </template>
 
 <style scoped>
 .history-panel { border: 1px solid var(--color-border); border-radius: 0; box-shadow: none; }
-.history-panel :deep(.el-card__body) { padding: 0; }
-.history-entry { width: 100%; padding: 15px 16px; border: 0; background: transparent; display: flex; justify-content: space-between; cursor: pointer; color: var(--color-text); }
-.history-entry:hover { background: var(--color-primary-soft); color: var(--color-primary); }
-.entry-label, .drawer-title, .message-meta span { display: inline-flex; align-items: center; gap: 8px; font-weight: 700; }
-.entry-label .el-icon, .drawer-title > .el-icon { color: var(--color-primary); }
-.entry-action, .view-link { color: var(--color-primary-light); font: 11px/1 var(--font-mono); letter-spacing: .06em; }
-.drawer-header, .list-tools { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.drawer-title { min-width: 0; font-size: 17px; color: var(--color-text); }
-.drawer-title span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.drawer-body { min-height: 180px; display: flex; flex-direction: column; gap: 12px; }
-.list-tools { color: var(--color-text-muted); font-size: 12px; }
-.conversation-item { border: 1px solid var(--color-border); border-radius: 0; background: var(--color-surface); padding: 13px 14px; display: flex; align-items: center; justify-content: space-between; text-align: left; cursor: pointer; }
+.panel-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.eyebrow { margin: 0 0 5px; color: var(--color-text-muted); font: 10px/1 var(--font-mono); letter-spacing: .08em; }
+.panel-heading h2 { margin: 0; display: inline-flex; align-items: center; gap: 8px; color: var(--color-text); font-size: 15px; }
+.panel-heading h2 .el-icon { color: var(--color-primary); }
+.conversation-count { display: grid; place-items: center; min-width: 24px; height: 24px; background: var(--color-primary-soft); color: var(--color-primary); font: 12px/1 var(--font-mono); }
+.panel-tools { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 12px 0; }
+.conversation-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; max-height: 340px; overflow-y: auto; }
+.conversation-item { display: flex; align-items: center; gap: 6px; border: 1px solid var(--color-border); background: var(--color-surface); padding: 8px 10px; }
 .conversation-item:hover, .conversation-item.active { border-color: var(--color-primary-light); background: var(--color-primary-soft); }
-.conversation-main { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
-.conversation-main strong { color: var(--color-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.conversation-main small { color: var(--color-text-muted); }
-.conversation-actions { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
-.delete-button { opacity: 0; transition: opacity .16s ease; }
+.conversation-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; border: 0; background: transparent; padding: 0; text-align: left; cursor: pointer; color: var(--color-text); }
+.conversation-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.conversation-main small { color: var(--color-text-muted); font-size: 11px; }
+.delete-button { flex-shrink: 0; opacity: 0; transition: opacity .16s ease; }
 .conversation-item:hover .delete-button, .delete-button:focus-visible { opacity: 1; }
-.delete-button:hover { opacity: 1; }
-.history-message { padding: 12px 14px; border: 1px solid var(--color-border); border-radius: 0; background: var(--color-assistant-bubble); }
-.history-message.user { margin-left: 32px; background: var(--color-primary-soft); }
-.history-message.assistant { margin-right: 32px; }
-.message-meta { display: flex; justify-content: space-between; margin-bottom: 8px; color: var(--color-text-muted); font: 11px/1.4 var(--font-mono); }
-.message-content { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--color-text); line-height: 1.65; font-size: 14px; }
 
 @media (hover: none), (max-width: 768px) {
   .delete-button { opacity: 1; }

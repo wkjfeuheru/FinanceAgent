@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { Menu, SwitchButton } from '@element-plus/icons-vue'
+import { Menu, SwitchButton, Setting } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import ChatWindow from '@/components/ChatWindow.vue'
 import ProfilePanel from '@/components/ProfilePanel.vue'
@@ -8,13 +8,14 @@ import HistoryPanel from '@/components/HistoryPanel.vue'
 import ThemeReviewQueue from '@/components/ThemeReviewQueue.vue'
 import ThemeRegistryPanel from '@/components/ThemeRegistryPanel.vue'
 import LoginView from '@/components/LoginView.vue'
-import { getProfile, getConversationMessages, getConversations, logout, getStoredUser } from '@/api/chat'
+import { getCurrentUser, getProfile, getConversationMessages, getConversations, logout, getStoredUser, saveUser } from '@/api/chat'
 import type { ProfileResponse, HistoryMessage, UserInfo } from '@/types'
 
 const currentUser = ref<UserInfo | null>(null)
 const profile = ref<ProfileResponse | null>(null)
 const profileLoading = ref(true)
 const sidebarOpen = ref(false)
+const adminOpen = ref(false)
 const currentConversationId = ref('')
 
 const chatRef = ref<InstanceType<typeof ChatWindow> | null>(null)
@@ -22,6 +23,23 @@ const chatRef = ref<InstanceType<typeof ChatWindow> | null>(null)
 const customerId = computed(() => currentUser.value?.customer_id || '')
 const displayName = computed(() => currentUser.value?.display_name || currentUser.value?.username || '')
 const isLoggedIn = computed(() => !!currentUser.value)
+const isAdmin = computed(() => currentUser.value?.is_admin === true)
+
+/**
+ * 从服务端刷新身份，使 localStorage 中的陈旧态（如缺少 is_admin）与后端一致。
+ * 失败时保留本地登录态，仅视为非管理员。
+ */
+async function refreshIdentity() {
+  if (!currentUser.value?.token) return
+  try {
+    const me = await getCurrentUser()
+    currentUser.value = { ...currentUser.value, ...me }
+    if (isAdmin.value === false && adminOpen.value) adminOpen.value = false
+    saveUser(currentUser.value)
+  } catch {
+    // token 失效或网络异常：保持现有状态，不强制登出（后续请求会各自鉴权）。
+  }
+}
 
 async function loadProfile() {
   if (!customerId.value) return
@@ -71,6 +89,7 @@ function toggleSidebar() {
 /** 登录成功回调 */
 async function handleLoggedIn(user: UserInfo) {
   currentUser.value = user
+  await refreshIdentity()
   await loadProfile()
   const history = await loadLatestConversation()
   if (chatRef.value && history.length) {
@@ -97,6 +116,7 @@ async function handleLogout() {
   currentUser.value = null
   profile.value = null
   currentConversationId.value = ''
+  adminOpen.value = false
   ElMessage.success('已登出')
 }
 
@@ -105,7 +125,7 @@ onMounted(() => {
   const stored = getStoredUser()
   if (stored && stored.token) {
     currentUser.value = stored
-    loadProfile().then(async () => {
+    refreshIdentity().then(() => loadProfile()).then(async () => {
       const history = await loadLatestConversation()
       if (chatRef.value && history.length) {
         chatRef.value.loadHistoryMessages(history)
@@ -142,6 +162,16 @@ onMounted(() => {
         </div>
         <div class="header-right">
           <span class="system-status"><i></i>系统在线</span>
+          <el-tooltip v-if="isAdmin" content="管理后台" placement="bottom">
+            <el-button
+              class="admin-btn"
+              circle
+              size="small"
+              @click="adminOpen = true"
+            >
+              <el-icon size="16"><Setting /></el-icon>
+            </el-button>
+          </el-tooltip>
           <el-tag type="info" effect="plain">
             {{ displayName }}
           </el-tag>
@@ -184,11 +214,24 @@ onMounted(() => {
             @select-conversation="handleSelectConversation"
             @conversation-deleted="handleConversationDeleted"
           />
-          <ThemeReviewQueue />
-          <ThemeRegistryPanel />
         </div>
       </aside>
     </main>
+
+    <!-- 管理后台（仅管理员；未打开时不挂载任何管理员组件，因此不会发起管理员请求） -->
+    <el-drawer
+      v-if="isAdmin"
+      v-model="adminOpen"
+      title="管理后台"
+      direction="rtl"
+      size="min(560px, 94vw)"
+      append-to-body
+    >
+      <div class="admin-body">
+        <ThemeReviewQueue v-if="adminOpen" />
+        <ThemeRegistryPanel v-if="adminOpen" />
+      </div>
+    </el-drawer>
   </div>
 </template>
 
@@ -275,6 +318,23 @@ onMounted(() => {
   background: rgba(183, 68, 50, 0.08);
   color: var(--color-danger);
   border-color: var(--color-danger);
+}
+
+.admin-btn {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
+}
+.admin-btn:hover {
+  background: var(--color-primary-soft);
+  color: var(--color-primary);
+  border-color: var(--color-primary-light);
+}
+
+.admin-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
 }
 
 .system-status { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--color-border); padding: 5px 10px; color: var(--color-text-secondary); font: 10px/1 var(--font-mono); letter-spacing: .08em; }

@@ -301,6 +301,7 @@ export interface UserInfo {
   token: string
   expires_in?: number
   login_at?: number
+  is_admin?: boolean
 }
 
 /** 登录响应 */
@@ -310,6 +311,7 @@ export interface LoginResponse {
   display_name: string
   token: string
   expires_in: number
+  is_admin?: boolean
 }
 
 /** 注册响应 */
