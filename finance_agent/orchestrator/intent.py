@@ -16,6 +16,13 @@ from typing import Any, Callable, Dict
 import requests
 
 from finance_agent.config import (
+    INTENT_FALLBACK_API_KEY,
+    INTENT_FALLBACK_BASE_URL,
+    INTENT_FALLBACK_DEADLINE,
+    INTENT_FALLBACK_MAX_RETRIES,
+    INTENT_FALLBACK_MAX_TOKENS,
+    INTENT_FALLBACK_MODEL,
+    INTENT_FALLBACK_TIMEOUT,
     INTENT_MODEL,
     INTENT_MODEL_API_KEY,
     INTENT_MODEL_BASE_URL,
@@ -295,10 +302,18 @@ def normalize_intent_item(
 
 
 class IntentClassifier:
-    """合并本轮全部意图，产出三领域路由所需的分类结果。"""
+    """合并本轮全部意图，产出三领域路由所需的分类结果。
 
-    def __init__(self, *, classifier: Any = None) -> None:
+    分类走**主备降级链**：主模型不可用（超时、欠费、协议错等）时自动改用
+    备用模型；两者都失败才显式上报失败，不静默猜测业务领域。
+    """
+
+    def __init__(self, *, classifier: Any = None, fallback_classifier: Any = None) -> None:
         self._intent_classifier = classifier
+        self._fallback_classifier = fallback_classifier
+        # 注入主分类器（测试/自定义）时不自动构造联网备用模型，避免测试
+        # 因降级链意外发起真实请求；此时备用只能用 fallback_classifier 显式提供。
+        self._allow_config_fallback = classifier is None
 
     @property
     def intent_classifier(self) -> DeepSeekIntentClassifier:
@@ -314,8 +329,54 @@ class IntentClassifier:
             )
         return self._intent_classifier
 
-    def _classify_with_model(self, message: str, context_summary: str) -> Dict[str, Any]:
-        return self.intent_classifier.classify(message, context_summary)
+    def _build_config_fallback(self) -> DeepSeekIntentClassifier | None:
+        if not self._allow_config_fallback:
+            return None
+        if not (INTENT_FALLBACK_API_KEY and INTENT_FALLBACK_MODEL and INTENT_FALLBACK_BASE_URL):
+            return None
+        return DeepSeekIntentClassifier(
+            api_key=INTENT_FALLBACK_API_KEY,
+            model=INTENT_FALLBACK_MODEL,
+            timeout=INTENT_FALLBACK_TIMEOUT,
+            max_retries=INTENT_FALLBACK_MAX_RETRIES,
+            max_tokens=INTENT_FALLBACK_MAX_TOKENS,
+            deadline=INTENT_FALLBACK_DEADLINE,
+            base_url=INTENT_FALLBACK_BASE_URL,
+        )
+
+    @property
+    def fallback_classifier(self) -> DeepSeekIntentClassifier | None:
+        if self._fallback_classifier is None:
+            self._fallback_classifier = self._build_config_fallback()
+        return self._fallback_classifier
+
+    def _classify_with_model(
+        self, message: str, context_summary: str,
+    ) -> tuple[Dict[str, Any], str]:
+        """返回 ``(分类结果, 实际使用的模型来源)``。
+
+        主模型失败时回退备用模型；备用也不可用/失败时抛出显式分类错误。
+        """
+        try:
+            return self.intent_classifier.classify(message, context_summary), "primary"
+        except Exception as primary_exc:  # noqa: BLE001 - 主模型任何失败都尝试降级
+            fallback = self.fallback_classifier
+            if fallback is None:
+                raise
+            _LOGGER.warning(
+                "intent_primary_unavailable fallback_used error=%s", primary_exc,
+            )
+            try:
+                return fallback.classify(message, context_summary), "fallback"
+            except Exception as fallback_exc:  # noqa: BLE001 - 主备均失败才上报
+                raise IntentClassificationError(
+                    "意图分类主备模型均不可用",
+                    error_code="intent_unavailable",
+                    cause=(
+                        f"primary={getattr(primary_exc, 'cause', 'unknown')};"
+                        f"fallback={getattr(fallback_exc, 'cause', 'unknown')}"
+                    ),
+                ) from fallback_exc
 
     def classify_intents(
         self,
@@ -327,7 +388,9 @@ class IntentClassifier:
         classification_error = False
         classification_error_details: dict[str, str] = {}
         try:
-            parsed = self._classify_with_model(message, context_summary)
+            parsed, model_source = self._classify_with_model(message, context_summary)
+            if model_source == "fallback":
+                source = "deepseek_fallback"
         except Exception as exc:
             _LOGGER.warning("intent_classifier_unavailable error=%s", exc)
             parsed = {}

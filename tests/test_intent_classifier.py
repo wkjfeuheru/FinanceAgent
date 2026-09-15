@@ -119,3 +119,86 @@ def test_classifier_deadline_stops_retry_loop():
     assert calls == []
     assert exc_info.value.error_code == "intent_unavailable"
     assert exc_info.value.cause == "deadline"
+
+
+# ── 主备降级链 ──────────────────────────────────────────────────────────────
+
+def _payload():
+    return {
+        "intents": [{
+            "intent": "stock_analysis", "query": "分析600519", "confidence": 0.99,
+            "evidence": "分析600519", "execution_mode": "stock_analysis",
+        }],
+        "finance_related": True,
+    }
+
+
+class _OkClassifier:
+    def __init__(self, payload):
+        self.payload = payload
+        self.calls = 0
+
+    def classify(self, message, context_summary=""):
+        self.calls += 1
+        return dict(self.payload)
+
+
+class _BoomClassifier:
+    def __init__(self, cause="http"):
+        self.calls = 0
+        self._cause = cause
+
+    def classify(self, message, context_summary=""):
+        self.calls += 1
+        raise IntentClassificationError("down", error_code="intent_unavailable", cause=self._cause)
+
+
+def test_primary_success_does_not_touch_fallback():
+    from finance_agent.orchestrator.intent import IntentClassifier
+
+    primary = _OkClassifier(_payload())
+    fallback = _BoomClassifier()
+    result = IntentClassifier(classifier=primary, fallback_classifier=fallback).classify_intents("分析600519")
+
+    assert result["intent_source"] == "deepseek"
+    assert result["classification_error"] == {}
+    assert primary.calls == 1
+    assert fallback.calls == 0
+
+
+def test_primary_failure_falls_back_to_secondary_model():
+    from finance_agent.orchestrator.intent import IntentClassifier
+
+    primary = _BoomClassifier(cause="http")
+    fallback = _OkClassifier(_payload())
+    result = IntentClassifier(classifier=primary, fallback_classifier=fallback).classify_intents("分析600519")
+
+    assert result["intent_source"] == "deepseek_fallback"
+    assert result["classification_error"] == {}
+    assert [i["intent"] for i in result["intents"]] == ["stock_analysis"]
+    assert primary.calls == 1 and fallback.calls == 1
+
+
+def test_both_models_failing_reports_explicit_error():
+    from finance_agent.orchestrator.intent import IntentClassifier
+
+    result = IntentClassifier(
+        classifier=_BoomClassifier(cause="http"),
+        fallback_classifier=_BoomClassifier(cause="deadline"),
+    ).classify_intents("分析600519")
+
+    assert result["intents"] == []
+    assert result["classification_error"]["error_code"] == "intent_unavailable"
+    assert "primary=http" in result["classification_error"]["cause"]
+    assert "fallback=deadline" in result["classification_error"]["cause"]
+
+
+def test_injected_classifier_has_no_config_fallback():
+    """注入主分类器时不自动构造联网备用模型，避免测试意外发起真实请求。"""
+    from finance_agent.orchestrator.intent import IntentClassifier
+
+    classifier = IntentClassifier(classifier=_BoomClassifier())
+    assert classifier.fallback_classifier is None
+
+    result = classifier.classify_intents("分析600519")
+    assert result["classification_error"]["error_code"] == "intent_unavailable"

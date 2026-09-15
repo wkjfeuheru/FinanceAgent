@@ -58,6 +58,7 @@ Supervisor 会根据用户意图选择所需节点，并非每次请求都会执
 - Tushare MCP
 - Redis
 - PostgreSQL
+- Celery
 - pandas / NumPy
 
 ### 前端
@@ -201,6 +202,13 @@ INTENT_MODEL_TIMEOUT=5
 INTENT_MODEL_MAX_RETRIES=2
 INTENT_MODEL_MAX_TOKENS=512
 INTENT_MODEL_DEADLINE=15
+# 降级链：主模型不可用（超时/欠费/协议错）时自动回退备用模型，避免单一 provider
+# 故障打断全部分类与路由。一般不填 API key（自动继承 DEEPSEEK_API_KEY）。
+INTENT_FALLBACK_MODEL=deepseek-chat
+INTENT_FALLBACK_BASE_URL=https://api.deepseek.com/v1/chat/completions
+# INTENT_FALLBACK_API_KEY=
+INTENT_FALLBACK_TIMEOUT=20
+INTENT_FALLBACK_DEADLINE=25
 DEEPSEEK_INTENT_MODEL=deepseek-chat
 DEEPSEEK_INTENT_TIMEOUT=30
 DEEPSEEK_INTENT_MAX_RETRIES=1

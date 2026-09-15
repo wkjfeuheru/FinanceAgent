@@ -148,6 +148,19 @@ INTENT_MODEL_TIMEOUT = float(os.getenv("INTENT_MODEL_TIMEOUT", os.getenv("DEEPSE
 INTENT_MODEL_MAX_RETRIES = int(os.getenv("INTENT_MODEL_MAX_RETRIES", os.getenv("DEEPSEEK_INTENT_MAX_RETRIES", "2")))
 INTENT_MODEL_MAX_TOKENS = int(os.getenv("INTENT_MODEL_MAX_TOKENS", "512"))
 INTENT_MODEL_DEADLINE = float(os.getenv("INTENT_MODEL_DEADLINE", "15"))
+# 意图分类降级链：主模型不可用（超时/欠费/协议错）时自动回退到备用模型，
+# 避免单一 provider 故障打断全部分类与路由。默认备用为 DeepSeek 兼容接口。
+INTENT_FALLBACK_MODEL = os.getenv("INTENT_FALLBACK_MODEL", "deepseek-chat").strip()
+INTENT_FALLBACK_BASE_URL = os.getenv(
+    "INTENT_FALLBACK_BASE_URL", "https://api.deepseek.com/v1/chat/completions",
+).strip()
+INTENT_FALLBACK_API_KEY = os.getenv(
+    "INTENT_FALLBACK_API_KEY", DEEPSEEK_API_KEY,
+).strip()
+INTENT_FALLBACK_TIMEOUT = float(os.getenv("INTENT_FALLBACK_TIMEOUT", "20"))
+INTENT_FALLBACK_MAX_RETRIES = int(os.getenv("INTENT_FALLBACK_MAX_RETRIES", "1"))
+INTENT_FALLBACK_MAX_TOKENS = int(os.getenv("INTENT_FALLBACK_MAX_TOKENS", "512"))
+INTENT_FALLBACK_DEADLINE = float(os.getenv("INTENT_FALLBACK_DEADLINE", "25"))
 # 旧名称保留，避免未迁移调用方导入失败。
 DEEPSEEK_INTENT_MODEL = INTENT_MODEL
 DEEPSEEK_INTENT_TIMEOUT = INTENT_MODEL_TIMEOUT

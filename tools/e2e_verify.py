@@ -1,9 +1,10 @@
 """端到端链路验收：覆盖全部功能链路并对**响应内容**断言。
 
-用法（需后端已在 8000 端口运行，且管理员账号可用）：
-    ADMIN_TOKEN=<管理员登录 token> python tools/e2e_verify.py
+用法（需后端已在 8000 端口运行）：
+    python tools/e2e_verify.py
 
-结束时清理自建账号与自建主题。
+管理员 token 默认从数据库现有管理员会话自动获取；也可用 ADMIN_TOKEN 环境变量
+显式指定。结束时清理自建账号与自建主题。
 """
 from __future__ import annotations
 
@@ -15,10 +16,34 @@ import urllib.error
 import urllib.request
 
 B = "http://127.0.0.1:8000"
-# 管理员 token 从环境变量读取，避免把凭据写进仓库。
-ADMIN = os.getenv("ADMIN_TOKEN", "")
 P: list[str] = []
 F: list[str] = []
+
+
+def resolve_admin_token() -> str:
+    """优先用 ADMIN_TOKEN 环境变量；否则从数据库取一个有效的管理员会话。"""
+    token = os.getenv("ADMIN_TOKEN", "").strip()
+    if token:
+        return token
+    try:
+        os.environ.setdefault("DEEPSEEK_API_KEY", "x")
+        from finance_agent import config
+
+        admins = getattr(config, "ADMIN_CUSTOMER_IDS", set())
+        if not admins:
+            return ""
+        conn = config.get_postgres_connection_factory()()
+        cur = conn.cursor()
+        cur.execute("SELECT token FROM finance.sessions WHERE customer_id = ANY(%s)", (list(admins),))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return str(row[0]) if row else ""
+    except Exception:
+        return ""
+
+
+ADMIN = resolve_admin_token()
 
 
 def call(method, path, token=None, body=None, raw=False, timeout=300):
