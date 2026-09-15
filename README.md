@@ -140,6 +140,18 @@ pip install -r requirements.txt
 pip install -e ".[dev]"
 ```
 
+如需本地股票数据源（AKShare / BaoStock）：
+
+```bash
+pip install akshare baostock
+```
+
+> **务必用项目 `.venv` 运行后端。** 若机器上同时存在多个 Python（例如 Anaconda 与官方
+> Python），只有装了依赖的那个解释器才能跑通完整链路；FAQ 检索依赖
+> `sentence-transformers`（及其 `torch`/`scikit-learn`），缺失时知识类问答会退化为
+> 「暂时无法执行该操作。」。用 `.venv/Scripts/python.exe -m uvicorn ...`（Windows）或
+> `python -m uvicorn ...`（已激活 venv）启动可避免选错解释器。
+
 ### 3. 配置环境变量
 
 `DEEPSEEK_API_KEY` 必须设置为操作系统环境变量。程序会在读取该密钥后加载 `.env`，但不会使用 `.env` 覆盖 DeepSeek 密钥。

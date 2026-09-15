@@ -14,6 +14,14 @@ import random
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
+
+# 允许 `python tools/e2e_verify.py`：脚本目录会成为 sys.path[0]，必须显式补上
+# 仓库根目录才能 import finance_agent（否则在未 editable 安装的 venv 里会
+# 静默取不到管理员 token，表现为管理员接口“未登录”的假失败）。
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
 B = "http://127.0.0.1:8000"
 P: list[str] = []
@@ -25,22 +33,24 @@ def resolve_admin_token() -> str:
     token = os.getenv("ADMIN_TOKEN", "").strip()
     if token:
         return token
+    os.environ.setdefault("DEEPSEEK_API_KEY", "x")
     try:
-        os.environ.setdefault("DEEPSEEK_API_KEY", "x")
         from finance_agent import config
+    except Exception as exc:  # noqa: BLE001 - 显式报错，不静默降级成“未登录”
+        raise RuntimeError(f"无法导入 finance_agent，请用项目环境运行本脚本：{exc}") from exc
 
-        admins = getattr(config, "ADMIN_CUSTOMER_IDS", set())
-        if not admins:
-            return ""
-        conn = config.get_postgres_connection_factory()()
-        cur = conn.cursor()
-        cur.execute("SELECT token FROM finance.sessions WHERE customer_id = ANY(%s)", (list(admins),))
-        row = cur.fetchone()
-        cur.close()
-        conn.close()
-        return str(row[0]) if row else ""
-    except Exception:
-        return ""
+    admins = getattr(config, "ADMIN_CUSTOMER_IDS", set())
+    if not admins:
+        raise RuntimeError("未配置 ADMIN_CUSTOMER_IDS，无法执行管理员链路检查")
+    conn = config.get_postgres_connection_factory()()
+    cur = conn.cursor()
+    cur.execute("SELECT token FROM finance.sessions WHERE customer_id = ANY(%s)", (list(admins),))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row:
+        raise RuntimeError("数据库中无管理员会话，请先登录管理员账号或设置 ADMIN_TOKEN")
+    return str(row[0])
 
 
 ADMIN = resolve_admin_token()
