@@ -4,10 +4,10 @@ from finance_agent.orchestrator.memory import AgentMemoryContext, UserProfileCar
 
 
 class EmptyMemoryStore:
-    def get_summary(self, conversation_id):
+    def get_summary(self, customer_id, conversation_id):
         return "摘要内容 " * 30
 
-    def get_window_messages(self, conversation_id, window_size):
+    def get_window_messages(self, customer_id, conversation_id, window_size):
         return [
             {"role": "user", "content": "最近消息 " * 20},
             {"role": "assistant", "content": "上一轮回复 " * 20},

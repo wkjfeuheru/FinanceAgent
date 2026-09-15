@@ -128,6 +128,7 @@ class UserInfo(BaseModel):
     customer_id: str
     username: str
     display_name: str = ""
+    is_admin: bool = False
 
 
 class LoginResponse(BaseModel):
@@ -137,6 +138,7 @@ class LoginResponse(BaseModel):
     display_name: str = ""
     token: str
     expires_in: int = 7 * 24 * 3600
+    is_admin: bool = False
 
 
 class RegisterResponse(BaseModel):

@@ -417,12 +417,14 @@ class AdvisorSystem:
                 conversation_id, "assistant", output.get("response", ""),
                 {"task_plan": output.get("task_plan", [])},
             )
+            # 首条消息后给会话一个可读标题，供历史列表展示（幂等：仅"新对话"时改写）。
+            db.rename_conversation_from_message(conversation_id, message)
         except Exception:
             pass
         try:
-            self.memory.append_window_message(conversation_id, "user", message)
+            self.memory.append_window_message(customer_id, conversation_id, "user", message)
             self.memory.append_window_message(
-                conversation_id, "assistant", output.get("response", ""),
+                customer_id, conversation_id, "assistant", output.get("response", ""),
                 {"task_plan": output.get("task_plan", [])},
             )
             self.memory.update_profile_from_result(customer_id, message, output)
@@ -494,11 +496,15 @@ class AdvisorSystem:
             return []
 
     def delete_checkpoint_conversation(self, conversation_id: str, customer_id: str) -> bool:
+        """删除指定会话的业务行、checkpoint 与记忆；非本人会话返回 False。"""
         try:
-            get_database().delete_conversation(conversation_id, customer_id)
+            # 只有确实删除了属于该客户的行，才继续清理 checkpoint 与记忆，
+            # 否则调用方（DELETE 路由）会把越权删除误报成成功。
+            if not get_database().delete_conversation(conversation_id, customer_id):
+                return False
             self.run_state.delete(customer_id, conversation_id)
             if getattr(self.memory, "store", None) is not None:
-                self.memory.store.clear_conversation(conversation_id)
+                self.memory.store.clear_conversation(customer_id, conversation_id)
             return True
         except Exception:
             return False
@@ -519,7 +525,7 @@ class AdvisorSystem:
             return 0
         cleared = 0
         for conversation in conversations:
-            if self.memory.store.clear_conversation(conversation["conversation_id"]):
+            if self.memory.store.clear_conversation(customer_id, conversation["conversation_id"]):
                 cleared += 1
         return cleared
 

@@ -7,10 +7,10 @@ class UnavailableRedis:
     def is_available(self):
         return False
 
-    def get_summary(self, conversation_id):
+    def get_summary(self, customer_id, conversation_id):
         raise AssertionError("Redis 不可用时不应读取摘要")
 
-    def get_window_messages(self, conversation_id, window_size):
+    def get_window_messages(self, customer_id, conversation_id, window_size):
         raise AssertionError("Redis 不可用时不应读取窗口")
 
 

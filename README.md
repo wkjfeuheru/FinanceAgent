@@ -441,6 +441,7 @@ npm run build
 
 - `POSTGRES_DSN`：PostgreSQL 完整连接串；未设置时使用 `POSTGRES_HOST`、`POSTGRES_PORT`、`POSTGRES_USER`、`POSTGRES_PASSWORD` 和 `POSTGRES_DB` 组成连接串。
 - `REDIS_URL`：Redis 地址；保存用户画像、滑动对话窗口和摘要等运行时记忆。
+- 对话记忆（窗口/摘要）的 Redis 键按客户隔离：`finance_cs:conv:{customer_id}:{conversation_id}:window` 与 `:summary`。因此仅凭 `conversation_id` 无法读写他人记忆。升级到本版本后，旧键格式（`finance_cs:conv:{conversation_id}:*`）不会再被读取，会在 TTL 到期后自然淘汰（记忆本身为 best-effort，不影响对话正确性）；`POST /api/admin/clear-records` 的 `finance_cs:*` 扫描仍会清理这些残留键。
 - PostgreSQL 模式下，`users` 是唯一用户主体表，`conversations`、`user_profiles`、`sessions` 和运行审计记录均通过 `customer_id` 关联到已注册用户，不再保留独立的 `customers` 主体表。
 - Tushare MCP 返回的是最近交易日数据，并非交易所盘中实时行情。
 

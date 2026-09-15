@@ -84,13 +84,14 @@ class RedisMemoryStore:
 
     def append_window_message(
         self,
+        customer_id: str,
         conversation_id: str,
         role: str,
         content: str,
         metadata: dict[str, Any] | None = None,
         window_size: int = 5,
     ) -> bool:
-        """向指定对话的滑动窗口追加一条消息。"""
+        """向指定客户指定对话的滑动窗口追加一条消息。"""
         payload = {
             "role": role,
             "content": content,
@@ -99,7 +100,7 @@ class RedisMemoryStore:
         }
         try:
             client = self._get_client()
-            key = self._window_key(conversation_id)
+            key = self._window_key(customer_id, conversation_id)
             client.rpush(key, json.dumps(payload, ensure_ascii=False))
             client.ltrim(key, -abs(window_size), -1)
             client.expire(key, self.ttl_seconds)
@@ -109,10 +110,12 @@ class RedisMemoryStore:
             self._last_error = str(exc)
             return False
 
-    def get_window_messages(self, conversation_id: str, window_size: int = 5) -> list[dict[str, Any]]:
+    def get_window_messages(
+        self, customer_id: str, conversation_id: str, window_size: int = 5,
+    ) -> list[dict[str, Any]]:
         try:
             values = self._get_client().lrange(
-                self._window_key(conversation_id), -abs(window_size), -1,
+                self._window_key(customer_id, conversation_id), -abs(window_size), -1,
             )
             self._last_error = ""
         except redis.RedisError as exc:
@@ -122,19 +125,19 @@ class RedisMemoryStore:
 
     # ── 对话级摘要 ─────────────────────────────────────────────
 
-    def get_summary(self, conversation_id: str) -> str:
+    def get_summary(self, customer_id: str, conversation_id: str) -> str:
         try:
-            value = self._get_client().get(self._summary_key(conversation_id))
+            value = self._get_client().get(self._summary_key(customer_id, conversation_id))
             self._last_error = ""
             return value or ""
         except redis.RedisError as exc:
             self._last_error = str(exc)
             return ""
 
-    def set_summary(self, conversation_id: str, summary: str) -> bool:
+    def set_summary(self, customer_id: str, conversation_id: str, summary: str) -> bool:
         try:
             self._get_client().set(
-                self._summary_key(conversation_id),
+                self._summary_key(customer_id, conversation_id),
                 summary,
                 ex=self.ttl_seconds,
             )
@@ -158,20 +161,20 @@ class RedisMemoryStore:
                 self._client = redis.Redis.from_url(self.redis_url, decode_responses=True)
         return self._client
 
-    def _summary_key(self, conversation_id: str) -> str:
-        """对话级摘要键。"""
-        return f"finance_cs:conv:{conversation_id}:summary"
+    def _summary_key(self, customer_id: str, conversation_id: str) -> str:
+        """客户 + 对话级摘要键；按客户隔离，避免仅凭 conversation_id 越权读写。"""
+        return f"finance_cs:conv:{str(customer_id).upper()}:{conversation_id}:summary"
 
-    def _window_key(self, conversation_id: str) -> str:
-        """对话级滑动窗口键。"""
-        return f"finance_cs:conv:{conversation_id}:window"
+    def _window_key(self, customer_id: str, conversation_id: str) -> str:
+        """客户 + 对话级滑动窗口键。"""
+        return f"finance_cs:conv:{str(customer_id).upper()}:{conversation_id}:window"
 
-    def clear_conversation(self, conversation_id: str) -> bool:
-        """清除指定对话的记忆数据（窗口 + 摘要）。"""
+    def clear_conversation(self, customer_id: str, conversation_id: str) -> bool:
+        """清除指定客户指定对话的记忆数据（窗口 + 摘要）。"""
         try:
             self._get_client().delete(
-                self._window_key(conversation_id),
-                self._summary_key(conversation_id),
+                self._window_key(customer_id, conversation_id),
+                self._summary_key(customer_id, conversation_id),
             )
             self._last_error = ""
             return True
@@ -227,9 +230,9 @@ class AgentMemoryContext:
         profile_text = self.format_profile(profile)
         availability_check = getattr(self.store, "is_available", None)
         redis_available = availability_check() if availability_check else True
-        recent_summary = self.store.get_summary(conversation_id) if redis_available else ""
+        recent_summary = self.store.get_summary(customer_id, conversation_id) if redis_available else ""
         sliding_window = (
-            self.store.get_window_messages(conversation_id, self.window_size)
+            self.store.get_window_messages(customer_id, conversation_id, self.window_size)
             if redis_available else []
         )
         if not redis_available and self.messages_loader:
@@ -252,18 +255,20 @@ class AgentMemoryContext:
 
     def append_window_message(
         self,
+        customer_id: str,
         conversation_id: str,
         role: str,
         content: str,
         metadata: dict[str, Any] | None = None,
     ) -> bool:
-        """向当前对话的滑动窗口追加一条消息。"""
+        """向当前客户当前对话的滑动窗口追加一条消息。"""
         return self.store.append_window_message(
-            conversation_id, role, content, metadata, self.window_size,
+            customer_id, conversation_id, role, content, metadata, self.window_size,
         )
 
     def update_recent_summary(
         self,
+        customer_id: str,
         conversation_id: str,
         messages: list[dict[str, Any]],
     ) -> bool:
@@ -273,7 +278,7 @@ class AgentMemoryContext:
         ``max_context_chars`` 的一半限制长度；滑动窗口仍独立保存最近 N 条
         原始消息。这样下一轮可同时注入较早摘要和最近原文。
         """
-        existing = self.store.get_summary(conversation_id).strip()
+        existing = self.store.get_summary(customer_id, conversation_id).strip()
         current = self.build_rule_summary(messages[-self.summary_size:]).strip()
         if existing and current and not existing.endswith(current):
             summary = f"{existing}\n{current}"
@@ -282,7 +287,7 @@ class AgentMemoryContext:
 
         summary_limit = max(1000, self.max_context_chars // 2)
         summary = self._fit_text(summary, summary_limit)
-        return self.store.set_summary(conversation_id, summary)
+        return self.store.set_summary(customer_id, conversation_id, summary)
 
     # ── 用户档案（finance_agent.db 持久化，跨对话共享）────────────────
 

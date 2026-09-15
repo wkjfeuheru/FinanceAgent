@@ -91,7 +91,7 @@ async def login(request: LoginRequest) -> LoginResponse:
             username=request.username,
             password=request.password,
         )
-        return LoginResponse(**result)
+        return LoginResponse(**result, is_admin=_is_admin(result["customer_id"]))
     except ValueError as exc:
         raise HTTPException(status_code=401, detail=str(exc))
     except Exception as exc:
@@ -121,7 +121,7 @@ async def get_current_user(request: Request) -> dict[str, Any]:
     user = get_user_store().get_user_by_customer_id(customer_id)
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
-    return user
+    return {**user, "is_admin": _is_admin(customer_id)}
 
 
 @router.get("/api/health", response_model=HealthResponse)
@@ -143,6 +143,19 @@ async def health() -> HealthResponse:
         )
 
 
+def _authorize_conversation(customer_id: str, conversation_id: str) -> None:
+    """校验会话归属；非本人会话一律 404，避免跨用户读写。
+
+    空 conversation_id 表示新建会话，不做校验。
+    """
+    if not conversation_id:
+        return
+    from finance_agent.orchestrator.database import get_database
+
+    if get_database().get_conversation(conversation_id, customer_id) is None:
+        raise HTTPException(status_code=404, detail="对话不存在")
+
+
 @router.post("/api/chat", response_model=ChatResponse)
 async def chat(
     request: ChatRequest,
@@ -157,6 +170,7 @@ async def chat(
     3. ChatRequest.customer_id 字段（兼容旧客户端）
     """
     customer_id = _resolve_customer_id(http_request, request, x_customer_id)
+    _authorize_conversation(customer_id, request.conversation_id)
     try:
         system = get_system()
         result = system.handle_message(
@@ -178,6 +192,7 @@ async def chat_stream(
 ) -> StreamingResponse:
     """SSE 流式对话接口。"""
     customer_id = _resolve_customer_id(http_request, request, x_customer_id)
+    _authorize_conversation(customer_id, request.conversation_id)
     system = get_system()
 
     async def event_generator():
@@ -259,9 +274,14 @@ def _resolve_customer_id(http_request: Request, request: ChatRequest, x_customer
     return _require_customer_id(http_request)
 
 
+def _is_admin(customer_id: str) -> bool:
+    """判断客户是否为管理员（仅依赖服务端白名单，客户端不可自行声明）。"""
+    return str(customer_id).upper() in ADMIN_CUSTOMER_IDS
+
+
 def _require_admin(request: Request) -> str:
     customer_id = _require_customer_id(request)
-    if customer_id.upper() not in ADMIN_CUSTOMER_IDS:
+    if not _is_admin(customer_id):
         raise HTTPException(status_code=403, detail="仅管理员可审核主题线索")
     return customer_id
 
@@ -424,6 +444,8 @@ async def get_conversation_messages(
 async def delete_conversation(http_request: Request, customer_id: str, conversation_id: str) -> dict[str, Any]:
     """删除指定历史对话及其全部数据。"""
     _authorize_customer(http_request, customer_id)
+    # 删除前校验归属：与消息接口一致，非本人会话不得清除任何数据。
+    _authorize_conversation(customer_id, conversation_id)
     deleted = get_system().delete_checkpoint_conversation(conversation_id, customer_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="对话不存在")
@@ -461,7 +483,7 @@ async def clear_records(
     current = _require_customer_id(http_request)
     if customer_id and str(customer_id).upper() != str(current).upper():
         raise HTTPException(status_code=403, detail="无权清除其他客户记录")
-    if customer_id is None and str(current).upper() not in ADMIN_CUSTOMER_IDS:
+    if customer_id is None and not _is_admin(current):
         raise HTTPException(status_code=403, detail="仅管理员可清除全部记录")
     try:
         system = get_system()
@@ -477,7 +499,9 @@ async def clear_records(
             # 当前格式：按会话清除窗口/摘要
             from finance_agent.orchestrator.database import get_database
             for conv in get_database().list_conversations(customer_id):
-                cleared += int(system.memory.store.clear_conversation(conv["conversation_id"]))
+                cleared += int(
+                    system.memory.store.clear_conversation(customer_id, conv["conversation_id"])
+                )
             cleared += system.clear_profile(customer_id)
         else:
             # 扫描所有 finance_cs:* 键，按需保留用户数据
