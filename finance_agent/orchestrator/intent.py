@@ -49,6 +49,16 @@ market_insight 只回答大盘/指数/市场整体问题，绝不输出个股结
 “政策/新闻/消息面有什么动态、对市场有什么影响”用 policy_impact。
 stock_analysis 只回答具体个股的基本面/技术面/行情；stock_recommendation 负责选股与多股比较。
 
+product_analysis 只处理**具体产品**（句中出现明确的基金/理财名称或 6 位产品代码）的查询、分析、比较与适配度，
+例如“分析一下华夏成长基金”“110011 怎么样”“华夏成长和易方达蓝筹哪个好”。
+
+投资**知识、规则与概念**问答一律归 casual_chat，不得因为句中出现“基金/产品/理财”等词就判为 product_analysis：
+“如何理解基金的风险等级（R1-R5）”“基金的风险等级有哪些”“什么是基金净值/最大回撤”“申购费率是多少”“T+1 是什么”
+这些都是在问通用规则与概念，应输出 casual_chat（conversation）。
+
+区分方法：看这句话是否需要**某个特定产品**才能回答。
+需要特定产品（要查它的资料/业绩/费率）→ product_analysis；换任意产品答案都成立（在问通用规则）→ casual_chat。
+
 每个意图必须包含 intent、query、confidence、reason、evidence、execution_mode、requires_slot_extraction。
 evidence 必须逐字摘自 current_message，不能来自上下文。query 只包含该意图对应的当前轮子请求。
 当 confidence 小于 0.9 时，必须返回非空 clarification_question，提出一个简短、具体、可直接回答的问题；不得直接回答或执行业务。

@@ -202,3 +202,16 @@ def test_injected_classifier_has_no_config_fallback():
 
     result = classifier.classify_intents("分析600519")
     assert result["classification_error"]["error_code"] == "intent_unavailable"
+
+
+def test_prompt_defines_product_vs_knowledge_boundary():
+    """分类提示词必须写明 product_analysis 与 casual_chat(FAQ) 的边界，
+    否则模型会把含“基金”的知识问答（如风险等级含义）误判为产品分析。"""
+    from finance_agent.orchestrator.intent import _INTENT_CLASSIFIER_PROMPT as prompt
+
+    assert "casual_chat" in prompt
+    # 明确的知识问答示例必须出现在提示词里，作为边界锚点
+    for anchor in ("风险等级", "申购费率", "具体产品"):
+        assert anchor in prompt, f"提示词缺少边界锚点：{anchor}"
+    # 并且要显式禁止“见词即判”
+    assert "不得因为句中出现" in prompt

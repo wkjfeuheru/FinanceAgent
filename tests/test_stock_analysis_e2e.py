@@ -180,3 +180,22 @@ def test_market_insight_modes_render_real_data(question, mode, needle):
     assert needle in response, f"{mode} 应渲染 {needle}：{response[:200]}"
     # 硬边界：市场洞察不得产出个股结论。
     assert not result.get("stock_analysis")
+
+
+# ── 子路径 6：分类边界（知识问答 vs 具体产品） ─────────────────────────────────
+
+@pytest.mark.parametrize("question,expected,forbidden", [
+    ("如何理解基金的风险等级（R1-R5）？", "casual_chat", "product_analysis"),
+    ("基金的风险等级有哪些", "casual_chat", "product_analysis"),
+    ("基金的申购费率是多少", "casual_chat", "product_analysis"),
+    ("分析一下华夏成长基金", "product_analysis", "casual_chat"),
+])
+def test_live_classification_splits_knowledge_from_specific_product(question, expected, forbidden):
+    """真实分类器：通用规则/概念问答不得被判为产品分析，反之具体产品不得判为闲聊。"""
+    from finance_agent.orchestrator.intent import IntentClassifier
+
+    out = IntentClassifier().classify_intents(question)
+    intents = [item["intent"] for item in out["intents"]]
+    assert out["classification_error"] == {}, out["classification_error"]
+    assert expected in intents, f"{question!r} 应判为 {expected}，实际 {intents}"
+    assert forbidden not in intents, f"{question!r} 不应判为 {forbidden}，实际 {intents}"
