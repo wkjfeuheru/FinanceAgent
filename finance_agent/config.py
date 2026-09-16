@@ -58,8 +58,14 @@ CELERY_RESULT_EXPIRES = int(os.getenv("CELERY_RESULT_EXPIRES", "3600"))
 FAQ_EMBEDDING_MODEL = os.getenv("FAQ_EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5").strip()
 FAQ_EMBEDDING_DEVICE = os.getenv("FAQ_EMBEDDING_DEVICE", "cpu").strip()
 FAQ_EMBEDDING_MODEL_CACHE_DIR = os.getenv("FAQ_EMBEDDING_MODEL_CACHE_DIR", ".cache/models").strip()
-# 归一化 RRF 融合分阈值；低于该值的 FAQ 命中视为不可靠，返回 not_found。
-FAQ_MIN_SCORE = float(os.getenv("FAQ_MIN_SCORE", "0.3"))
+# FAQ 检索阈值（实测校准，见 faq/retriever.py 注释）：
+# - 绝对下限：低于该分视为知识库无可靠答案，返回 not_found。
+#   中文短文本相似度天然偏高（无关内容可达 ~0.54），域内改写提问约 0.61~0.77，
+#   因此取 0.57 作为“像不像一个问题”的最低分界。
+# - 相对比例：只保留与最佳命中足够接近的候选（一问一答场景，弱相关应被甩开）。
+#   定投查询里正确条目 0.82、弱相关条目 0.30，0.85 可稳定排除后者。
+FAQ_MIN_SCORE = float(os.getenv("FAQ_MIN_SCORE", "0.57"))
+FAQ_RELATIVE_SCORE_RATIO = float(os.getenv("FAQ_RELATIVE_SCORE_RATIO", "0.85"))
 
 # 管理员 customer_id 白名单（逗号分隔）；用于限制管理接口（如清空全库记录）。
 ADMIN_CUSTOMER_IDS = {

@@ -46,6 +46,8 @@ THEME_REGISTRY_SCHEMA_SQL = _load_sql("005_theme_registry.sql")
 HYBRID_ORCHESTRATION_SCHEMA_SQL = _load_sql("008_hybrid_orchestration.sql")
 # FAQ 向量分块：依赖 pgvector 扩展，仅 FAQ 索引/检索路径需要。
 FAQ_VECTOR_SCHEMA_SQL = _load_sql("009_faq_vector.sql")
+# FAQ 中文关键词检索：把分词退化的 simple 配置换成归一化二元组。
+FAQ_BIGRAM_SCHEMA_SQL = _load_sql("010_faq_bigram_search.sql")
 
 
 def runtime_schema_jsonb_fields() -> dict[str, str]:

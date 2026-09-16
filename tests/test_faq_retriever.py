@@ -101,3 +101,69 @@ def test_retriever_limits_matches_to_top_k():
     result = retriever.search("投资规则")
 
     assert len(result.matches) == 4
+
+
+# ── 相对阈值：弱相关条目必须被甩开 ─────────────────────────────────────────
+
+def test_relative_ratio_drops_weak_hits():
+    """一问一答场景：只有与最佳命中接近的条目才算证据。
+
+    复现真实缺陷——问“定投”时，弱相关的“分散投资”(0.30) 曾与正确条目
+    (0.82) 一起返回，模型会挑错条目作答。
+    """
+    repository = _FakeRepository([
+        _row("c-good", "FAQ-004", vector_distance=0.18),   # 相似度 0.82
+        _row("c-weak", "FAQ-005", vector_distance=0.70),   # 相似度 0.30
+    ])
+    retriever = FaqRetriever(repository, _FakeEmbedding(), min_score=0.57, relative_ratio=0.85)
+
+    result = retriever.search("定投是什么？适合哪些情况？")
+
+    assert [m.faq_id for m in result.matches] == ["FAQ-004"]
+
+
+def test_absolute_floor_returns_not_found_for_out_of_domain():
+    """整体不够相关时返回 not_found，不得拿无关分块充当证据。"""
+    repository = _FakeRepository([_row("c1", "FAQ-105", vector_distance=0.52)])  # 相似度 0.48
+    retriever = FaqRetriever(repository, _FakeEmbedding(), min_score=0.57)
+
+    result = retriever.search("商品期货怎么开户")
+
+    assert result.status == "not_found"
+    assert result.matches == []
+
+
+def test_close_hits_are_both_kept():
+    """与最佳命中足够接近的候选应保留（多答案场景）。"""
+    repository = _FakeRepository([
+        _row("c1", "FAQ-011", vector_distance=0.23),   # 0.77
+        _row("c2", "FAQ-012", vector_distance=0.31),   # 0.69
+    ])
+    retriever = FaqRetriever(repository, _FakeEmbedding(), min_score=0.57, relative_ratio=0.85)
+
+    result = retriever.search("基金费用怎么收")
+
+    assert [m.faq_id for m in result.matches] == ["FAQ-011", "FAQ-012"]
+
+
+# ── 双通道归并：关键词行不得被向量行覆盖 ───────────────────────────────────
+
+def test_keyword_channel_is_merged_not_overwritten():
+    """仓储按 (chunk_id, 通道) 返回两行；归并后关键词得分必须保留。
+
+    旧实现用 DISTINCT ON 去重，会保留向量行、把 keyword_score 覆盖为 NULL，
+    使融合的关键词信号整条丢失。
+    """
+    repository = _FakeRepository([
+        {"chunk_id": "c1", "faq_id": "FAQ-004", "index_version": "i",
+         "source_path": "p", "content": "c", "vector_distance": 0.2, "keyword_score": None},
+        {"chunk_id": "c1", "faq_id": "FAQ-004", "index_version": "i",
+         "source_path": "p", "content": "c", "vector_distance": 0.2, "keyword_score": 0.5},
+    ])
+    retriever = FaqRetriever(repository, _FakeEmbedding(), min_score=0.0)
+
+    merged = retriever._merge_channels(repository._rows)
+
+    assert len(merged) == 1
+    assert merged["c1"]["vector_distance"] == 0.2
+    assert merged["c1"]["keyword_score"] == 0.5

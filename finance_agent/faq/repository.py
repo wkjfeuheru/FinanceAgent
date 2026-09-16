@@ -85,12 +85,17 @@ class PostgresFaqRepository(_PostgresRepository):
         super()._ensure_schema()
         if self._vector_ready:
             return
-        from finance_agent.data.postgres_schema import FAQ_VECTOR_SCHEMA_SQL
+        from finance_agent.data.postgres_schema import (
+            FAQ_BIGRAM_SCHEMA_SQL,
+            FAQ_VECTOR_SCHEMA_SQL,
+        )
 
         with self._transaction() as connection:
             cursor = connection.cursor()
             try:
                 cursor.execute(FAQ_VECTOR_SCHEMA_SQL)
+                # 中文关键词检索需要的二元组函数、生成列与索引（见 sql/010）。
+                cursor.execute(FAQ_BIGRAM_SCHEMA_SQL)
             except Exception as exc:
                 message = str(exc)
                 if "vector" in message and (
@@ -194,12 +199,20 @@ class PostgresFaqRepository(_PostgresRepository):
         query_text: str,
         limit: int,
     ) -> list[dict[str, Any]]:
-        """返回向量与关键词两个通道各 limit 条的候选并集，融合由调用层决定。"""
+        """返回向量与关键词两个通道各 limit 条的候选并集，融合由调用层决定。
+
+        关键词通道使用**归一化二元组**（见 sql/010）：PostgreSQL 的 simple 配置
+        不切中文，直接对原文检索会 0 命中。两个通道的结果按 (chunk_id, 通道)
+        原样返回、**不做 DISTINCT ON 去重**——去重会按向量距离保留单行，把同一
+        分块的关键词得分覆盖成 NULL，使融合时的关键词信号整条丢失；合并交给
+        调用层按 chunk_id 归并。
+        """
         if len(query_embedding) != 512:
             raise ValueError("FAQ query embedding must contain 512 dimensions")
         if limit < 1:
             return []
         self._ensure_schema()
+        embedding_literal = json.dumps(list(query_embedding))
         with self._transaction() as connection:
             cursor = connection.cursor()
             try:
@@ -207,7 +220,8 @@ class PostgresFaqRepository(_PostgresRepository):
                     """WITH vector_candidates AS (
                            SELECT chunk_id, faq_id, index_version, source_path, content,
                                   embedding <=> %s::vector AS vector_distance,
-                                  NULL::double precision AS keyword_score
+                                  NULL::double precision AS keyword_score,
+                                  0 AS channel
                            FROM finance.faq_chunks
                            WHERE is_active
                            ORDER BY embedding <=> %s::vector
@@ -215,27 +229,28 @@ class PostgresFaqRepository(_PostgresRepository):
                        ), keyword_candidates AS (
                            SELECT chunk_id, faq_id, index_version, source_path, content,
                                   embedding <=> %s::vector AS vector_distance,
-                                  ts_rank_cd(search_text, websearch_to_tsquery('simple', %s)) AS keyword_score
+                                  ts_rank_cd(search_bigrams,
+                                             websearch_to_tsquery('simple', finance.faq_bigrams(%s))) AS keyword_score,
+                                  1 AS channel
                            FROM finance.faq_chunks
                            WHERE is_active
-                             AND search_text @@ websearch_to_tsquery('simple', %s)
+                             AND search_bigrams @@ websearch_to_tsquery('simple', finance.faq_bigrams(%s))
                            ORDER BY keyword_score DESC
                            LIMIT %s
                        )
-                       SELECT DISTINCT ON (chunk_id)
-                              chunk_id, faq_id, index_version, source_path, content,
-                              vector_distance, keyword_score
+                       SELECT chunk_id, faq_id, index_version, source_path, content,
+                              vector_distance, keyword_score, channel
                        FROM (
                            SELECT * FROM vector_candidates
                            UNION ALL
                            SELECT * FROM keyword_candidates
                        ) combined
-                       ORDER BY chunk_id, vector_distance""",
+                       ORDER BY chunk_id, channel""",
                     (
-                        json.dumps(list(query_embedding)),
-                        json.dumps(list(query_embedding)),
+                        embedding_literal,
+                        embedding_literal,
                         limit,
-                        json.dumps(list(query_embedding)),
+                        embedding_literal,
                         query_text,
                         query_text,
                         limit,

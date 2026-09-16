@@ -101,3 +101,13 @@ def test_async_run_repository_scopes_job_lookup_to_customer():
     assert "customer_id = %s" in lookup_statement
     assert lookup_params == ("job-1", "CUST1")
     assert connection.committed is True
+
+
+def test_bigram_migration_defines_chinese_keyword_search():
+    """中文关键词检索依赖归一化二元组：simple 配置不切词，直接检索会 0 命中。"""
+    from finance_agent.data.postgres_schema import FAQ_BIGRAM_SCHEMA_SQL
+
+    assert "faq_bigrams" in FAQ_BIGRAM_SCHEMA_SQL
+    assert "faq_normalize" in FAQ_BIGRAM_SCHEMA_SQL
+    assert "search_bigrams" in FAQ_BIGRAM_SCHEMA_SQL
+    assert "gin (search_bigrams)" in FAQ_BIGRAM_SCHEMA_SQL

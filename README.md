@@ -249,8 +249,12 @@ CELERY_RESULT_EXPIRES=3600
 FAQ_EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
 FAQ_EMBEDDING_DEVICE=cpu
 FAQ_EMBEDDING_MODEL_CACHE_DIR=.cache/models
-# 归一化 RRF 融合分阈值；低于该值的 FAQ 命中判为 not_found
-FAQ_MIN_SCORE=0.3
+# FAQ 检索阈值（已按语料实测校准）
+# 绝对下限：低于该分视为知识库无可靠答案，返回 not_found；
+# 中文短文本相似度天然偏高（域外问题可达 ~0.54，域内改写提问 ~0.61 起），故取 0.57。
+FAQ_MIN_SCORE=0.57
+# 相对比例：只保留与最佳命中足够接近的候选（一问一答场景，弱相关应被排除）。
+FAQ_RELATIVE_SCORE_RATIO=0.85
 ```
 
 说明：
