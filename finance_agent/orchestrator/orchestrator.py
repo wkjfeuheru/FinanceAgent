@@ -28,7 +28,7 @@ from finance_agent.orchestrator.root_graph import (
 from finance_agent.orchestrator.run_state import RunStateStore
 from finance_agent.orchestrator.thread_key import build_thread_id
 from finance_agent.research.contracts import AnalysisRequest, AnalysisResult
-from finance_agent.middleware import BLOCKED_RESPONSE, find_sensitive_word
+from finance_agent.middleware import BLOCKED_RESPONSE, should_block_input
 
 logger = logging.getLogger(__name__)
 
@@ -289,7 +289,7 @@ class AdvisorSystem:
     ) -> Dict[str, Any]:
         """处理一轮同步消息；根图为唯一执行路径，异常显式失败不回退。"""
         conversation_id = conversation_id or uuid.uuid4().hex
-        if find_sensitive_word(message) is not None:
+        if should_block_input(message):
             return {
                 "response": BLOCKED_RESPONSE,
                 "task_plan": [], "task_dispatch": [], "tasks": [], "task_results": {},
@@ -457,7 +457,7 @@ class AdvisorSystem:
         customer_id: str = "CUST001",
         conversation_id: str = "",
     ):
-        if find_sensitive_word(message) is not None:
+        if should_block_input(message):
             yield {"type": "stage", "stage": "content_filter", "message": "正在检查输入内容..."}
         else:
             yield {"type": "stage", "stage": "manager", "message": "正在选择需要执行的领域..."}

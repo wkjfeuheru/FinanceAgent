@@ -5,6 +5,8 @@ from finance_agent.middleware.content_filter import (
     OUTPUT_BLOCKED_RESPONSE,
     check_sensitive_words,
     find_sensitive_word,
+    is_educational_question,
+    should_block_input,
 )
 
 __all__ = [
@@ -12,4 +14,6 @@ __all__ = [
     "OUTPUT_BLOCKED_RESPONSE",
     "check_sensitive_words",
     "find_sensitive_word",
+    "is_educational_question",
+    "should_block_input",
 ]
