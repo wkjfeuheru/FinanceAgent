@@ -74,3 +74,36 @@ def test_gate_stays_fail_closed_without_question_shape():
 
 def test_sensitive_word_list_is_not_empty():
     assert "操纵市场" in _configured_words()
+
+
+# ── 词表覆盖：违法活动术语不能漏 ─────────────────────────────────────────────
+
+def test_illegal_activity_terms_are_covered():
+    """内幕交易/坐庄/对倒/场外配资等常见说法必须在词表内，否则求操作会漏拦。"""
+    for term in ("内幕交易", "坐庄", "对倒", "虚假申报", "蛊惑交易",
+                 "抢帽子", "拉抬打压", "非法集资", "场外配资", "庞氏骗局"):
+        assert term in _configured_words(), f"词表缺少：{term}"
+
+
+def test_illegal_activity_requests_are_blocked():
+    for message in (
+        "怎么才能做内幕交易赚钱",
+        "教我坐庄",
+        "帮我虚假申报拉抬股价",
+        "怎么做对倒",
+        "哪里可以场外配资",
+        "怎么搞非法集资",
+    ):
+        assert should_block_input(message) is True, f"应拦截：{message}"
+
+
+def test_illegal_activity_questions_still_pass():
+    """补充词表后，问这些概念仍必须放行（否则 FAQ 又不可用）。"""
+    for message in (
+        "什么是内幕交易？",
+        "内幕交易违法吗",
+        "如何识别坐庄行为",
+        "什么是场外配资",
+        "虚假申报是什么意思",
+    ):
+        assert should_block_input(message) is False, f"不应拦截：{message}"
