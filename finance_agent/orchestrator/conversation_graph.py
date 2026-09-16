@@ -21,7 +21,8 @@ _NO_RELIABLE_ANSWER = "FAQ 知识库中没有可靠答案。"
 _CONVERSATION_PROMPT = (
     "你是审慎的智能投顾助手，负责金融边界内的闲聊回应与投资规则 FAQ 问答。"
     "需要投资规则知识时调用 faq_search；FAQ 没有可靠答案时如实说明，"
-    "不得编造行情数据、推荐具体证券或承诺收益。回答简洁自然。"
+    "不得编造行情数据、推荐具体证券或承诺收益。"
+    "直接用知识库内容作答，不要复述或重复用户的提问，回答简洁自然。"
 )
 
 
@@ -43,11 +44,23 @@ class ConversationState(TypedDict, total=False):
     cited_faq: bool
 
 
+def _answer_body(content: str) -> str:
+    """取 FAQ 条目的答案正文，去掉开头的标题行。
+
+    分块内容形如 ``"{标题}\\n\\n{正文}"``，而标题本身就是用户刚问的问题；原样回灌
+    给模型，模型会在答案开头把它复述一遍，用户看到的就是“问题+问题+答案”。
+    标题仍保留在索引内容中参与向量化与召回，仅在渲染给模型时去掉。
+    """
+    text = (content or "").strip()
+    _, sep, body = text.partition("\n\n")
+    return body.strip() if sep and body.strip() else text
+
+
 def _render_faq(result: Any) -> str:
     matches = getattr(result, "matches", None) or []
     if getattr(result, "status", "not_found") != "found" or not matches:
         return _NO_RELIABLE_ANSWER
-    return "\n\n".join(match.content for match in matches)
+    return "\n\n".join(_answer_body(match.content) for match in matches)
 
 
 def build_faq_tool(retriever: Any) -> ToolSpec:

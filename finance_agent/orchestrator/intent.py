@@ -36,12 +36,16 @@ _INTENT_CLASSIFIER_PROMPT = """你是金融工作流的多意图分类器，只�
 近期上下文摘要只能用于解析“它、这些股票”等指代，不得从上下文新增当前消息未表达的意图。
 “最近AI行业有什么值得投资的股票，为我推荐几个”只能输出 stock_recommendation，execution_mode=candidate_search。
 
-允许的意图与 execution_mode：
+允许的意图与 execution_mode（冒号前是 intent，竖线分隔的是可选的 execution_mode）：
 - market_insight: market_overview | market_sentiment | capital_flow | policy_impact
 - stock_analysis: stock_analysis
 - stock_recommendation: candidate_search | stock_comparison
 - product_analysis: product_analysis
 - casual_chat: conversation
+
+`intent` 字段只能填冒号**前**的五个值之一（market_insight / stock_analysis /
+stock_recommendation / product_analysis / casual_chat）；`market_overview`
+这类是 execution_mode，**不能**填进 intent 字段。
 
 market_insight 只回答大盘/指数/市场整体问题，绝不输出个股结论或推荐：
 “今天大盘怎么样”用 market_overview；“市场情绪/赚钱效应/涨跌家数”用 market_sentiment；
@@ -235,12 +239,28 @@ _EXECUTION_MODES = {
 _LOGGER = logging.getLogger(__name__)
 
 
+# 模型偶尔会把 execution_mode 的值当成 intent 填（例如把 "market_overview" 当意图）。
+# 这些值在领域里语义唯一，直接还原成所属 intent，避免一条可修复的格式错误被
+# 当成分类失败（表现为“暂时无法识别该请求的业务领域”）。
+_MODE_TO_INTENT: dict[str, str] = {
+    mode: intent for intent, modes in _EXECUTION_MODES.items() for mode in modes
+}
+
+
+def _resolve_intent(raw_intent: str) -> str | None:
+    """把 intent 归一：已知意图直接通过；execution_mode 误填则还原所属意图。"""
+    if raw_intent in _INTENTS:
+        return raw_intent
+    return _MODE_TO_INTENT.get(raw_intent)
+
+
 def normalize_intent_item(
     item: Dict[str, Any], fallback_query: str,
 ) -> Dict[str, Any] | None:
     """校验单条意图并补齐其可执行路由字段。"""
-    intent = str(item.get("intent", "")).strip()
-    if intent not in _INTENTS:
+    raw_intent = str(item.get("intent", "")).strip()
+    intent = _resolve_intent(raw_intent)
+    if intent is None:
         return None
     try:
         confidence = float(item.get("confidence", 0))
@@ -249,6 +269,9 @@ def normalize_intent_item(
     if not math.isfinite(confidence):
         confidence = 0.0
     mode = str(item.get("execution_mode", "")).strip()
+    # 意图被还原时，原字段本身就是 mode（模型把两者填成了同一个值）。
+    if mode not in _EXECUTION_MODES[intent] and raw_intent in _EXECUTION_MODES[intent]:
+        mode = raw_intent
     if mode not in _EXECUTION_MODES[intent]:
         mode = (
             "unsupported"

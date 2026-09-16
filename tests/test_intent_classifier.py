@@ -282,3 +282,47 @@ def test_evidence_not_in_message_still_dropped_per_item():
     parsed = _validate(payload, message)
 
     assert [i["intent"] for i in parsed["intents"]] == ["stock_analysis"]
+
+
+# ── 模型把 execution_mode 误填为 intent ─────────────────────────────────────
+
+def test_execution_mode_misused_as_intent_is_recovered():
+    """模型常把 market_overview 这类 execution_mode 填进 intent 字段。
+
+    这是可修复的格式错误，必须还原成所属意图，而不是丢弃整条分类
+    （否则“今天大盘怎么样”会间歇性失败）。
+    """
+    from finance_agent.orchestrator.intent import normalize_intent_item
+
+    cases = {
+        "market_overview": ("market_insight", "market_overview"),
+        "market_sentiment": ("market_insight", "market_sentiment"),
+        "capital_flow": ("market_insight", "capital_flow"),
+        "policy_impact": ("market_insight", "policy_impact"),
+        "candidate_search": ("stock_recommendation", "candidate_search"),
+        "stock_comparison": ("stock_recommendation", "stock_comparison"),
+        "conversation": ("casual_chat", "conversation"),
+        "product_analysis": ("product_analysis", "product_analysis"),
+    }
+    for raw, (intent, mode) in cases.items():
+        item = {"intent": raw, "query": "今天大盘怎么样", "confidence": 0.95,
+                "evidence": "今天大盘怎么样", "execution_mode": raw}
+        normalized = normalize_intent_item(item, "今天大盘怎么样")
+        assert normalized is not None, f"{raw} 应被还原而不是丢弃"
+        assert (normalized["intent"], normalized["execution_mode"]) == (intent, mode)
+
+
+def test_unknown_intent_is_still_rejected():
+    from finance_agent.orchestrator.intent import normalize_intent_item
+
+    assert normalize_intent_item(
+        {"intent": "totally_unknown", "query": "x", "confidence": 0.9, "evidence": "x"},
+        "x",
+    ) is None
+
+
+def test_prompt_forbids_mode_values_in_intent_field():
+    from finance_agent.orchestrator.intent import _INTENT_CLASSIFIER_PROMPT as prompt
+
+    assert "intent` 字段" in prompt
+    assert "不能" in prompt

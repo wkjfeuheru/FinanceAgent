@@ -129,3 +129,26 @@ def test_conversation_without_faq_hit_is_not_trusted():
     result = graph.invoke(_base_state())
 
     assert result["cited_faq"] is False
+
+
+# ── 渲染：不得回灌标题（否则模型会复述问题）───────────────────────────────
+
+def test_answer_body_strips_faq_title():
+    """分块内容为“标题\n\n正文”；渲染给模型时必须去掉标题，避免复述问题。"""
+    from finance_agent.orchestrator.conversation_graph import _answer_body
+
+    assert _answer_body("分红和送股有什么区别？\n\n现金分红是……") == "现金分红是……"
+    # 无标题结构时原样返回，不误删内容
+    assert _answer_body("只有正文") == "只有正文"
+
+
+def test_rendered_observation_does_not_lead_with_the_question():
+    from finance_agent.orchestrator.conversation_graph import _render_faq
+
+    result = _found_retriever()._result
+    result.matches[0].content = "什么是保证收益？\n\n任何声称保证收益的宣传都涉嫌违规。"
+
+    text = _render_faq(result)
+
+    assert not text.startswith("什么是保证收益")
+    assert "任何声称保证收益的宣传都涉嫌违规。" in text
