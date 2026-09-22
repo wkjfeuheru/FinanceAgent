@@ -11,8 +11,9 @@ class FaqChunk(BaseModel):
     """一个完整问答对应的索引分块。"""
 
     faq_id: str
-    title: str
-    content: str
+    question: str
+    answer: str
+    embedding_text: str
     source_path: str
     chunk_ordinal: int
     content_hash: str
@@ -26,7 +27,8 @@ class FaqSearchMatch(BaseModel):
     score: float
     index_version: str
     source_path: str
-    content: str
+    question: str
+    answer: str
 
 
 class FaqSearchResult(BaseModel):

@@ -1,4 +1,4 @@
-"""编排层：LangGraph Root Graph、领域子图、记忆系统与工具调用。"""
+"""编排层：LangGraph Supervisor Graph、领域子图、记忆系统与工具调用。"""
 
 from finance_agent.orchestrator.memory import AgentMemoryContext, RedisMemoryStore, UserProfileCard
 

@@ -97,3 +97,18 @@ def test_product_request_reads_profile_from_task_context_when_state_projection_i
 
     assert request.product_codes == ["P001"]
     assert request.profile == {"risk_preference": "稳健", "holding_period": "long"}
+
+
+def test_product_facts_are_not_duplicated_across_runs():
+    """同一状态二次执行产品研究时，既有事实不得被重复追加。"""
+    state = {
+        "user_message": "分析示例基金",
+        "intent_slots": {"product_analysis": {"product_names": ["示例基金"]}},
+        "user_profile": {},
+        "facts": [],
+    }
+
+    state = invoke_product(ProductDomainDeps(pipeline=_StaticPipeline(_one_product_result())), state)
+    state = invoke_product(ProductDomainDeps(pipeline=_StaticPipeline(_one_product_result())), state)
+
+    assert [fact.fact_id for fact in state["facts"]] == ["product:P001:risk_level"]

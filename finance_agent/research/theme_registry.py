@@ -245,11 +245,27 @@ class FallbackThemeRegistry:
         return hit or self._fallback.match_in_text(text)
 
     def list_themes(self) -> list[ThemeEntry]:
+        """主读路径可用时返回"库内主题 + 库内缺失的内置主题"。
+
+        只在内置列表为空时才回退，会让三个方法口径不一致：库内注册了任何主题之后，
+        ``resolve``/``match_in_text`` 仍能命中内置主题（它们逐次回退），而
+        ``list_themes`` 只返回库内主题。``_resolve_theme_id`` 的整句扫描正是走
+        ``list_themes``，于是"推荐人工智能主题股票"会突然不再解析为 ai_compute，
+        退化成候选股比对 —— 库里新增一个主题就越权停用了内置主题。
+
+        因此这里按 theme_id 合并：库内记录优先（可覆盖内置的别名与代表股，也允许
+        显式停用），库内没有的内置主题照常保留。
+        """
         try:
             entries = self._primary.list_themes()
         except Exception:  # noqa: BLE001
             return self._fallback.list_themes()
-        return entries or self._fallback.list_themes()
+        if not entries:
+            return self._fallback.list_themes()
+        known = {entry.theme_id for entry in entries}
+        return entries + [
+            entry for entry in self._fallback.list_themes() if entry.theme_id not in known
+        ]
 
 
 _STATIC_REGISTRY = StaticThemeRegistry.builtin()

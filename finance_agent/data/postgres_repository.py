@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Iterator
@@ -267,6 +268,8 @@ class PostgresRuntimeRepository:
             AGENT_RUNTIME_SCHEMA_SQL,
             BASE_SCHEMA_SQL,
             IDENTITY_MIGRATION_SQL,
+            PORTFOLIO_SCHEMA_SQL,
+            PRODUCTS_SCHEMA_SQL,
             RESEARCH_GOVERNANCE_SCHEMA_SQL,
             THEME_REGISTRY_SCHEMA_SQL,
         )
@@ -275,10 +278,13 @@ class PostgresRuntimeRepository:
             cursor = connection.cursor()
             try:
                 cursor.execute(BASE_SCHEMA_SQL)
+                # 旧库缺列的补齐必须紧跟建表之后（幂等）。
+                cursor.execute(PRODUCTS_SCHEMA_SQL)
                 cursor.execute(AGENT_RUNTIME_SCHEMA_SQL)
                 cursor.execute(IDENTITY_MIGRATION_SQL)
                 cursor.execute(RESEARCH_GOVERNANCE_SCHEMA_SQL)
                 cursor.execute(THEME_REGISTRY_SCHEMA_SQL)
+                cursor.execute(PORTFOLIO_SCHEMA_SQL)
             finally:
                 cursor.close()
 
@@ -493,6 +499,8 @@ class PostgresAuditStore:
             ResearchRunRepository(connection_factory) if connection_factory else None
         )
         self._schema_ready = False
+        # 懒建表只应执行一次；会话并发后需显式互斥，避免并发 DDL 竞争。
+        self._schema_lock = threading.Lock()
 
     @classmethod
     def from_config(cls):
@@ -505,11 +513,14 @@ class PostgresAuditStore:
     def _ensure_schema(self) -> None:
         if self._schema_ready or not self._repository:
             return
-        try:
-            self._repository.setup_schema()
-            self._schema_ready = True
-        except Exception:
-            pass
+        with self._schema_lock:
+            if self._schema_ready or not self._repository:
+                return
+            try:
+                self._repository.setup_schema()
+                self._schema_ready = True
+            except Exception:
+                pass
 
     def create_run(self, request: Any, dispatch_plan: Any = None) -> dict[str, Any] | None:
         if not self._repository:

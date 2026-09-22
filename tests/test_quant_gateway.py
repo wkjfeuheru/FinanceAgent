@@ -126,13 +126,16 @@ def test_technical_offload_reports_pending_without_faking_indicators():
     gateway = _PendingGateway()
     deps = StockDeps(quant_gateway=gateway, quant_wait_seconds=0.0)
 
-    indicators, pending = compute_technical_via_gateway(
+    indicators, pending, pending_jobs = compute_technical_via_gateway(
         deps, _stock_data_with_history("600519"), ["600519"]
     )
 
     assert pending is True
     assert indicators == {}
     assert gateway.submitted == ["technical_indicators"]
+    # 未完成的 job 必须随结果返回，供上层写入 DomainOutcome.pending_jobs：
+    # 端点据此按真实 job_id 恢复，不能只报"处理中"却丢失可查询的标识。
+    assert [ref.job_id for _, ref in pending_jobs] == ["job-x"]
 
 
 def test_technical_offload_returns_indicators_when_gateway_completes():
@@ -141,11 +144,12 @@ def test_technical_offload_returns_indicators_when_gateway_completes():
 
     deps = StockDeps(quant_gateway=InMemoryQuantGateway(), quant_wait_seconds=1.0)
 
-    indicators, pending = compute_technical_via_gateway(
+    indicators, pending, pending_jobs = compute_technical_via_gateway(
         deps, _stock_data_with_history("600519"), ["600519"]
     )
 
     assert pending is False
+    assert pending_jobs == []
     assert set(indicators["600519"]) >= {"MA", "MACD", "KDJ", "RSI", "BOLL", "WR"}
 
 

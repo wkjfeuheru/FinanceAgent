@@ -6,9 +6,9 @@ import threading
 import pytest
 from fastapi import HTTPException
 
-from finance_agent.orchestrator.root_graph import (
-    RootGraphDependencies,
-    build_root_graph,
+from finance_agent.orchestrator.supervisor_graph import (
+    SupervisorDependencies,
+    build_supervisor_graph,
     classify_domains,
 )
 
@@ -86,8 +86,8 @@ def test_clarification_state_does_not_execute_subgraphs():
         called["domain"] = True
         raise AssertionError("澄清分支不得执行领域子图")
 
-    graph = build_root_graph(
-        RootGraphDependencies(
+    graph = build_supervisor_graph(
+        SupervisorDependencies(
             classifier=_FakeClassifier({
                 "intents": [],
                 "uncertain_intents": [{"intent": "stock_analysis", "confidence": 0.4, "query": "那个"}],
@@ -162,8 +162,8 @@ def test_handle_message_output_includes_stock_structured_fields(monkeypatch):
             },
         )
 
-    system.root = build_root_graph(
-        RootGraphDependencies(classifier=_Classifier(), domain_runner=domain_runner)
+    system.supervisor = build_supervisor_graph(
+        SupervisorDependencies(classifier=_Classifier(), domain_runner=domain_runner)
     )
 
     output = system.handle_message("分析600519", conversation_id="proj-test")

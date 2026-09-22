@@ -21,7 +21,7 @@ from finance_agent.orchestrator.domains.market import build_market_domain_graph
 from finance_agent.orchestrator.domains.product import build_product_domain_graph
 from finance_agent.orchestrator.domains.stock import StockDeps, build_stock_domain_graph
 from finance_agent.orchestrator.intent import IntentClassifier
-from finance_agent.orchestrator.root_graph import RootGraphDependencies, build_root_graph
+from finance_agent.orchestrator.supervisor_graph import SupervisorDependencies, build_supervisor_graph
 from finance_agent.research.screener import ThemeScreener
 from finance_agent.research.theme_models import ThemeLead
 from finance_agent.research.theme_repository import InMemoryThemeRepository
@@ -55,7 +55,7 @@ class _DeterministicClassifier(IntentClassifier):
         )())
 
 
-def _build_root(*, theme_screener=None, classifier=None):
+def _build_supervisor(*, theme_screener=None, classifier=None):
     stock_deps = StockDeps(theme_screener=theme_screener)
 
     def domain_runner(context):
@@ -69,8 +69,8 @@ def _build_root(*, theme_screener=None, classifier=None):
             graph = build_product_domain_graph()
         return graph.invoke({"context": context})["domain_outcome"]
 
-    return build_root_graph(
-        RootGraphDependencies(
+    return build_supervisor_graph(
+        SupervisorDependencies(
             classifier=classifier or IntentClassifier(),
             domain_runner=domain_runner,
         )
@@ -89,7 +89,7 @@ def _actions(result: dict) -> list[str]:
 
 def test_live_question_routes_to_single_stock_analysis():
     """不注入分类：真实问题经真实意图分类后走单股研究并给出结论。"""
-    root = _build_root()
+    root = _build_supervisor()
     result = _run(root, "请分析一下贵州茅台的基本面和最近走势")
 
     response = result.get("final_response", "")
@@ -99,7 +99,7 @@ def test_live_question_routes_to_single_stock_analysis():
 
 
 def test_single_stock_analysis_produces_scored_conclusion():
-    root = _build_root(classifier=_DeterministicClassifier([{
+    root = _build_supervisor(classifier=_DeterministicClassifier([{
         "intent": "stock_analysis", "query": "分析600519", "confidence": 0.99,
         "execution_mode": "stock_analysis", "evidence": "分析600519",
     }]))
@@ -114,7 +114,7 @@ def test_single_stock_analysis_produces_scored_conclusion():
 # ── 子路径 2：股票比较（多标的，逐只独立结论） ─────────────────────────────────
 
 def test_comparison_yields_independent_conclusions_per_stock():
-    root = _build_root(classifier=_DeterministicClassifier([{
+    root = _build_supervisor(classifier=_DeterministicClassifier([{
         "intent": "stock_recommendation", "query": "比较贵州茅台和招商银行",
         "confidence": 0.99, "execution_mode": "stock_comparison",
         "evidence": "比较贵州茅台和招商银行",
@@ -148,7 +148,7 @@ def _theme_repo(codes: list[str]) -> InMemoryThemeRepository:
 
 def test_theme_screening_scores_approved_members():
     screener = ThemeScreener(_theme_repo(["000977", "002230", "300308", "300502", "603019"]), _RealGateway())
-    root = _build_root(theme_screener=screener, classifier=_DeterministicClassifier([{
+    root = _build_supervisor(theme_screener=screener, classifier=_DeterministicClassifier([{
         "intent": "stock_recommendation", "query": "推荐人工智能主题股票",
         "confidence": 0.99, "execution_mode": "candidate_search",
         "evidence": "推荐人工智能主题股票",
@@ -170,7 +170,7 @@ def test_theme_screening_scores_approved_members():
     ("最近资金面如何", "capital_flow", "融资融券"),
 ])
 def test_market_insight_modes_render_real_data(question, mode, needle):
-    root = _build_root(classifier=_DeterministicClassifier([{
+    root = _build_supervisor(classifier=_DeterministicClassifier([{
         "intent": "market_insight", "query": question, "confidence": 0.99,
         "execution_mode": mode, "evidence": question,
     }]))

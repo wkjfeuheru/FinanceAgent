@@ -1,6 +1,5 @@
-"""运行闭环契约、状态和标识工具测试。"""
+"""运行闭环契约与标识工具测试。"""
 
-from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
@@ -11,9 +10,7 @@ from finance_agent.contracts import (
     DispatchPlan,
     ExpertResult,
     ExpertStatus,
-    FactSnapshot,
     IntentKind,
-    PreparedContext,
     RequestEnvelope,
     ResponseEnvelope,
     RunStatus,
@@ -21,38 +18,7 @@ from finance_agent.contracts import (
     TaskKind,
     TaskStatus,
     generate_identifiers,
-    propagate_identifiers,
-    transition_run_status,
 )
-
-
-def test_task_contract_preserves_distinct_same_expert_intents():
-    from finance_agent.contracts.adapters import normalize_dispatch_plan
-
-    plan = normalize_dispatch_plan([
-        {
-            "intent": "stock_analysis",
-            "query": "分析贵州茅台",
-            "confidence": 0.99,
-            "execution_mode": "stock_analysis",
-        },
-        {
-            "intent": "stock_recommendation",
-            "query": "推荐几只AI股票",
-            "confidence": 0.98,
-            "execution_mode": "candidate_search",
-        },
-    ], "分析贵州茅台，并推荐几只AI股票")
-
-    assert [task.task_id for task in plan.tasks] == ["task-1", "task-2"]
-    assert [task.intent for task in plan.tasks] == [
-        IntentKind.STOCK_ANALYSIS,
-        IntentKind.STOCK_RECOMMENDATION,
-    ]
-    assert [task.expert_name for task in plan.tasks] == [
-        "stock_analysis", "stock_analysis",
-    ]
-    assert all(task.status is TaskStatus.PENDING for task in plan.tasks)
 
 
 def test_response_envelope_exposes_run_status_tasks_results_and_warnings():
@@ -68,7 +34,6 @@ def test_response_envelope_exposes_run_status_tasks_results_and_warnings():
             intent=IntentKind.STOCK_ANALYSIS,
             expert_name="stock_analysis",
             requirement="分析600519",
-            execution_mode="stock_analysis",
             status=TaskStatus.SUCCESS,
         )],
         results=[ExpertResult(
@@ -92,22 +57,15 @@ def test_contracts_serialize_to_json_schema_and_json():
     """核心契约应能生成 JSON Schema 并完成嵌套 JSON 序列化。"""
     identifiers = generate_identifiers("conversation-1")
     request = RequestEnvelope(
-        **propagate_identifiers(identifiers),
+        run_id=identifiers.run_id,
+        trace_id=identifiers.trace_id,
         user_id=uuid4(),
         customer_id="CUST001",
+        conversation_id=identifiers.conversation_id,
+        message_id=identifiers.message_id,
         message="分析 600519",
     )
     plan = DispatchPlan(tasks=[Task(task_id="task-1", kind=TaskKind.STOCK_ANALYSIS)])
-    prepared = PreparedContext(
-        facts=[FactSnapshot(
-            fact_id="fact-1",
-            domain="market",
-            source="fixture",
-            fetched_at=datetime.now(timezone.utc),
-            valid_until=datetime.now(timezone.utc),
-            payload={"code": "600519"},
-        )]
-    )
     result = ExpertResult(
         expert_name="stock_analysis",
         status=ExpertStatus.SUCCESS,
@@ -126,7 +84,8 @@ def test_contracts_serialize_to_json_schema_and_json():
 
     assert {"run_id", "trace_id", "message_id"} <= set(request.model_json_schema()["properties"])
     assert plan.model_dump(mode="json")["tasks"][0]["kind"] == "stock_analysis"
-    assert prepared.model_dump(mode="json")["facts"][0]["fact_id"] == "fact-1"
+    # intent 由 expert_name 按 IntentKind 推导，不再依赖硬编码映射表。
+    assert result.intent is IntentKind.STOCK_ANALYSIS
     assert '"expert_name":"stock_analysis"' in response.model_dump_json()
 
 
@@ -190,29 +149,3 @@ def test_contracts_reject_unknown_fields():
             message="你好",
             unexpected="invalid",
         )
-
-
-def test_terminal_run_status_cannot_be_overwritten():
-    """运行进入终态后只能重复写入同一终态。"""
-    assert transition_run_status(RunStatus.RUNNING, RunStatus.COMPLETED) == RunStatus.COMPLETED
-    assert transition_run_status(RunStatus.COMPLETED, RunStatus.COMPLETED) == RunStatus.COMPLETED
-    with pytest.raises(ValueError):
-        transition_run_status(RunStatus.COMPLETED, RunStatus.RUNNING)
-
-
-def test_identifiers_are_propagated_from_request_to_expert_result():
-    """同一请求的运行和 trace 标识应可关联到专家结果 metadata。"""
-    identifiers = generate_identifiers("conversation-1")
-    propagated = propagate_identifiers(identifiers)
-    result = ExpertResult(
-        expert_name="product_analysis",
-        status=ExpertStatus.DEGRADED,
-        summary="产品数据暂不可用",
-        degradation_reason="source_timeout",
-    )
-    expert_metadata = {**propagated, "expert_name": result.expert_name}
-
-    assert expert_metadata["trace_id"] == str(identifiers.trace_id)
-    assert expert_metadata["run_id"] == str(identifiers.run_id)
-    assert expert_metadata["conversation_id"] == identifiers.conversation_id
-    assert expert_metadata["message_id"] == str(identifiers.message_id)

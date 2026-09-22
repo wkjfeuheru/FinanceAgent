@@ -14,7 +14,7 @@ from typing import Any
 
 from finance_agent.orchestrator.contracts import BusinessDomain, DomainTaskContext
 from finance_agent.orchestrator.domains.stock import StockDeps, build_stock_domain_graph
-from finance_agent.orchestrator.root_graph import RootGraphDependencies, build_root_graph
+from finance_agent.orchestrator.supervisor_graph import SupervisorDependencies, build_supervisor_graph
 from finance_agent.research.pipeline import ResearchPipeline
 from finance_agent.research.rule_engine import RuleEngine
 from finance_agent.research.snapshot_builder import SnapshotBuilder
@@ -75,8 +75,8 @@ def _build_root(intents: list[dict]) -> Any:
         assert context.task.domain is BusinessDomain.STOCK_RESEARCH
         return build_stock_domain_graph(stock_deps).invoke({"context": context})["domain_outcome"]
 
-    return build_root_graph(
-        RootGraphDependencies(classifier=_StaticClassifier(intents), domain_runner=domain_runner)
+    return build_supervisor_graph(
+        SupervisorDependencies(classifier=_StaticClassifier(intents), domain_runner=domain_runner)
     )
 
 

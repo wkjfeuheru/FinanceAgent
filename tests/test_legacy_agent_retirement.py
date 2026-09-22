@@ -48,12 +48,12 @@ def test_handle_message_has_a_single_v2_path(monkeypatch):
     system._workflow_lock = __import__("threading").RLock()
     called = {}
 
-    class _Root:
+    class _Supervisor:
         def invoke(self, state, config=None):
             called["state"] = state
             return {"final_response": "ok", "run_status": "completed", "task_results": {}}
 
-    system.root = _Root()
+    system.supervisor = _Supervisor()
     system._failed_output = lambda cid: {"response": "failed", "run_status": "failed"}
     system._persist = lambda *a, **k: None
     system._progress_lock = __import__("threading").Lock()
@@ -83,9 +83,9 @@ def test_handle_message_has_a_single_v2_path(monkeypatch):
 
 def test_v2_root_graph_has_mandatory_compliance_exit():
     """所有执行分支都必须汇聚到一个合规节点，且只有合规节点通向终点。"""
-    from finance_agent.orchestrator.root_graph import build_root_graph, RootGraphDependencies
+    from finance_agent.orchestrator.supervisor_graph import build_supervisor_graph, SupervisorDependencies
 
-    graph = build_root_graph(RootGraphDependencies(classifier=object()))
+    graph = build_supervisor_graph(SupervisorDependencies(classifier=object()))
     nodes = {name for name in graph.get_graph().nodes}
     ends = [edge for edge in graph.get_graph().edges if edge[1] == "__end__"]
 

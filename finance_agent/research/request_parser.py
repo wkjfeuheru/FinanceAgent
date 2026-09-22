@@ -5,7 +5,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from finance_agent.research.contracts import AnalysisKind, AnalysisRequest
+from finance_agent.research.contracts import (
+    AnalysisKind,
+    AnalysisRequest,
+    ensure_single_stock_shape,
+)
 from finance_agent.research.theme_registry import ThemeRegistry, default_theme_registry
 
 
@@ -136,6 +140,10 @@ def parse_analysis_request(
         else AnalysisKind.COMPARISON if comparison_requested
         else AnalysisKind.SINGLE_STOCK
     )
+    # 形态校验提前到构造之前：确保 SingleStockShapeError **直接**抛出
+    # （不被 pydantic 包装为 ValidationError），股票领域才能按异常类型判定
+    # 并触发候选发现/名称解析补救（同 UnknownThemeError 的既有模式）。
+    ensure_single_stock_shape(kind, codes)
 
     profile = user_profile or {}
     profile_complete = bool(

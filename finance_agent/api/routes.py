@@ -1,6 +1,7 @@
 """API 路由定义。"""
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from datetime import datetime, timedelta
@@ -26,7 +27,7 @@ from finance_agent.api.schemas import (
     ThemeRegistryUpsertRequest,
 )
 from finance_agent.api.sse import sse_stream
-from finance_agent.config import ADMIN_CUSTOMER_IDS, get_postgres_connection_factory
+from finance_agent.config import ADMIN_CUSTOMER_IDS, ORCHESTRATION_TURN_TIMEOUT, get_postgres_connection_factory
 from finance_agent.data.auth import get_user_store
 from finance_agent.orchestrator.orchestrator import AdvisorSystem
 from finance_agent.research.theme_registry import PostgresThemeRegistry, ThemeEntry as _ThemeEntry
@@ -91,6 +92,9 @@ async def login(request: LoginRequest) -> LoginResponse:
             username=request.username,
             password=request.password,
         )
+        # 认证存储也会返回 is_admin；以 _is_admin 的解析结果为准（它同时计入白名单），
+        # 因此先摘掉存储里的同名字段，避免重复关键字。
+        result.pop("is_admin", None)
         return LoginResponse(**result, is_admin=_is_admin(result["customer_id"]))
     except ValueError as exc:
         raise HTTPException(status_code=401, detail=str(exc))
@@ -143,6 +147,18 @@ async def health() -> HealthResponse:
         )
 
 
+@router.get("/api/health/degradation")
+async def degradation_health() -> dict[str, Any]:
+    """暴露各类降级的累计计数，供运维发现"静默失败"。
+
+    落库/记忆/审计都是尽力而为、失败不阻断回复，因此这些故障不会出现在任何
+    响应里；没有这个出口就只能等用户投诉才知道审计长期写不进去。
+    """
+    system = get_system()
+    counts = getattr(system, "degradation_counts", None)
+    return {"degradation_counts": counts() if callable(counts) else {}}
+
+
 def _authorize_conversation(customer_id: str, conversation_id: str) -> None:
     """校验会话归属；非本人会话一律 404，避免跨用户读写。
 
@@ -173,13 +189,26 @@ async def chat(
     _authorize_conversation(customer_id, request.conversation_id)
     try:
         system = get_system()
-        result = system.handle_message(
+        # handle_message 是同步阻塞的（内部会调用 LLM、取数与量化轮询，单个请求
+        # 可能持续数十秒）。必须放到工作线程执行，否则会占住整个 event loop，
+        # 使其它请求（含健康检查与 SSE）全部排队等待。
+        # 同时施加整轮墙钟上限：分项超时各自有界，但缺少整体上限时多个分项
+        # 叠加仍可让单个请求长时间不返回。
+        await_handle = asyncio.to_thread(
+            system.handle_message,
             message=request.message,
             chat_history=request.chat_history,
             customer_id=customer_id,
             conversation_id=request.conversation_id,
         )
+        if ORCHESTRATION_TURN_TIMEOUT > 0:
+            result = await asyncio.wait_for(await_handle, timeout=ORCHESTRATION_TURN_TIMEOUT)
+        else:
+            result = await await_handle
         return ChatResponse(**result)
+    except asyncio.TimeoutError:
+        # 504 而非 500：这是"等超时"而非服务内部崩溃，调用方可据此重试。
+        raise HTTPException(status_code=504, detail="处理超时，请稍后重试或缩小问题范围")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"处理失败：{exc}")
 
@@ -275,14 +304,30 @@ def _resolve_customer_id(http_request: Request, request: ChatRequest, x_customer
 
 
 def _is_admin(customer_id: str) -> bool:
-    """判断客户是否为管理员（仅依赖服务端白名单，客户端不可自行声明）。"""
-    return str(customer_id).upper() in ADMIN_CUSTOMER_IDS
+    """判断客户是否为管理员。
+
+    两条路径取并集：命中 ``ADMIN_CUSTOMER_IDS`` 环境变量白名单，或库内
+    ``finance.users.is_admin`` 为真。白名单保留是为了让"改配置即可授权"的既有
+    运维方式继续可用；库内角色则是可持久、可在后台自助授予的正式路径。
+
+    角色查询失败必须**失败关闭**：宁可把管理员操作拒掉，也不能因为库不可用
+    就让任何人都成为管理员。
+    """
+    if str(customer_id).upper() in ADMIN_CUSTOMER_IDS:
+        return True
+    checker = getattr(get_user_store(), "is_admin", None)
+    if checker is None:
+        return False
+    try:
+        return bool(checker(customer_id))
+    except Exception:  # noqa: BLE001 - 授权查询失败按"非管理员"处理
+        return False
 
 
 def _require_admin(request: Request) -> str:
     customer_id = _require_customer_id(request)
     if not _is_admin(customer_id):
-        raise HTTPException(status_code=403, detail="仅管理员可审核主题线索")
+        raise HTTPException(status_code=403, detail="仅管理员可访问该接口")
     return customer_id
 
 

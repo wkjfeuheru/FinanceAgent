@@ -23,6 +23,19 @@ _CONVERSATION_PROMPT = (
     "需要投资规则知识时调用 faq_search；FAQ 没有可靠答案时如实说明，"
     "不得编造行情数据、推荐具体证券或承诺收益。"
     "直接用知识库内容作答，不要复述或重复用户的提问，回答简洁自然。"
+
+    # 只写"闲聊 + FAQ"会让系统看起来只有两项能力：股票研究/市场洞察/产品研究/
+    # 账户持仓由 Supervisor Graph 按意图路由到各领域子图，不在本节点执行，因此本节点
+    # 看不到它们。"你能做什么"必须如实作答，否则用户会以为系统只会聊天，从此不再
+    # 提出本可执行的问题（实测回答曾只列出闲聊与 FAQ 两项）。
+    "用户询问你能做什么时，如实列出系统的完整能力，并说明这些能力由系统按问题"
+    "自动路由、用户直接提问即可，无需指定模块："
+    "① 个股基本面/技术面/风险分析与多股比较，以及按主题、行业筛选研究候选；"
+    "② 大盘指数、市场情绪、资金流向与政策影响的解读（仅市场层面，不涉个股）；"
+    "③ 基金等理财产品的基本资料、持仓、业绩、费率与适配度分析；"
+    "④ 查询其本人的账户资金与持仓（只读；下单与充值需由用户在页面完成）；"
+    "⑤ 投资规则与常识问答，以及金融相关闲聊。"
+    "这些都属于研究参考，不构成投资建议。"
 )
 
 
@@ -44,23 +57,11 @@ class ConversationState(TypedDict, total=False):
     cited_faq: bool
 
 
-def _answer_body(content: str) -> str:
-    """取 FAQ 条目的答案正文，去掉开头的标题行。
-
-    分块内容形如 ``"{标题}\\n\\n{正文}"``，而标题本身就是用户刚问的问题；原样回灌
-    给模型，模型会在答案开头把它复述一遍，用户看到的就是“问题+问题+答案”。
-    标题仍保留在索引内容中参与向量化与召回，仅在渲染给模型时去掉。
-    """
-    text = (content or "").strip()
-    _, sep, body = text.partition("\n\n")
-    return body.strip() if sep and body.strip() else text
-
-
 def _render_faq(result: Any) -> str:
     matches = getattr(result, "matches", None) or []
     if getattr(result, "status", "not_found") != "found" or not matches:
         return _NO_RELIABLE_ANSWER
-    return "\n\n".join(_answer_body(match.content) for match in matches)
+    return "\n\n".join(match.answer.strip() for match in matches if match.answer.strip())
 
 
 def build_faq_tool(retriever: Any) -> ToolSpec:
@@ -98,9 +99,17 @@ def run_conversation(
     *,
     user_message: str,
     history: str = "",
-    max_steps: int = 4,
+    max_steps: int | None = None,
 ) -> dict[str, Any]:
-    """运行会话 ReAct 并返回可直接并入图状态的字典。"""
+    """运行会话 ReAct 并返回可直接并入图状态的字典。
+
+    ``max_steps`` 为 None 时取 ``config.ORCHESTRATION_REACT_STEPS``（经
+    ``RunBudgets`` 校验的单一数值源）；显式传入仅供测试收紧。
+    """
+    if max_steps is None:
+        from finance_agent import config
+
+        max_steps = config.ORCHESTRATION_REACT_STEPS
     outcome = run_bounded_react(
         model=model,
         tools={"faq_search": build_faq_tool(retriever)},
@@ -141,18 +150,12 @@ def build_conversation_graph(
     retriever: Any,
     model: Callable[[list[dict[str, Any]]], Any],
     *,
-    max_steps: int = 4,
+    max_steps: int | None = None,
 ):
     """编译只含会话节点的 LangGraph 子图。"""
+    from finance_agent.orchestrator.nodes.conversation import make_respond_node
 
-    def respond(state: ConversationState) -> dict[str, Any]:
-        return run_conversation(
-            retriever,
-            model,
-            user_message=str(state.get("user_message", "")),
-            history=str(state.get("history", "") or ""),
-            max_steps=max_steps,
-        )
+    respond = make_respond_node(retriever, model, max_steps=max_steps)
 
     graph = StateGraph(ConversationState)
     graph.add_node("respond", respond)

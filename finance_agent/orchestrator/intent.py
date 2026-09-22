@@ -1,7 +1,7 @@
 """领域意图分类器（原 Supervisor 的分类职责）。
 
 只负责“属于哪个业务领域”，不再承担任务生成或响应拼装——那两项分别由
-Root Graph 的路由（``orchestrator/root_graph.py``）与合规出口
+Supervisor Graph 的路由（``orchestrator/supervisor_graph.py``）与合规出口
 （``orchestrator/compliance.py``）承担。分类协议错误必须显式上报，不得静默猜测。
 """
 
@@ -31,8 +31,13 @@ from finance_agent.config import (
     INTENT_MODEL_MAX_TOKENS,
     INTENT_MODEL_TIMEOUT,
 )
+from finance_agent.orchestrator.contracts import BusinessDomain
 
-_INTENT_CLASSIFIER_PROMPT = """你是金融工作流的多意图分类器，只分类当前用户消息，不回答问题。
+# 分类置信度阈值：低于该值的意图不进入执行，只进入澄清。prompt 文案与下游过滤
+# 逻辑共用本常量，避免只改一处导致模型行为与代码过滤规则不一致且无告警。
+_INTENT_CONFIDENCE_THRESHOLD = 0.9
+
+_INTENT_CLASSIFIER_PROMPT = f"""你是金融工作流的多意图分类器，只分类当前用户消息，不回答问题。
 近期上下文摘要只能用于解析“它、这些股票”等指代，不得从上下文新增当前消息未表达的意图。
 “最近AI行业有什么值得投资的股票，为我推荐几个”只能输出 stock_recommendation，execution_mode=candidate_search。
 
@@ -41,11 +46,25 @@ _INTENT_CLASSIFIER_PROMPT = """你是金融工作流的多意图分类器，只�
 - stock_analysis: stock_analysis
 - stock_recommendation: candidate_search | stock_comparison
 - product_analysis: product_analysis
+- account_query: account_overview | position_query | trade_guidance
 - casual_chat: conversation
 
-`intent` 字段只能填冒号**前**的五个值之一（market_insight / stock_analysis /
-stock_recommendation / product_analysis / casual_chat）；`market_overview`
-这类是 execution_mode，**不能**填进 intent 字段。
+`intent` 字段只能填冒号**前**的六个值之一（market_insight / stock_analysis /
+stock_recommendation / product_analysis / account_query / casual_chat）；
+`market_overview` 这类是 execution_mode，**不能**填进 intent 字段。
+
+account_query 只处理**用户自己的账户与持仓**，判断依据是句中出现了第一人称归属
+（“我的/我买的/我持有的/账户/持仓/仓位/总资产/可用资金/盈亏/赚了多少/亏了多少/充值”）：
+“我的持仓怎么样”用 position_query；“我账户里还有多少钱”用 account_overview；
+“帮我买 1000 块 110011”“我要清仓”“帮我充值” 用 trade_guidance。
+
+区分方法与 product_analysis / stock_analysis 完全不同：
+有第一人称归属（在问**我**的仓位/资金/盈亏）→ account_query；
+问某个标的或产品的资料与好坏、与本人是否持有无关 → stock_analysis 或 product_analysis。
+“我的持仓”指的是**账户页里的持仓**，绝不是某只股票或某个基金产品。
+
+product_analysis 只处理**具体产品**（句中出现明确的基金/理财名称或 6 位产品代码）的查询、分析、比较与适配度，
+例如“分析一下华夏成长基金”“110011 怎么样”“华夏成长和易方达蓝筹哪个好”。
 
 market_insight 只回答大盘/指数/市场整体问题，绝不输出个股结论或推荐：
 “今天大盘怎么样”用 market_overview；“市场情绪/赚钱效应/涨跌家数”用 market_sentiment；
@@ -63,22 +82,12 @@ product_analysis 只处理**具体产品**（句中出现明确的基金/理财�
 区分方法：看这句话是否需要**某个特定产品**才能回答。
 需要特定产品（要查它的资料/业绩/费率）→ product_analysis；换任意产品答案都成立（在问通用规则）→ casual_chat。
 
-每个意图必须包含 intent、query、confidence、reason、evidence、execution_mode、requires_slot_extraction。
+每个意图必须包含 intent、query、confidence、reason、evidence、execution_mode。
 evidence 必须逐字摘自 current_message，不能来自上下文。query 只包含该意图对应的当前轮子请求。
-当 confidence 小于 0.9 时，必须返回非空 clarification_question，提出一个简短、具体、可直接回答的问题；不得直接回答或执行业务。
+当 confidence 小于 {_INTENT_CONFIDENCE_THRESHOLD} 时，必须返回非空 clarification_question，提出一个简短、具体、可直接回答的问题；不得直接回答或执行业务。
 解析用户对上轮反问的回复时，query 应结合上下文形成完整、可执行的子请求；不能重复其他已经完成的意图。
 不得因为近期上下文重复输出已经完成的高置信度意图。
-只输出 JSON 对象：{"intents": [...], "finance_related": true}。"""
-
-_CLASSIFIER_MODES = {
-    "market_insight": {"market_overview", "market_sentiment", "capital_flow", "policy_impact"},
-    "stock_analysis": {"stock_analysis"},
-    "stock_recommendation": {"candidate_search", "stock_comparison"},
-    "product_analysis": {"product_analysis"},
-    "casual_chat": {"conversation"},
-}
-
-_INTENT_CONFIDENCE_THRESHOLD = 0.9
+只输出 JSON 对象：{{"intents": [...], "finance_related": true}}。"""
 
 
 class IntentClassificationError(RuntimeError):
@@ -225,7 +234,10 @@ class DeepSeekIntentClassifier:
         raise error
 
 
-_INTENTS = ("market_insight", "stock_analysis", "stock_recommendation", "product_analysis", "casual_chat")
+_INTENTS = (
+    "market_insight", "stock_analysis", "stock_recommendation",
+    "product_analysis", "account_query", "casual_chat",
+)
 _EXECUTION_MODES = {
     "market_insight": {
         "market_overview": False, "market_sentiment": False,
@@ -234,7 +246,23 @@ _EXECUTION_MODES = {
     "stock_analysis": {"stock_analysis": True},
     "stock_recommendation": {"candidate_search": False, "stock_comparison": True},
     "product_analysis": {"product_analysis": True},
+    # 账户问答不需要槽位抽取：客户身份来自会话，不由消息文本解析。
+    "account_query": {
+        "account_overview": False, "position_query": False, "trade_guidance": False,
+    },
     "casual_chat": {"conversation": False},
+}
+
+# 意图 → 顶层业务领域（None 表示纯闲聊，不路由到任何业务领域）。
+# 这是"意图归属"的唯一事实源：Supervisor Graph 直接引用本表，不再各自硬编码一份，
+# 避免新增意图（如 account_query）只在分类器登记、却在路由表缺席的漂移。
+_INTENT_TO_DOMAIN: dict[str, BusinessDomain | None] = {
+    "stock_analysis": BusinessDomain.STOCK_RESEARCH,
+    "stock_recommendation": BusinessDomain.STOCK_RESEARCH,
+    "market_insight": BusinessDomain.MARKET_INSIGHT,
+    "product_analysis": BusinessDomain.PRODUCT_RESEARCH,
+    "account_query": BusinessDomain.ACCOUNT_PORTFOLIO,
+    "casual_chat": None,
 }
 _LOGGER = logging.getLogger(__name__)
 
@@ -285,9 +313,6 @@ def normalize_intent_item(
         "reason": str(item.get("reason", "")).strip(),
         "evidence": str(item.get("evidence", "")).strip(),
         "execution_mode": mode,
-        "requires_slot_extraction": bool(
-            _EXECUTION_MODES[intent].get(mode, False)
-        ),
         "clarification_question": str(
             item.get("clarification_question", "")
         ).strip(),

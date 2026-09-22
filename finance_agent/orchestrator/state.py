@@ -1,22 +1,15 @@
-"""金融投顾系统核心 State 定义。
+"""编排层共享 reducer 工具模块。
 
-AdvisorState 是 LangGraph 跨专家显式传递的唯一状态通道。
-所有字段均为可选（total=False），各节点按需读写。
-
-逐标的 Send 扇出会并发写同一批键，因此对**并发写入的键**声明最小 reducer：
-- 映射类（分片结果、股票数据、兼容展示字段）按 key 合并；
-- 列表类（事实、分析结果、完成记录、告警）拼接并按身份去重。
-其余字段保持 LangGraph 默认的 last-write-wins。
+供 Plan-and-Execute 等子图在 LangGraph Send 并发扇出时合并同名状态键：
+- 映射类（分片结果、股票数据等）按 key 合并（merge_dict）；
+- 列表类（事实、分析结果、告警等）拼接并按身份去重（dedupe_concat）。
+其余键保持 LangGraph 默认的 last-write-wins。
 """
 
 from __future__ import annotations
 
 import json
-from typing import Annotated, Any, Dict, List
-
-from typing_extensions import TypedDict
-
-from finance_agent.contracts import ExpertResult, FactSnapshot, RunStatus, Task
+from typing import Any, Dict, List
 
 
 def _identity(value: Any) -> str:
@@ -60,64 +53,4 @@ def dedupe_concat(left: List[Any] | None, right: List[Any] | None) -> List[Any]:
         seen.add(identifier)
         merged.append(item)
     return merged
-
-
-class AdvisorState(TypedDict, total=False):
-    """金融投顾多 Agent 系统的共享状态。"""
-
-    # ── 输入与用户 ──
-    user_message: str
-    requirement: str
-    chat_history: List[Dict[str, str]]
-    customer_id: str
-
-    # ── 计划与意图 ──
-    task_plan: List[str]
-    task_dispatch: List[Dict[str, Any]]
-    tasks: List[Task]
-    completed_experts: Annotated[List[str], dedupe_concat]
-    detected_intents: List[Dict[str, Any]]
-    uncertain_intents: List[Dict[str, Any]]
-    intent_results: Annotated[Dict[str, Dict[str, Any]], merge_dict]
-    task_results: Dict[str, ExpertResult]
-    facts: Annotated[List[FactSnapshot], dedupe_concat]
-    # 意图后槽位提取层产出的结构化入参（按意图 key 组织，跨轮合并）
-    intent_slots: Dict[str, Dict[str, Any]]
-    finance_related: bool
-    run_status: RunStatus
-    warnings: Annotated[List[str], dedupe_concat]
-    business_state: Dict[str, Any]
-
-    # ── 运行级研究请求留档（审计按一次运行归组重放）──
-    research_request: Dict[str, Any]
-
-    # ── 用户画像与股票 ──
-    user_profile: Dict[str, Any]
-    resolved_stocks: List[Dict[str, Any]]
-    explicit_user_stock_codes: List[str]
-
-    # ── 数据与分析 ──
-    stock_data: Annotated[Dict[str, Any], merge_dict]
-    stock_analysis: Annotated[Dict[str, Any], merge_dict]
-    technical_analysis: Annotated[Dict[str, Any], merge_dict]
-    analysis_results: Annotated[List[Dict[str, Any]], dedupe_concat]
-    theme_screening: Dict[str, Any]
-    theme_screening_status: str
-    theme_candidates: Annotated[List[Dict[str, Any]], dedupe_concat]
-    pending_leads: Annotated[List[Dict[str, Any]], dedupe_concat]
-    personalization_status: str
-    product_analysis: Dict[str, Any]
-    market_insight: Dict[str, Any]
-    compliance_result: Dict[str, Any]
-
-    # ── 输出 ──
-    agent_response: str
-    clarification_question: str
-
-    # ── 运行时 ──
-    memory_context: str
-    thread_id: str
-    run_id: str
-    trace_id: str
-    message_id: str
 

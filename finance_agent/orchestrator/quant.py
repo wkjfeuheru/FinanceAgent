@@ -14,7 +14,17 @@ from finance_agent.orchestrator.contracts import AsyncJobRef
 
 
 class QuantGateway(Protocol):
-    def submit(self, kind: str, payload: dict[str, Any], idempotency_key: str) -> AsyncJobRef: ...
+    def submit(
+        self,
+        kind: str,
+        payload: dict[str, Any],
+        idempotency_key: str,
+        *,
+        customer_id: str = "",
+        thread_id: str = "",
+        run_id: str = "",
+        task_id: str = "",
+    ) -> AsyncJobRef: ...
     def status(self, job_id: str) -> str: ...
     def result(self, job_id: str) -> dict[str, Any] | None: ...
 
@@ -31,12 +41,27 @@ class _Job:
 
 @dataclass
 class InMemoryQuantGateway:
-    """同步执行的内存网关，供测试与单进程环境使用。"""
+    """同步执行的内存网关，供测试与单进程环境使用。
+
+    ``repository``（可选）与 Celery 网关同义：提交时把 job 引用落库，
+    使内存网关也能覆盖"提交—查询—恢复"整条路径的测试。
+    """
 
     _jobs: dict[str, _Job] = field(default_factory=dict)
     _by_key: dict[str, str] = field(default_factory=dict)
+    _repository: Any = None
 
-    def submit(self, kind: str, payload: dict[str, Any], idempotency_key: str) -> AsyncJobRef:
+    def submit(
+        self,
+        kind: str,
+        payload: dict[str, Any],
+        idempotency_key: str,
+        *,
+        customer_id: str = "",
+        thread_id: str = "",
+        run_id: str = "",
+        task_id: str = "",
+    ) -> AsyncJobRef:
         if not idempotency_key:
             raise ValueError("idempotency_key is required")
         existing = self._by_key.get(idempotency_key)
@@ -46,15 +71,27 @@ class InMemoryQuantGateway:
         from finance_agent.tasks.quant import run_quant_task
 
         job_id = _job_id_for(idempotency_key)
+        # AsyncJobRef.task_id 携带**领域 task_id**（调用方传入），job_id 才是
+        # Celery 任务标识：状态端点按 job_id 查询，结论聚合按 task_id 定位。
+        # task_id 缺省时回退为 job_id（旧调用方无领域上下文）。
+        domain_task_id = task_id or job_id
         try:
             result = run_quant_task(kind, payload)
         except Exception as exc:  # noqa: BLE001 - 任务失败体现在状态与结果里
-            ref = AsyncJobRef(job_id=job_id, kind=kind, status="failed", task_id=job_id)
+            ref = AsyncJobRef(job_id=job_id, kind=kind, status="failed", task_id=domain_task_id)
             self._jobs[job_id] = _Job(ref=ref, result={"error": type(exc).__name__})
         else:
-            ref = AsyncJobRef(job_id=job_id, kind=kind, status="completed", task_id=job_id)
+            ref = AsyncJobRef(job_id=job_id, kind=kind, status="completed", task_id=domain_task_id)
             self._jobs[job_id] = _Job(ref=ref, result=result)
         self._by_key[idempotency_key] = job_id
+        if self._repository is not None and customer_id and thread_id and run_id:
+            self._repository.save_job_ref(
+                customer_id=customer_id,
+                thread_id=thread_id,
+                run_id=run_id,
+                job=ref,
+                idempotency_key=idempotency_key,
+            )
         return ref
 
     def status(self, job_id: str) -> str:

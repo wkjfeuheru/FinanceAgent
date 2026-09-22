@@ -12,12 +12,18 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from finance_agent.contracts import FactSnapshot
-from finance_agent.orchestrator.contracts import BusinessDomain, DomainTaskContext
+from finance_agent.orchestrator.contracts import (
+    DEFAULT_INTENT_DOMAIN_STATUS,
+    INTENT_STATUS_TO_DOMAIN_STATUS,
+    BusinessDomain,
+    DomainTaskContext,
+)
 from finance_agent.orchestrator.domains.base import (
     DomainOperation,
     OperationResult,
     build_domain_graph,
     context_text,
+    merge_facts,
 )
 
 _PRODUCT_CODE = re.compile(r"[A-Z]{0,2}\d{4,6}")
@@ -178,32 +184,26 @@ def _payload(result: Any) -> dict[str, Any]:
 
 
 def _write_facts(state: dict[str, Any], result: Any) -> None:
-    existing = list(state.get("facts", []) or [])
-    existing_ids = {
-        item.fact_id if isinstance(item, FactSnapshot) else item.get("fact_id")
-        for item in existing
-        if isinstance(item, FactSnapshot) or isinstance(item, dict)
-    }
-    for assessment in result.assessments:
-        for evidence in assessment.evidences.values():
-            if evidence.fact_id in existing_ids:
-                continue
-            existing.append(FactSnapshot(
-                fact_id=evidence.fact_id,
-                domain="product",
-                source=evidence.source,
-                fetched_at=datetime.now(timezone.utc),
-                payload={
-                    "product_code": assessment.code,
-                    "product_name": assessment.name,
-                    "field": evidence.field,
-                    "value": evidence.value,
-                    "as_of": evidence.as_of,
-                    "freshness": evidence.freshness,
-                },
-            ))
-            existing_ids.add(evidence.fact_id)
-    state["facts"] = existing
+    """把产品证据构建为事实快照并入状态；去重语义由 ``merge_facts`` 统一。"""
+    incoming = [
+        FactSnapshot(
+            fact_id=evidence.fact_id,
+            domain="product",
+            source=evidence.source,
+            fetched_at=datetime.now(timezone.utc),
+            payload={
+                "product_code": assessment.code,
+                "product_name": assessment.name,
+                "field": evidence.field,
+                "value": evidence.value,
+                "as_of": evidence.as_of,
+                "freshness": evidence.freshness,
+            },
+        )
+        for assessment in result.assessments
+        for evidence in assessment.evidences.values()
+    ]
+    state["facts"] = merge_facts(state.get("facts", []) or [], incoming)
 
 
 def invoke_product(deps: ProductDomainDeps, state: dict[str, Any]) -> dict[str, Any]:
@@ -258,9 +258,7 @@ def _product_lookup(context: DomainTaskContext, pipeline: Any) -> OperationResul
     intent_status = (result_state.get("intent_results", {}) or {}).get(
         "product_analysis", {}
     ).get("status")
-    status = {"success": "success", "degraded": "partial", "failed": "failed"}.get(
-        intent_status, "partial"
-    )
+    status = INTENT_STATUS_TO_DOMAIN_STATUS.get(intent_status, DEFAULT_INTENT_DOMAIN_STATUS)
     if status == "failed":
         # 失败原因只登记安全标识，绝不回传原始异常文本。
         limitations.append("product_pipeline_failed")
@@ -292,11 +290,18 @@ def default_product_operations(deps: ProductDomainDeps | None = None) -> list[Do
 
 
 def build_product_domain_graph(operations=None, *, deps: ProductDomainDeps | None = None):
-    """编译产品领域子图；默认白名单为产品查询/评估。"""
+    """编译产品领域子图；白名单来自 operation 注册表（唯一事实源）。
+
+    ``operations=[]`` 是合法输入（白名单为空），用 ``is None`` 判缺省。
+    """
+    from finance_agent.orchestrator.operations import default_operation_registry
+
+    registry = default_operation_registry()
     return build_domain_graph(
         BusinessDomain.PRODUCT_RESEARCH,
-        operations or default_product_operations(deps),
-        default_mode="product_lookup",
+        default_product_operations(deps) if operations is None else operations,
+        default_mode=registry.spec(BusinessDomain.PRODUCT_RESEARCH).default_mode,
+        mode_resolver=registry.spec(BusinessDomain.PRODUCT_RESEARCH).mode_resolver,
     )
 
 

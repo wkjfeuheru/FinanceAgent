@@ -44,6 +44,30 @@ def test_explicit_user_facts_are_persisted():
     assert profile.confirmed_facts["budget_amount"] == 100000
 
 
+def test_amount_context_prevents_amount_being_saved_as_stock_code():
+    """金额语境排除：'预算400000元'不得把 400000 当成北交所代码写入画像。"""
+    profile = UserProfileCard(customer_id="CUST001")
+    context, saved = build_memory_context(profile)
+
+    candidates = context.extract_profile_candidates("我的预算是400000元")
+    assert context.apply_confirmed_facts("CUST001", candidates) is True
+
+    assert profile.budget_amount == 400000
+    assert profile.stock_codes == []
+    assert saved and saved[0].stock_codes == []
+
+
+def test_real_stock_code_after_amount_context_is_still_extracted():
+    """排除金额语境不得误伤真实代码：北交所代码仍正常提取。"""
+    profile = UserProfileCard(customer_id="CUST001")
+    context, saved = build_memory_context(profile)
+
+    candidates = context.extract_profile_candidates("关注430047和600519")
+    assert context.apply_confirmed_facts("CUST001", candidates) is True
+
+    assert profile.stock_codes == ["430047", "600519"]
+
+
 def test_recommendation_candidate_cannot_update_profile():
     profile = UserProfileCard(customer_id="CUST001")
     context, saved = build_memory_context(profile)

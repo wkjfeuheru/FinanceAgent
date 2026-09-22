@@ -178,6 +178,39 @@ def test_plan_execute_graph_dispatches_via_send():
     assert set(result["task_results"]) == {"plan:product_research", "plan:stock_research"}
 
 
+def test_plan_execute_graph_keeps_scoped_queries_when_calling_planner():
+    """根图传入的领域子请求不能在 Plan 子图边界丢失。"""
+    captured: dict = {}
+
+    def planner(state, domains):
+        captured["routing"] = state.get("routing")
+        return deterministic_planner(state, domains)
+
+    def domain_runner(context):
+        return DomainOutcome(
+            task_id=context.task.task_id,
+            domain=context.task.domain,
+            status="success",
+            summary="完成。",
+        )
+
+    graph = build_plan_execute_graph(domain_runner=domain_runner, planner=planner)
+    graph.invoke(
+        {
+            "user_message": "分析贵州茅台并比较基金",
+            "domains": ["stock_research", "product_research"],
+            "routing": {
+                "domain_queries": {
+                    "stock_research": "分析贵州茅台",
+                    "product_research": "比较基金",
+                }
+            },
+        }
+    )
+
+    assert captured["routing"]["domain_queries"]["stock_research"] == "分析贵州茅台"
+
+
 def test_deterministic_planner_creates_one_task_per_domain():
     plan = deterministic_planner(
         {"user_message": "复合请求"},

@@ -74,15 +74,16 @@ def parse_faq_markdown(path: str | Path) -> list[FaqChunk]:
         body = "\n".join(body_lines).strip()
         if not body:
             raise FaqDocumentError(f"faq question has no answer in {file_path.name}: {faq_id}")
-        content = f"{title}\n\n{body}"
+        embedding_text = f"问题：{title}\n答案：{body}"
         chunks.append(
             FaqChunk(
                 faq_id=faq_id,
-                title=title,
-                content=content,
+                question=title,
+                answer=body,
+                embedding_text=embedding_text,
                 source_path=str(file_path),
                 chunk_ordinal=ordinal,
-                content_hash=_content_hash(content),
+                content_hash=_content_hash(embedding_text),
             )
         )
     return chunks

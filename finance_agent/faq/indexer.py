@@ -48,7 +48,7 @@ def index_faq_documents(
     """校验、切分、向量化并发布一个索引版本，返回索引版本号。"""
     chunks = parse_faq_root(root)
 
-    vectors = embedding_provider.embed_documents([chunk.content for chunk in chunks])
+    vectors = embedding_provider.embed_documents([chunk.embedding_text for chunk in chunks])
     if len(vectors) != len(chunks):
         raise ValueError("embedding provider returned an unexpected number of vectors")
 
@@ -72,7 +72,11 @@ def index_faq_documents(
             "faq_id": chunk.faq_id,
             "source_path": chunk.source_path,
             "chunk_ordinal": chunk.chunk_ordinal,
-            "content": chunk.content,
+            "question": chunk.question,
+            "answer": chunk.answer,
+            "embedding_text": chunk.embedding_text,
+            # 兼容旧库的 NOT NULL content 列；新链路不再从该字段拆解问答。
+            "content": chunk.embedding_text,
             "content_hash": chunk.content_hash,
             "embedding": vector,
         }

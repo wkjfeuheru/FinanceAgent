@@ -31,12 +31,19 @@ class TaskKind(str, Enum):
 
 
 class IntentKind(str, Enum):
-    """用户请求的业务意图。"""
+    """用户请求的业务意图。
+
+    与分类器的意图注册表（``orchestrator/intent.py`` 的 ``_INTENTS``）必须同源：
+    新增意图必须同时在此登记，否则按 expert_name 推导 intent 的旧结果会漏掉它
+    （``tests/test_supervisor_graph_routing.py`` 的注册表一致性测试守护这一点）。
+    """
 
     MARKET_INSIGHT = "market_insight"
     STOCK_ANALYSIS = "stock_analysis"
     STOCK_RECOMMENDATION = "stock_recommendation"
     PRODUCT_ANALYSIS = "product_analysis"
+    # 用户自有账户与持仓的只读问答；不入任何"数据准备"任务。
+    ACCOUNT_QUERY = "account_query"
     CASUAL_CHAT = "casual_chat"
 
 

@@ -32,6 +32,27 @@ class Action(str, Enum):
     INSUFFICIENT_DATA = "数据不足"
 
 
+class SingleStockShapeError(ValueError):
+    """单股请求形态不合法：kind 为 single_stock 时必须恰好包含一只有效股票代码。
+
+    继承 ValueError 以兼容既有 ``except ValueError`` 兜底路径；类型化的目的是
+    让上层（股票领域）用 ``isinstance`` 判定并触发补救（候选发现/名称解析），
+    不再匹配报错文案——文案一旦调整，跨模块文本匹配会静默失效。
+    """
+
+
+def ensure_single_stock_shape(kind: "AnalysisKind | str", stock_codes: list[str]) -> None:
+    """单股请求形态校验的唯一事实源（异常文案与判定条件只在此定义一次）。
+
+    在解析器中调用时异常**直接传播**，上层可用 ``isinstance`` 判定；
+    在模型 validator 内调用时会被 pydantic 包装为 ValidationError
+    （文案保留在 ``errors()[0]["ctx"]["error"]``），行为与此前一致。
+    """
+    kind_value = kind.value if isinstance(kind, AnalysisKind) else str(kind)
+    if kind_value == AnalysisKind.SINGLE_STOCK.value and len(stock_codes) != 1:
+        raise SingleStockShapeError("单股分析必须且只能包含一只股票")
+
+
 class AnalysisRequest(BaseModel):
     """一次研究执行所需的不可变、确定性输入。"""
 
@@ -70,8 +91,10 @@ class AnalysisRequest(BaseModel):
 
         kind = normalized.get("kind")
         kind_value = kind.value if isinstance(kind, AnalysisKind) else str(kind)
-        if kind_value == AnalysisKind.SINGLE_STOCK.value and len(codes) != 1:
-            raise ValueError("单股分析必须且只能包含一只股票")
+        # 单股形态错误类型化（SingleStockShapeError）：此处经 pydantic 包装为
+        # ValidationError，直接构造的调用方仍可按 ValueError 捕获，行为不变；
+        # 解析器在构造 AnalysisRequest 之前另行调用同一校验以让异常直接传播。
+        ensure_single_stock_shape(kind_value, codes)
         if kind_value == AnalysisKind.COMPARISON.value and len(codes) < 2:
             raise ValueError("股票比较至少需要两只股票")
         if kind_value == AnalysisKind.THEME_SCREENING.value and not normalized.get("theme_id"):

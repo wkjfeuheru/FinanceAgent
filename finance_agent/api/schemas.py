@@ -37,6 +37,7 @@ class ChatResponse(BaseModel):
     compliance_result: dict[str, Any] = Field(default_factory=dict, description="合规审查结果")
     product_analysis: dict[str, Any] | None = Field(default=None, description="产品解读结果")
     market_insight: dict[str, Any] = Field(default_factory=dict, description="市场洞察结果")
+    account: dict[str, Any] = Field(default_factory=dict, description="账户与持仓快照（只读）")
     conversation_id: str = ""
     tasks: list[dict[str, Any]] = Field(default_factory=list)
     task_results: dict[str, Any] = Field(default_factory=dict)

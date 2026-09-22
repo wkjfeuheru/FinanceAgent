@@ -118,6 +118,7 @@ def run_compliance(
     policy: CompliancePolicy | None = None,
     model: Any = None,
     audit_only: bool = False,
+    rewrite_budget: int | None = None,
 ) -> ComplianceResult:
     """执行确定性规则、可选语义校验、一次改写与复检。
 
@@ -125,7 +126,16 @@ def run_compliance(
     仍然执行检查并把命中项写入审计，但**不改写、不拦截**。因为风险词汇在
     “解释投资规则”的语境里是合法且必需的（例如 FAQ 条目名就是
     “什么是操纵市场？”），删词会把答案改成病句。
+
+    ``rewrite_budget`` 来自 ``RunBudgets.compliance_rewrites``（None 时取
+    config 默认）。为 0 时不尝试改写、直接 fail-closed——预算收紧到零时
+    宁可拦截也不放行未校验内容。
     """
+    if rewrite_budget is None:
+        from finance_agent import config
+
+        rewrite_budget = config.ORCHESTRATION_COMPLIANCE_REWRITES
+
     active = policy or default_policy()
     refs = [item if isinstance(item, EvidenceRef) else EvidenceRef.model_validate(item) for item in (evidence or [])]
     draft_hash = _draft_hash(draft)
@@ -159,7 +169,7 @@ def run_compliance(
             audit=_audit("passed", [], 0, active.version, draft_hash),
         )
 
-    if active.rewrite is None:
+    if active.rewrite is None or rewrite_budget < 1:
         return ComplianceResult(
             action="blocked",
             response=BLOCKED_RESPONSE,
@@ -226,6 +236,8 @@ def build_compliance_graph(policy: CompliancePolicy | None = None, model: Any = 
     from langgraph.graph import END, START, StateGraph
     from typing_extensions import TypedDict
 
+    from finance_agent.orchestrator.nodes.compliance import make_review_node
+
     active = policy or default_policy()
 
     class ComplianceState(TypedDict, total=False):
@@ -233,14 +245,7 @@ def build_compliance_graph(policy: CompliancePolicy | None = None, model: Any = 
         evidence: list[dict[str, Any]]
         compliance: dict[str, Any]
 
-    def review(state: ComplianceState) -> dict[str, Any]:
-        result = run_compliance(
-            draft=str(state.get("draft", "")),
-            evidence=list(state.get("evidence", []) or []),
-            policy=active,
-            model=model,
-        )
-        return {"compliance": result.model_dump(mode="json")}
+    review = make_review_node(active, model)
 
     graph = StateGraph(ComplianceState)
     graph.add_node("review", review)

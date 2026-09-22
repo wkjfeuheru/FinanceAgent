@@ -28,7 +28,8 @@ def _found_retriever() -> _FakeRetriever:
                     score=0.9,
                     index_version="index-1",
                     source_path="docs/faq/investment-basics.md",
-                    content="任何声称“保证收益”的宣传都涉嫌违规。",
+                    question="什么是保证收益？",
+                    answer="任何声称“保证收益”的宣传都涉嫌违规。",
                 )
             ],
         )
@@ -84,6 +85,44 @@ def test_conversation_graph_no_match_observation_discloses_no_reliable_answer():
     assert "没有可靠" in result["final_response"]
 
 
+# ── 能力自述：必须覆盖四个业务领域 ────────────────────────────────
+
+def _capturing_model(captured: list[str]) -> Any:
+    """记录 system 提示词并直接给出终答，不触发工具调用。"""
+
+    def model(messages: Sequence[dict[str, Any]]) -> dict[str, Any]:
+        for message in messages:
+            if message.get("role") == "system":
+                captured.append(str(message.get("content", "")))
+        return {"action": "final", "final_text": "我可以帮你做以下事情。"}
+
+    return model
+
+
+def test_conversation_prompt_declares_all_four_business_domains():
+    """“你能做什么”必须如实覆盖四个业务领域。
+
+    回归：早前提示词只描述"闲聊 + 投资规则 FAQ"，而这四个领域由 Root Graph 按意图
+    路由到各自子图、不在会话节点执行，因此本节点看不到它们。结果是系统自称只会聊
+    天与 FAQ（实测即如此），用户据此不再提出本可执行的问题。
+    """
+    captured: list[str] = []
+    graph = build_conversation_graph(_not_found_retriever(), _capturing_model(captured))
+
+    graph.invoke({"user_message": "你好，你能做什么？", "customer_id": "CUST1",
+                  "conversation_id": "conv-1"})
+
+    assert captured, "system 提示词未被传入"
+    prompt = captured[0]
+    # 四个业务领域各自的关键词都要出现。
+    for keyword in ("个股", "大盘", "基金", "账户"):
+        assert keyword in prompt, f"能力自述缺少「{keyword}」"
+    # 账户领域只读、下单充值走页面这一约束必须保留，避免暗示对话可代客交易。
+    assert "只读" in prompt
+    # 能力自述本身不得削弱原有的合规约束。
+    assert "不得编造" in prompt or "不构成投资建议" in prompt
+
+
 class _BoomRetriever:
     """模拟 FAQ 工具不可用（如依赖缺失/模型加载失败）。"""
 
@@ -131,24 +170,13 @@ def test_conversation_without_faq_hit_is_not_trusted():
     assert result["cited_faq"] is False
 
 
-# ── 渲染：不得回灌标题（否则模型会复述问题）───────────────────────────────
-
-def test_answer_body_strips_faq_title():
-    """分块内容为“标题\n\n正文”；渲染给模型时必须去掉标题，避免复述问题。"""
-    from finance_agent.orchestrator.conversation_graph import _answer_body
-
-    assert _answer_body("分红和送股有什么区别？\n\n现金分红是……") == "现金分红是……"
-    # 无标题结构时原样返回，不误删内容
-    assert _answer_body("只有正文") == "只有正文"
-
-
-def test_rendered_observation_does_not_lead_with_the_question():
+def test_rendered_observation_uses_explicit_answer_without_splitting():
+    """答案内部可以有空行；渲染必须完整使用 answer，不能再按字符串格式猜测。"""
     from finance_agent.orchestrator.conversation_graph import _render_faq
 
     result = _found_retriever()._result
-    result.matches[0].content = "什么是保证收益？\n\n任何声称保证收益的宣传都涉嫌违规。"
+    result.matches[0].answer = "任何声称保证收益的宣传都涉嫌违规。\n\n投资者应核实产品材料。"
 
     text = _render_faq(result)
 
-    assert not text.startswith("什么是保证收益")
-    assert "任何声称保证收益的宣传都涉嫌违规。" in text
+    assert text == "任何声称保证收益的宣传都涉嫌违规。\n\n投资者应核实产品材料。"

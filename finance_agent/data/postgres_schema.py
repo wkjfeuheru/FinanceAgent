@@ -38,6 +38,9 @@ MESSAGE_METADATA_JSONB_FIELD = "metadata jsonb NOT NULL DEFAULT '{}'::jsonb"
 
 # 公开常量保留，调用方只需依赖这里，不再维护内嵌 SQL。
 BASE_SCHEMA_SQL = _load_sql("001_base_schema.sql")
+# 晚于初始建库新增的列必须走幂等 ALTER：001 的 CREATE TABLE IF NOT EXISTS 对已存在的表
+# 不会补列，缺少这一步会让旧库缺列（历史上 products.recommended_holding_period 即如此）。
+PRODUCTS_SCHEMA_SQL = _load_sql("006_products_columns.sql")
 AGENT_RUNTIME_SCHEMA_SQL = _load_sql("002_agent_runtime_schema.sql")
 IDENTITY_MIGRATION_SQL = _load_sql("003_identity_migration.sql")
 RESEARCH_GOVERNANCE_SCHEMA_SQL = _load_sql("004_research_governance.sql")
@@ -48,6 +51,12 @@ HYBRID_ORCHESTRATION_SCHEMA_SQL = _load_sql("008_hybrid_orchestration.sql")
 FAQ_VECTOR_SCHEMA_SQL = _load_sql("009_faq_vector.sql")
 # FAQ 中文关键词检索：把分词退化的 simple 配置换成归一化二元组。
 FAQ_BIGRAM_SCHEMA_SQL = _load_sql("010_faq_bigram_search.sql")
+# 模拟交易：账户资金、资金流水、委托成交与持仓。
+PORTFOLIO_SCHEMA_SQL = _load_sql("011_portfolio.sql")
+# FAQ 问答对显式字段与加权关键词索引：兼容已有 content 数据。
+FAQ_QA_PAIR_SCHEMA_SQL = _load_sql("012_faq_qa_pair_columns.sql")
+# 管理后台：users.is_admin 角色列与 products.is_active 上下架列。
+ADMIN_CONSOLE_SCHEMA_SQL = _load_sql("013_admin_console.sql")
 
 
 def runtime_schema_jsonb_fields() -> dict[str, str]:

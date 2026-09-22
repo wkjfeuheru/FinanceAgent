@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -45,6 +46,9 @@ class _PostgresBaseStore:
     def __init__(self, connection_factory):
         self._connection_factory = connection_factory
         self._schema_ready = False
+        # 建表是懒加载且只应执行一次；不同会话现在可并发进入，无锁时
+        # 两个线程可能同时跑 DDL，在 Postgres 目录表上竞争。
+        self._schema_lock = threading.Lock()
 
     @contextmanager
     def _transaction(self) -> Iterator[Any]:
@@ -61,16 +65,29 @@ class _PostgresBaseStore:
     def _ensure_schema(self) -> None:
         if self._schema_ready:
             return
+        with self._schema_lock:
+            if self._schema_ready:
+                return
+            self._apply_schema()
+
+    def _apply_schema(self) -> None:
         from finance_agent.data.postgres_schema import (
+            ADMIN_CONSOLE_SCHEMA_SQL,
             AGENT_RUNTIME_SCHEMA_SQL,
             BASE_SCHEMA_SQL,
+            PORTFOLIO_SCHEMA_SQL,
+            PRODUCTS_SCHEMA_SQL,
         )
 
         with self._transaction() as connection:
             cursor = connection.cursor()
             try:
                 cursor.execute(BASE_SCHEMA_SQL)
+                # 旧库缺列的补齐必须紧跟建表之后（幂等）。
+                cursor.execute(PRODUCTS_SCHEMA_SQL)
                 cursor.execute(AGENT_RUNTIME_SCHEMA_SQL)
+                cursor.execute(PORTFOLIO_SCHEMA_SQL)
+                cursor.execute(ADMIN_CONSOLE_SCHEMA_SQL)
             finally:
                 cursor.close()
         self._schema_ready = True
@@ -320,7 +337,10 @@ def load_checkpoint_with_legacy_fallback(
 class PostgresAuthStore(_PostgresBaseStore):
     """认证（用户 + 会话）的 PostgreSQL 存储。"""
 
-    def register(self, username: str, password: str, display_name: str = "") -> dict[str, Any]:
+    def register(
+        self, username: str, password: str, display_name: str = "", *, is_admin: bool = False,
+    ) -> dict[str, Any]:
+        """注册用户；``is_admin`` 仅由引导脚本使用（注册接口不暴露该参数）。"""
         username = (username or "").strip()
         if len(username) < 2:
             raise ValueError("用户名至少需要 2 个字符")
@@ -335,10 +355,11 @@ class PostgresAuthStore(_PostgresBaseStore):
                 try:
                     cursor.execute(
                         """INSERT INTO finance.users
-                           (customer_id, username, display_name, password_hash, salt, created_at)
-                           VALUES (NULL, %s, %s, %s, %s, %s) RETURNING id""",
+                           (customer_id, username, display_name, password_hash, salt,
+                            created_at, is_admin)
+                           VALUES (NULL, %s, %s, %s, %s, %s, %s) RETURNING id""",
                         (username, name, _hash_password(password, salt), salt,
-                         datetime.now().isoformat(timespec="seconds")),
+                         datetime.now().isoformat(timespec="seconds"), bool(is_admin)),
                     )
                     row = cursor.fetchone()
                     user_id = row[0]
@@ -353,7 +374,8 @@ class PostgresAuthStore(_PostgresBaseStore):
             if "unique" in str(exc).lower() or "duplicate" in str(exc).lower():
                 raise ValueError(f"用户名 {username} 已存在") from exc
             raise
-        return {"customer_id": customer_id, "username": username, "display_name": name}
+        return {"customer_id": customer_id, "username": username, "display_name": name,
+                "is_admin": bool(is_admin)}
 
     def login(self, username: str, password: str) -> dict[str, Any]:
         self._ensure_schema()
@@ -385,7 +407,8 @@ class PostgresAuthStore(_PostgresBaseStore):
             finally:
                 cursor.close()
         return {"customer_id": user["customer_id"], "username": user["username"],
-                "display_name": user["display_name"], "token": token}
+                "display_name": user["display_name"], "token": token,
+                "is_admin": bool(user.get("is_admin"))}
 
     def verify_token(self, token: str) -> str | None:
         if not token:
@@ -449,6 +472,92 @@ class PostgresAuthStore(_PostgresBaseStore):
                 cursor.close()
         return result
 
+    def is_admin(self, customer_id: str) -> bool:
+        """读取用户的库内管理员角色；用户不存在时返回 False。"""
+        if not customer_id:
+            return False
+        self._ensure_schema()
+        with self._transaction() as connection:
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    "SELECT is_admin FROM finance.users WHERE customer_id = %s",
+                    (customer_id.upper(),),
+                )
+                row = cursor.fetchone()
+            finally:
+                cursor.close()
+        return bool(row[0]) if row else False
+
+    def set_admin(self, customer_id: str, is_admin: bool) -> bool:
+        """授予/撤销管理员角色，返回是否命中用户。"""
+        self._ensure_schema()
+        with self._transaction() as connection:
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    "UPDATE finance.users SET is_admin = %s WHERE customer_id = %s",
+                    (bool(is_admin), customer_id.upper()),
+                )
+                count = cursor.rowcount
+            finally:
+                cursor.close()
+        return count > 0
+
+    def set_password(self, customer_id: str, password: str) -> bool:
+        """重置密码（重新生成盐），返回是否命中用户。
+
+        与注册同用 PBKDF2-SHA256 + 随机盐；换密码必须换盐，否则同一个密码在
+        两个账号上会得到相同的哈希。
+        """
+        if len(password or "") < 6:
+            raise ValueError("密码至少需要 6 个字符")
+        self._ensure_schema()
+        salt = secrets.token_hex(16)
+        with self._transaction() as connection:
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    "UPDATE finance.users SET password_hash = %s, salt = %s WHERE customer_id = %s",
+                    (_hash_password(password, salt), salt, customer_id.upper()),
+                )
+                count = cursor.rowcount
+            finally:
+                cursor.close()
+        return count > 0
+
+    def list_users(self) -> list[dict[str, Any]]:
+        """全部用户及其账户概览，供管理后台展示。
+
+        用 ``LEFT JOIN``：账户行是首次访问模拟交易时才惰性创建的，没有交易的
+        用户并非异常，不能因为缺账户行就从列表里消失。
+        """
+        self._ensure_schema()
+        with self._transaction() as connection:
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    """SELECT u.id, u.customer_id, u.username, u.display_name, u.created_at,
+                              u.is_admin,
+                              COALESCE(a.cash_balance, 0) AS cash_balance,
+                              COALESCE(a.total_deposit, 0) AS total_deposit,
+                              COALESCE(p.position_count, 0) AS position_count
+                       FROM finance.users u
+                       LEFT JOIN finance.accounts a ON a.customer_id = u.customer_id
+                       LEFT JOIN (
+                           SELECT customer_id, COUNT(*) AS position_count
+                           FROM finance.positions WHERE shares > 0 GROUP BY customer_id
+                       ) p ON p.customer_id = u.customer_id
+                       ORDER BY u.id""",
+                )
+                rows = cursor.fetchall()
+                result = _dict_rows(cursor, rows)
+            finally:
+                cursor.close()
+        for row in result:
+            row["is_admin"] = bool(row.get("is_admin"))
+        return result
+
     def delete_user(self, customer_id: str) -> bool:
         """删除用户，并先清理其研究审计数据。
 
@@ -490,7 +599,261 @@ class PostgresAuthStore(_PostgresBaseStore):
 
     def _public(self, cursor: Any, row: Any) -> dict[str, Any]:
         data = _dict_rows(cursor, [row])[0]
-        return {key: data[key] for key in ("username", "customer_id", "display_name", "created_at")}
+        return {key: data[key] for key in ("username", "customer_id", "display_name", "created_at")} | {
+            "is_admin": bool(data.get("is_admin")),
+        }
+
+
+class PostgresPortfolioStore(_PostgresBaseStore):
+    """模拟交易账户、流水、委托与持仓的 PostgreSQL 存储。
+
+    只做数据读写与行锁，不含费率与盈亏口径 —— 那些属于
+    ``finance_agent.portfolio.service``，保证 REST 与 Agent 走同一套计算。
+    """
+
+    def ensure_account(self, customer_id: str) -> dict[str, Any]:
+        """确保账户行存在并返回之（幂等）。"""
+        self._ensure_schema()
+        cid = customer_id.upper()
+        with self._transaction() as connection:
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    """INSERT INTO finance.accounts (customer_id)
+                       VALUES (%s) ON CONFLICT (customer_id) DO NOTHING""",
+                    (cid,),
+                )
+                cursor.execute(
+                    "SELECT * FROM finance.accounts WHERE customer_id = %s",
+                    (cid,),
+                )
+                row = cursor.fetchone()
+                result = _dict_rows(cursor, [row])[0]
+            finally:
+                cursor.close()
+        return result
+
+    def lock_account(self, cursor: Any, customer_id: str) -> dict[str, Any] | None:
+        """在调用方事务内锁定账户行，返回其当前值。
+
+        写操作必须经由此处加锁，否则并发下单会各自读到同一份余额造成超支。
+        """
+        cursor.execute(
+            "SELECT * FROM finance.accounts WHERE customer_id = %s FOR UPDATE",
+            (customer_id.upper(),),
+        )
+        row = cursor.fetchone()
+        return _dict_rows(cursor, [row])[0] if row else None
+
+    @contextmanager
+    def transaction(self) -> Iterator[Any]:
+        """暴露事务上下文，供服务层把一次成交的多个写操作包成原子操作。"""
+        self._ensure_schema()
+        with self._transaction() as connection:
+            yield connection
+
+    def find_transaction_by_key(self, customer_id: str, idempotency_key: str) -> dict[str, Any] | None:
+        """按幂等键查找已落地的资金流水。"""
+        if not idempotency_key:
+            return None
+        self._ensure_schema()
+        with self._transaction() as connection:
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    """SELECT * FROM finance.cash_transactions
+                       WHERE customer_id = %s AND idempotency_key = %s LIMIT 1""",
+                    (customer_id.upper(), idempotency_key),
+                )
+                row = cursor.fetchone()
+                result = _dict_rows(cursor, [row])[0] if row else None
+            finally:
+                cursor.close()
+        return result
+
+    def find_order_by_key(self, customer_id: str, idempotency_key: str) -> dict[str, Any] | None:
+        """按幂等键查找已成交的委托。"""
+        if not idempotency_key:
+            return None
+        self._ensure_schema()
+        with self._transaction() as connection:
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    """SELECT * FROM finance.orders
+                       WHERE customer_id = %s AND idempotency_key = %s LIMIT 1""",
+                    (customer_id.upper(), idempotency_key),
+                )
+                row = cursor.fetchone()
+                result = _dict_rows(cursor, [row])[0] if row else None
+            finally:
+                cursor.close()
+        return result
+
+    def insert_transaction(self, cursor: Any, record: dict[str, Any]) -> dict[str, Any]:
+        """在调用方事务内写入一条资金流水，并返回落库后的行。
+
+        用 ``RETURNING`` 直接取回，避免提交后再按时间排序回查 —— 同一秒内的多条
+        流水时间戳相同，回查可能取到别的行。
+        """
+        cursor.execute(
+            """INSERT INTO finance.cash_transactions
+               (txn_id, customer_id, kind, amount, balance_after, ref_id, note,
+                idempotency_key, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
+               RETURNING *""",
+            (
+                record["txn_id"],
+                str(record["customer_id"]).upper(),
+                record["kind"],
+                record["amount"],
+                record["balance_after"],
+                record.get("ref_id", ""),
+                record.get("note", ""),
+                record.get("idempotency_key", ""),
+            ),
+        )
+        return _dict_rows(cursor, [cursor.fetchone()])[0]
+
+    def insert_order(self, cursor: Any, record: dict[str, Any]) -> dict[str, Any]:
+        """在调用方事务内写入一条委托，并返回落库后的行。"""
+        cursor.execute(
+            """INSERT INTO finance.orders
+               (order_id, customer_id, product_code, side, shares, price,
+                gross_amount, fee, net_amount, realized_pnl, fee_limitations,
+                idempotency_key, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, now())
+               RETURNING *""",
+            (
+                record["order_id"],
+                str(record["customer_id"]).upper(),
+                record["product_code"],
+                record["side"],
+                record["shares"],
+                record["price"],
+                record["gross_amount"],
+                record["fee"],
+                record["net_amount"],
+                record.get("realized_pnl"),
+                json.dumps(record.get("fee_limitations", []), ensure_ascii=False),
+                record.get("idempotency_key", ""),
+            ),
+        )
+        return _dict_rows(cursor, [cursor.fetchone()])[0]
+
+    def update_cash_balance(self, cursor: Any, customer_id: str, cash_balance: float) -> None:
+        """在调用方事务内更新可用资金。"""
+        cursor.execute(
+            "UPDATE finance.accounts SET cash_balance = %s, updated_at = now() WHERE customer_id = %s",
+            (cash_balance, customer_id.upper()),
+        )
+
+    def add_deposit(self, cursor: Any, customer_id: str, amount: float) -> None:
+        """在调用方事务内累加累计充值额。"""
+        cursor.execute(
+            "UPDATE finance.accounts SET total_deposit = total_deposit + %s, updated_at = now() WHERE customer_id = %s",
+            (amount, customer_id.upper()),
+        )
+
+    def get_position_row(self, cursor: Any, customer_id: str, product_code: str) -> dict[str, Any] | None:
+        """在调用方事务内读取单笔持仓（加锁）。"""
+        cursor.execute(
+            """SELECT * FROM finance.positions
+               WHERE customer_id = %s AND product_code = %s FOR UPDATE""",
+            (customer_id.upper(), product_code),
+        )
+        row = cursor.fetchone()
+        return _dict_rows(cursor, [row])[0] if row else None
+
+    def upsert_position(
+        self, cursor: Any, customer_id: str, product_code: str,
+        shares: float, cost_amount: float,
+    ) -> None:
+        """在调用方事务内写入/更新持仓；份额归零时删除该行。"""
+        cid = customer_id.upper()
+        if shares <= 0:
+            cursor.execute(
+                "DELETE FROM finance.positions WHERE customer_id = %s AND product_code = %s",
+                (cid, product_code),
+            )
+            return
+        avg_cost = cost_amount / shares if shares else 0.0
+        cursor.execute(
+            """INSERT INTO finance.positions
+               (customer_id, product_code, shares, cost_amount, avg_cost, opened_at, updated_at)
+               VALUES (%s, %s, %s, %s, %s, now(), now())
+               ON CONFLICT (customer_id, product_code) DO UPDATE SET
+                 shares = EXCLUDED.shares,
+                 cost_amount = EXCLUDED.cost_amount,
+                 avg_cost = EXCLUDED.avg_cost,
+                 updated_at = now()""",
+            (cid, product_code, shares, cost_amount, avg_cost),
+        )
+
+    def list_positions(self, customer_id: str) -> list[dict[str, Any]]:
+        self._ensure_schema()
+        with self._transaction() as connection:
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    """SELECT * FROM finance.positions
+                       WHERE customer_id = %s ORDER BY updated_at DESC, product_code""",
+                    (customer_id.upper(),),
+                )
+                rows = cursor.fetchall()
+                result = _dict_rows(cursor, rows)
+            finally:
+                cursor.close()
+        return result
+
+    def list_orders(self, customer_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        self._ensure_schema()
+        with self._transaction() as connection:
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    """SELECT * FROM finance.orders
+                       WHERE customer_id = %s ORDER BY created_at DESC, order_id DESC LIMIT %s""",
+                    (customer_id.upper(), max(1, min(int(limit), 500))),
+                )
+                rows = cursor.fetchall()
+                result = _dict_rows(cursor, rows)
+            finally:
+                cursor.close()
+        return result
+
+    def list_transactions(self, customer_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        self._ensure_schema()
+        with self._transaction() as connection:
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    """SELECT * FROM finance.cash_transactions
+                       WHERE customer_id = %s ORDER BY created_at DESC LIMIT %s""",
+                    (customer_id.upper(), max(1, min(int(limit), 500))),
+                )
+                rows = cursor.fetchall()
+                result = _dict_rows(cursor, rows)
+            finally:
+                cursor.close()
+        return result
+
+    def realized_pnl_total(self, customer_id: str) -> float:
+        """累计已实现盈亏（卖出成交之和）。"""
+        self._ensure_schema()
+        with self._transaction() as connection:
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    """SELECT COALESCE(SUM(realized_pnl), 0) AS total FROM finance.orders
+                       WHERE customer_id = %s AND side = 'sell'""",
+                    (customer_id.upper(),),
+                )
+                row = cursor.fetchone()
+                total = row[0] if row else 0
+            finally:
+                cursor.close()
+        return float(total or 0)
 
 
 class PostgresProductLibrary(_PostgresBaseStore):
@@ -540,10 +903,11 @@ class PostgresProductLibrary(_PostgresBaseStore):
         return result
 
     def search_by_name(self, name: str) -> list[dict[str, Any]]:
-        """返回名称模糊匹配的全部产品候选，供上层处理歧义。
+        """返回名称模糊匹配的全部候选，供上层处理歧义。
 
         刻意**不**加 ``LIMIT 1``：静默取第一条会让用户拿到不相关的产品且无从察觉，
-        由调用方（解析器）在多个候选时给出澄清。
+        由调用方（解析器）在多个候选时给出澄清。已下架商品同样被排除 —— 它们不该
+        再作为推荐候选出现，但仍然可以被 ``query_by_code`` 读到以支持赎回与对账。
         """
         keyword = str(name).strip()
         if not keyword:
@@ -553,7 +917,8 @@ class PostgresProductLibrary(_PostgresBaseStore):
             cursor = connection.cursor()
             try:
                 cursor.execute(
-                    "SELECT code, name, type, scale FROM finance.products WHERE name LIKE %s ORDER BY code",
+                    """SELECT code, name, type, scale FROM finance.products
+                       WHERE name LIKE %s AND is_active ORDER BY code""",
                     (f"%{keyword}%",),
                 )
                 rows = cursor.fetchall()
@@ -562,13 +927,22 @@ class PostgresProductLibrary(_PostgresBaseStore):
                 cursor.close()
         return result
 
-    def list_products(self, product_type: str = "fund") -> list[dict[str, Any]]:
+    def list_products(
+        self, product_type: str = "fund", *, include_inactive: bool = False,
+    ) -> list[dict[str, Any]]:
+        """货架商品摘要。
+
+        默认只返回上架商品（``is_active``），管理后台传 ``include_inactive=True``
+        以便把下架商品也列出来重新上架。
+        """
         self._ensure_schema()
+        clause = "" if include_inactive else "AND is_active "
         with self._transaction() as connection:
             cursor = connection.cursor()
             try:
                 cursor.execute(
-                    "SELECT code, name, type, scale FROM finance.products WHERE type = %s ORDER BY code",
+                    f"SELECT code, name, type, scale, is_active FROM finance.products "
+                    f"WHERE type = %s {clause}ORDER BY code",
                     (product_type or "fund",),
                 )
                 rows = cursor.fetchall()
@@ -576,6 +950,26 @@ class PostgresProductLibrary(_PostgresBaseStore):
             finally:
                 cursor.close()
         return result
+
+    def set_product_active(self, code: str, active: bool) -> bool:
+        """上架/下架商品（软状态），返回是否命中商品。
+
+        不用 ``delete_product``：``finance.orders.product_code`` 外键指向
+        ``finance.products(code)`` 且未声明级联，删除有成交记录的商品会外键失败；
+        即便删得掉，历史成交与既有持仓也会失去可解释的标的。
+        """
+        self._ensure_schema()
+        with self._transaction() as connection:
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    "UPDATE finance.products SET is_active = %s WHERE code = %s",
+                    (bool(active), str(code).strip()),
+                )
+                count = cursor.rowcount
+            finally:
+                cursor.close()
+        return count > 0
 
     def upsert_product(self, data: dict[str, Any]) -> bool:
         code = str(data.get("code", "")).strip()

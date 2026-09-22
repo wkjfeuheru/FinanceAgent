@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from finance_agent.orchestrator.contracts import BusinessDomain, DomainOutcome
-from finance_agent.orchestrator.root_graph import RootGraphDependencies, build_root_graph, project_root_state
+from finance_agent.orchestrator.contracts import AsyncJobRef, BusinessDomain, DomainOutcome
+from finance_agent.orchestrator.supervisor_graph import SupervisorDependencies, build_supervisor_graph, project_supervisor_state
 
 # 现有前端与 /api/chat 依赖的字段，V2 不得删除。
 _LEGACY_KEYS = {
@@ -53,7 +53,7 @@ def test_projection_preserves_all_legacy_keys():
         "task_results": {},
     }
 
-    projected = project_root_state(state, conversation_id="conv-1")
+    projected = project_supervisor_state(state, conversation_id="conv-1")
 
     assert _LEGACY_KEYS <= set(projected)
     assert projected["response"] == "已完成分析。"
@@ -82,7 +82,7 @@ def test_projection_lifts_stock_structured_fields():
         "task_results": {outcome.task_id: outcome.model_dump(mode="json")},
     }
 
-    projected = project_root_state(state)
+    projected = project_supervisor_state(state)
 
     assert projected["stock_analysis"] == {"600519": {"rating": "推荐"}}
     assert projected["technical_analysis"] == {"600519": {"trend": "up"}}
@@ -90,11 +90,17 @@ def test_projection_lifts_stock_structured_fields():
 
 
 def test_projection_reports_processing_task_ids():
+    # 待处理标识必须是真实 Celery job_id：状态端点 GET /api/runs/{task_id}
+    # 按仓储主键（job_id）查询，返回领域 task_id 会让前端永远查不到。
     outcome = DomainOutcome(
         task_id="single:run-1:stock_research",
         domain=BusinessDomain.STOCK_RESEARCH,
         status="processing",
         summary="量化任务处理中。",
+        pending_jobs=[
+            AsyncJobRef(job_id="job-quant-1", kind="technical_indicators",
+                        status="queued", task_id="single:run-1:stock_research"),
+        ],
     )
     state = {
         "routing": {"domains": [BusinessDomain.STOCK_RESEARCH.value], "execution_mode": "domain_react"},
@@ -103,10 +109,10 @@ def test_projection_reports_processing_task_ids():
         "domain_outcomes": {outcome.task_id: outcome.model_dump(mode="json")},
     }
 
-    projected = project_root_state(state)
+    projected = project_supervisor_state(state)
 
     assert projected["run_status"] == "processing"
-    assert projected["pending_task_ids"] == ["single:run-1:stock_research"]
+    assert projected["pending_task_ids"] == ["job-quant-1"]
 
 
 def test_composite_plan_projection_merges_market_and_product():
@@ -124,15 +130,15 @@ def test_composite_plan_projection_merges_market_and_product():
         summary="建议稳健型基金。",
         structured_data={"product_analysis": {"recommended": ["基金A"]}},
     )
-    graph = build_root_graph(
-        RootGraphDependencies(
+    graph = build_supervisor_graph(
+        SupervisorDependencies(
             classifier=_FakeClassifierWithDomains(),
             plan_runner=lambda state, domains: [market, product],
         )
     )
 
     result = graph.invoke({"user_message": "市场情绪和基金产品怎么搭配", "run_id": "run-2"})
-    projected = project_root_state(result)
+    projected = project_supervisor_state(result)
 
     assert projected["market_insight"] == {"sentiment": "warm"}
     assert projected["product_analysis"] == {"recommended": ["基金A"]}

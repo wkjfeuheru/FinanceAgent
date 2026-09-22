@@ -47,6 +47,11 @@ ORCHESTRATION_PLAN_TASKS = int(os.getenv("ORCHESTRATION_PLAN_TASKS", "8"))
 ORCHESTRATION_REPLANS = int(os.getenv("ORCHESTRATION_REPLANS", "2"))
 ORCHESTRATION_COMPLIANCE_REWRITES = int(os.getenv("ORCHESTRATION_COMPLIANCE_REWRITES", "1"))
 ORCHESTRATION_GRAPH_STEPS = int(os.getenv("ORCHESTRATION_GRAPH_STEPS", "32"))
+# 端到端墙钟预算。步数上限只约束"走了多少步"，管不住"某一步卡多久"：
+# 一个挂住的取数或 LLM 调用能让单轮请求无限期不返回。因此除了步数，
+# 还需要单轮整体上限（API 层）与计划执行上限（跨领域扇出循环）。
+ORCHESTRATION_TURN_TIMEOUT = float(os.getenv("ORCHESTRATION_TURN_TIMEOUT", "180"))
+ORCHESTRATION_PLAN_DEADLINE = float(os.getenv("ORCHESTRATION_PLAN_DEADLINE", "120"))
 
 CELERY_REDIS_DB = int(os.getenv("CELERY_REDIS_DB", "1"))
 CELERY_QUANT_QUEUE = os.getenv("CELERY_QUANT_QUEUE", "finance.quant").strip()
@@ -83,6 +88,12 @@ POSTGRES_USER = os.getenv("POSTGRES_USER", "postgres").strip()
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "").strip()
 POSTGRES_DB = os.getenv("POSTGRES_DB", "advisor").strip()
 POSTGRES_CONNECT_TIMEOUT = float(os.getenv("POSTGRES_CONNECT_TIMEOUT", "10"))
+# checkpoint 连接池容量。不同会话现在可并发执行，而每个 superstep 都会写
+# checkpoint；psycopg_pool 在 max_size=None 时会把上限收敛为 min_size（默认 4），
+# 超过该并发数的会话将在池上排队甚至超时，因此这里显式放开上限。
+POSTGRES_POOL_MIN_SIZE = int(os.getenv("POSTGRES_POOL_MIN_SIZE", "4"))
+POSTGRES_POOL_MAX_SIZE = int(os.getenv("POSTGRES_POOL_MAX_SIZE", "16"))
+POSTGRES_POOL_TIMEOUT = float(os.getenv("POSTGRES_POOL_TIMEOUT", "30"))
 
 
 def _postgres_dsn() -> str:
@@ -106,6 +117,13 @@ def get_postgres_connection_factory():
 # 统一股票数据源配置；Provider Manager 按顺序自动降级。
 TUSHARE_MCP_URL = os.getenv("TUSHARE_MCP_URL", "").strip()
 TUSHARE_MCP_TIMEOUT = float(os.getenv("TUSHARE_MCP_TIMEOUT", "30"))
+# 数据源守门：akshare/baostock 内部大量请求不设超时（实测 akshare 1290 处
+# requests 调用仅 44 处带 timeout），一个挂住的 socket 会让整轮请求永久阻塞。
+# 因此由 ProviderManager 在调用边界强制超时，并对连续失败的源做熔断，
+# 避免已知故障源在每一轮请求里被重复尝试、把预算耗光。
+DATA_PROVIDER_TIMEOUT = float(os.getenv("DATA_PROVIDER_TIMEOUT", "20"))
+DATA_PROVIDER_FAILURE_THRESHOLD = int(os.getenv("DATA_PROVIDER_FAILURE_THRESHOLD", "3"))
+DATA_PROVIDER_COOLDOWN = float(os.getenv("DATA_PROVIDER_COOLDOWN", "60"))
 DEFAULT_DATA_PROVIDER = os.getenv("DEFAULT_DATA_PROVIDER", "akshare").strip().lower()
 DATA_PROVIDER_ORDER = [
     item.strip().lower()
@@ -184,6 +202,10 @@ PRODUCT_ANALYSIS_TEMPERATURE = float(os.getenv("PRODUCT_ANALYSIS_TEMPERATURE", "
 # 产品研究的新鲜度阈值：超过阈值只披露来源与日期，不据此生成收益/比较结论。
 PRODUCT_PERFORMANCE_FRESHNESS_DAYS = int(os.getenv("PRODUCT_PERFORMANCE_FRESHNESS_DAYS", "31"))
 PRODUCT_HOLDINGS_FRESHNESS_DAYS = int(os.getenv("PRODUCT_HOLDINGS_FRESHNESS_DAYS", "120"))
+
+# 模拟交易限额：充值有单笔上限，避免"账户收益"被随意注资稀释成无意义数字。
+PORTFOLIO_MAX_DEPOSIT_AMOUNT = float(os.getenv("PORTFOLIO_MAX_DEPOSIT_AMOUNT", "10000000"))
+PORTFOLIO_MIN_ORDER_AMOUNT = float(os.getenv("PORTFOLIO_MIN_ORDER_AMOUNT", "100"))
 
 if not DEEPSEEK_API_KEY or DEEPSEEK_API_KEY == "sk-your-api-key-here":
     raise ValueError("请在操作系统环境变量中设置真实的 DEEPSEEK_API_KEY")
@@ -283,6 +305,9 @@ def get_checkpoint_saver():
         _checkpoint_pool = ConnectionPool(
             conninfo=_postgres_dsn(),
             kwargs={"autocommit": True, "connect_timeout": POSTGRES_CONNECT_TIMEOUT},
+            min_size=POSTGRES_POOL_MIN_SIZE,
+            max_size=POSTGRES_POOL_MAX_SIZE,
+            timeout=POSTGRES_POOL_TIMEOUT,
             open=True,
         )
         try:

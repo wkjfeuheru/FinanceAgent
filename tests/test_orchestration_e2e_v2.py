@@ -6,7 +6,7 @@ import threading
 
 from finance_agent.orchestrator.contracts import BusinessDomain, DomainOutcome
 from finance_agent.orchestrator.orchestrator import AdvisorSystem
-from finance_agent.orchestrator.root_graph import RootGraphDependencies, build_root_graph
+from finance_agent.orchestrator.supervisor_graph import SupervisorDependencies, build_supervisor_graph
 
 
 class _FakeClassifier:
@@ -71,8 +71,8 @@ def _v2_system(monkeypatch, intents):
     system.get_checkpoint_conversation_messages = lambda *a, **k: []
     system._emit_progress = lambda *a, **k: None
     system._trace_agent = lambda *a, **k: None
-    system.root = build_root_graph(
-        RootGraphDependencies(
+    system.supervisor = build_supervisor_graph(
+        SupervisorDependencies(
             classifier=_FakeClassifier(intents),
             conversation_runner=lambda state: {"final_response": "你好。", "status": "success"},
             domain_runner=_domain_runner,
@@ -117,8 +117,8 @@ def test_violating_output_is_rewritten_or_blocked_not_shown_raw(monkeypatch):
             summary="该股稳赚不赔，必涨。",
         )
 
-    system.root = build_root_graph(
-        RootGraphDependencies(
+    system.supervisor = build_supervisor_graph(
+        SupervisorDependencies(
             classifier=_FakeClassifier(["stock_analysis"]),
             domain_runner=violating_runner,
         )

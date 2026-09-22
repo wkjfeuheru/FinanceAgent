@@ -27,6 +27,19 @@ class ResumeCoordinator:
     def __init__(self, runtime: QuantRuntime) -> None:
         self._runtime = runtime
 
+    def resume_job(self, thread_id: str, job: AsyncJobRef) -> Any:
+        """恢复单个已完成的异步任务；取消或未完成返回 False。
+
+        状态端点（``GET /api/runs/{task_id}``）触发恢复时使用：归属与状态由
+        端点/仓储先行校验，这里只做"取消忽略 + 仅完成才恢复"的最终把关。
+        恢复回调的返回值（如合并后的响应）原样返回给调用方。
+        """
+        if job.status == "cancelled":
+            return False
+        if self._runtime.job_status(job.job_id) != "completed":
+            return False
+        return self._runtime.resume(thread_id, job)
+
     def resume_ready(self, thread_id: str) -> list[tuple[str, str]]:
         """扫描该线程就绪的异步任务并恢复图，返回 (thread_id, job_id) 列表。"""
         resumed: list[tuple[str, str]] = []
@@ -76,9 +89,12 @@ class RepositoryQuantRuntime:
         status = getattr(self._gateway, "status", None)
         return status(job_id) if callable(status) else "failed"
 
-    def resume(self, thread_id: str, job: AsyncJobRef) -> None:
+    def resume(self, thread_id: str, job: AsyncJobRef) -> Any:
         if self._resume_runner is not None:
-            self._resume_runner(thread_id, {"job_id": job.job_id, "task_id": job.task_id})
+            return self._resume_runner(
+                thread_id, {"job_id": job.job_id, "task_id": job.task_id}
+            )
+        return None
 
     def revoke(self, job_id: str) -> None:
         if self._revoke_runner is not None:

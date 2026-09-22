@@ -78,7 +78,8 @@ class FaqRetriever:
                     score=score,
                     index_version=candidate["index_version"],
                     source_path=candidate["source_path"],
-                    content=candidate["content"],
+                    question=candidate["question"],
+                    answer=candidate["answer"],
                 )
             )
             if len(matches) >= limit:

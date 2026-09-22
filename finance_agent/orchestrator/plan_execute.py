@@ -8,7 +8,8 @@ Planner 只做跨领域分解与依赖；领域内部工具调用不在这一层
 from __future__ import annotations
 
 import json
-from typing import Annotated, Any, Callable
+import time
+from typing import TYPE_CHECKING, Annotated, Any, Callable
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
@@ -24,10 +25,34 @@ from finance_agent.orchestrator.contracts import (
     PlanDecision,
     PlanTask,
 )
+from finance_agent.orchestrator.nodes.plan_execute import (
+    after_plan,
+    make_domain_worker,
+    make_evaluate_node,
+    make_replan_node,
+    route_after_evaluate,
+)
 from finance_agent.orchestrator.state import dedupe_concat, merge_dict
 
-PLAN_TASK_LIMIT = 8
-REPLAN_LIMIT = 2
+def _plan_task_limit() -> int:
+    from finance_agent import config
+
+    return config.ORCHESTRATION_PLAN_TASKS
+
+
+def _replan_limit() -> int:
+    from finance_agent import config
+
+    return config.ORCHESTRATION_REPLANS
+
+
+# 计划任务数与重规划次数的唯一数值源是 config 的 ORCHESTRATION_* 变量；
+# 此处只保留别名供既有调用方与校验提示使用，不再独立定义数值。
+PLAN_TASK_LIMIT = _plan_task_limit()
+REPLAN_LIMIT = _replan_limit()
+# 降级原因码：必须可被上层识别并汇入 warnings（不是仅供日志）。
+PLAN_DEADLINE_WARNING = "plan_deadline_exceeded"
+PLAN_CANCELLED_WARNING = "plan_cancelled_by_user"
 
 
 class PlanExecuteState(TypedDict, total=False):
@@ -45,6 +70,10 @@ class PlanExecuteState(TypedDict, total=False):
     plan_error: dict[str, Any]
     warnings: Annotated[list[str], dedupe_concat]
     domains: list[str]
+    # Supervisor Graph 已按领域切分 query；Planner 需要保留它，不能退回整句用户请求。
+    routing: dict[str, Any]
+    deadline_monotonic: float
+    halted: bool
 
 
 class PlanValidationResult(BaseModel):
@@ -97,8 +126,17 @@ def _has_cycle(tasks: list[PlanTask]) -> bool:
     return any(visit(node) for node in graph)
 
 
-def validate_execution_plan(plan: ExecutionPlan | dict[str, Any] | None) -> PlanValidationResult:
-    """校验任务数量、唯一性、领域、依赖与期望输出。"""
+def validate_execution_plan(
+    plan: ExecutionPlan | dict[str, Any] | None,
+    *,
+    task_limit: int = 0,
+) -> PlanValidationResult:
+    """校验任务数量、唯一性、领域、依赖与期望输出。
+
+    ``task_limit`` 为 0 时取 ``PLAN_TASK_LIMIT``（由配置驱动），显式传入时
+    可按 profile 收紧但不得超过全局上限。
+    """
+    limit = task_limit if task_limit > 0 else PLAN_TASK_LIMIT
     parsed = _as_plan(plan)
     if parsed is None:
         return PlanValidationResult(
@@ -108,10 +146,10 @@ def validate_execution_plan(plan: ExecutionPlan | dict[str, Any] | None) -> Plan
         return PlanValidationResult(
             valid=False, error=_node_error("plan_empty", "计划不包含任何任务。")
         )
-    if len(parsed.tasks) > PLAN_TASK_LIMIT:
+    if len(parsed.tasks) > limit:
         return PlanValidationResult(
             valid=False,
-            error=_node_error("plan_task_limit", f"计划任务数不得超过 {PLAN_TASK_LIMIT}。"),
+            error=_node_error("plan_task_limit", f"计划任务数不得超过 {limit}。"),
         )
 
     ids = [task.task_id for task in parsed.tasks]
@@ -257,14 +295,30 @@ def run_plan_execute(
     user_message: str,
     planner: Callable[[dict[str, Any], list[BusinessDomain]], ExecutionPlan] | None = None,
     replan_limit: int = REPLAN_LIMIT,
+    max_seconds: float = 0.0,
+    should_stop: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
-    """执行一个计划：Send 扇出就绪任务、合并结果、必要时重规划。"""
+    """执行一个计划：Send 扇出就绪任务、合并结果、必要时重规划。
+
+    ``max_seconds`` 是整轮计划的墙钟上限（<=0 表示不限）。重规划计数只能约束
+    "规划了几轮"，管不住"某一轮里的领域执行挂了多久"；没有墙钟上限时，一个卡住的
+    领域子图会让整轮请求一直不返回。超限时保留已完成结果并以 partial 收尾。
+    ``should_stop`` 提供协作式停止：在每个任务下发前检查，用户请求停止后不再启动
+    新的领域执行（已完成的专家结果按设计保留）。
+    """
+    deadline = time.monotonic() + max_seconds if max_seconds > 0 else None
     completed: dict[str, dict[str, Any]] = {}
     replans_used = 0
     plan = initial_plan
     warnings: list[str] = []
 
+    def _budget_exhausted() -> bool:
+        return deadline is not None and time.monotonic() >= deadline
+
     while True:
+        if _budget_exhausted():
+            warnings.append(PLAN_DEADLINE_WARNING)
+            break
         validation = validate_execution_plan(plan)
         if not validation.valid:
             return {
@@ -290,6 +344,12 @@ def run_plan_execute(
         }
         sends = dispatch_ready_tasks(state)
         for send in sends:
+            if should_stop is not None and should_stop():
+                warnings.append(PLAN_CANCELLED_WARNING)
+                break
+            if _budget_exhausted():
+                warnings.append(PLAN_DEADLINE_WARNING)
+                break
             payload = send.arg
             context = DomainTaskContext(
                 task=PlanTask(
@@ -304,6 +364,7 @@ def run_plan_execute(
                 customer_id=payload["customer_id"],
                 conversation_id=payload["conversation_id"],
                 user_message=payload["user_message"],
+                run_id=str(payload.get("run_id", "")),
                 upstream_results={
                     dep: DomainOutcome.model_validate(value)
                     for dep, value in (payload.get("upstream_results") or {}).items()
@@ -320,6 +381,9 @@ def run_plan_execute(
                     limitations=[f"domain_runner_failed:{payload['domain']}"],
                 )
             completed[outcome.task_id] = outcome.model_dump(mode="json")
+
+        if PLAN_CANCELLED_WARNING in warnings or PLAN_DEADLINE_WARNING in warnings:
+            break
 
         decision = evaluate_plan_results(
             {**state, "task_results": completed}
@@ -339,11 +403,15 @@ def run_plan_execute(
 
     outcomes = [DomainOutcome.model_validate(value) for value in completed.values()]
     summaries = [outcome.summary for outcome in outcomes if outcome.summary]
+    # 降级原因（超时/停止/重规划不可用）单独返回：调用方还要把每个 outcome 的
+    # limitations 也并入 warnings，两者混在一起会导致同一条原因被重复记录。
+    degradation = list(dict.fromkeys(warnings))
     return {
         "task_results": completed,
         "outcomes": outcomes,
         "final_response": "\n\n".join(summaries),
-        "warnings": warnings + [item for outcome in outcomes for item in outcome.limitations],
+        "warnings": degradation + [item for outcome in outcomes for item in outcome.limitations],
+        "degradation_warnings": degradation,
         "run_status": _outcome_status(outcomes),
     }
 
@@ -466,77 +534,31 @@ def build_plan_execute_graph(
     domain_runner: Callable[[DomainTaskContext], DomainOutcome],
     planner: Callable[[dict[str, Any], list[BusinessDomain]], ExecutionPlan] | None = None,
     replan_limit: int = REPLAN_LIMIT,
+    max_seconds: float = 0.0,
+    should_stop: Callable[[], bool] | None = None,
+    task_limit: int = 0,
 ):
-    """编译 Plan-and-Execute 子图（Send 扇出 + 合并 + 可选重规划）。"""
+    """编译 Plan-and-Execute 子图（Send 扇出 + 合并 + 可选重规划）。
 
-    def plan_node(state: PlanExecuteState) -> dict[str, Any]:
-        plan = _as_plan(state.get("plan"))
-        if plan is None:
-            domains = [BusinessDomain(value) for value in state.get("domains", [])]
-            plan = (planner or deterministic_planner)(state, domains)
-        validation = validate_execution_plan(plan)
-        if not validation.valid:
-            return {
-                "plan_error": validation.error.model_dump(mode="json") if validation.error else {},
-                "warnings": [f"plan_invalid:{validation.error.code}"] if validation.error else [],
-            }
-        return {"plan": validation.plan.model_dump(mode="json")}
+    ``max_seconds`` 和 ``should_stop`` 在每次任务调度前检查。已发出的 Send
+    不可抢占，但到达预算或收到停止请求后不会再下发新的领域任务。
+    ``task_limit`` 为 0 时沿用 ``PLAN_TASK_LIMIT``（由配置驱动）。
+    """
+    from finance_agent.orchestrator.nodes.plan_execute import make_plan_node
 
-    def after_plan(state: PlanExecuteState) -> str:
-        return "finish" if state.get("plan_error") else "evaluate"
-
-    def domain_worker(payload: dict[str, Any]) -> dict[str, Any]:
-        context = DomainTaskContext(
-            task=PlanTask(
-                task_id=payload["task_id"],
-                domain=BusinessDomain(payload["domain"]),
-                goal=payload["goal"],
-                instruction=payload["instruction"],
-                expected_output=payload["expected_output"],
-                depends_on=list(payload["depends_on"]),
-            ),
-            thread_id=payload["thread_id"],
-            customer_id=payload["customer_id"],
-            conversation_id=payload["conversation_id"],
-            user_message=payload["user_message"],
-            upstream_results={
-                dep: DomainOutcome.model_validate(value)
-                for dep, value in (payload.get("upstream_results") or {}).items()
-            },
-        )
-        try:
-            outcome = domain_runner(context)
-        except Exception:  # noqa: BLE001
-            outcome = DomainOutcome(
-                task_id=payload["task_id"],
-                domain=BusinessDomain(payload["domain"]),
-                status="failed",
-                summary="",
-                limitations=[f"domain_runner_failed:{payload['domain']}"],
-            )
-        return {"task_results": {outcome.task_id: outcome.model_dump(mode="json")}}
-
-    def route_after_evaluate(state: PlanExecuteState):
-        decision = evaluate_plan_results(state)
-        if decision.action == "dispatch":
-            return dispatch_ready_tasks(state)
-        if decision.action == "replan":
-            return "replan"
-        return END
-
-    def replan_node(state: PlanExecuteState) -> dict[str, Any]:
-        used = int(state.get("replans_used", 0) or 0)
-        limit = int(state.get("replan_limit", replan_limit) or replan_limit)
-        if planner is None or used >= limit:
-            return {"warnings": ["replan_unavailable"]}
-        domains = [BusinessDomain(value) for value in state.get("domains", [])]
-        new_plan = planner(state, domains)
-        return {"plan": new_plan.model_dump(mode="json"), "replans_used": used + 1}
+    plan_node = make_plan_node(
+        planner,
+        max_seconds=max_seconds,
+        task_limit=task_limit,
+    )
+    domain_worker = make_domain_worker(domain_runner)
+    evaluate_node = make_evaluate_node(should_stop)
+    replan_node = make_replan_node(planner, replan_limit=replan_limit)
 
     graph = StateGraph(PlanExecuteState)
     graph.add_node("plan", plan_node)
     graph.add_node("domain_worker", domain_worker)
-    graph.add_node("evaluate", lambda state: {})
+    graph.add_node("evaluate", evaluate_node)
     graph.add_node("replan", replan_node)
     graph.add_edge(START, "plan")
     graph.add_conditional_edges("plan", after_plan, {"finish": END, "evaluate": "evaluate"})

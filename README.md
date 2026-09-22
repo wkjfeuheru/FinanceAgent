@@ -1,6 +1,6 @@
 # Finance Agent
 
-基于 LangGraph 多 Agent 协作的 A 股智能投顾系统。系统通过自然语言收集用户投资需求，完成用户画像提取、股票识别、行情与财务数据获取、基本面分析、技术分析、市场洞察和合规审查，并提供 Vue 3 Web 界面及 FastAPI 接口。
+基于 LangGraph 多 Agent 协作的智能投顾助手。系统通过自然语言收集用户投资需求，完成用户画像提取、股票识别、行情与财务数据获取、基本面分析、技术分析、市场洞察和合规审查，并提供 Vue 3 Web 界面及 FastAPI 接口。
 
 ## 功能特性
 
@@ -13,8 +13,9 @@
 - 合规审查：对最终回答执行敏感内容和投资风险检查。输入侧区分“问规则”与“求操作”：合规的知识咨询（如“什么是操纵市场？”）放行并走 FAQ，求助执行类请求（如“帮我操纵股价”）拦截；无法判定时默认拦截。引用 FAQ 原文的回答只审计不改写，避免删改风险词汇导致语句失真。
 - 流式对话：支持基于 SSE 的实时响应。
 - 用户系统：支持注册、登录、Bearer Token 认证、会话管理和账户注销。
+- 模拟交易：商品货架（基金产品按最新净值展示，含风险等级与费率）、按金额/份额申购、持仓按最新净值估值、部分或全部赎回、一键清仓、账户数据面板（总资产/可用资金/持仓市值/累计与已实现盈亏）与虚拟资金充值。单一服务层同时支撑 REST 接口与对话问答，因此两个入口的口径必然一致。**模拟盘，不对接券商，不构成投资建议。**
 - 多层记忆：Redis 保存运行时记忆，PostgreSQL 保存认证、业务数据和 LangGraph checkpoint。
-- 强制登录：匿名访问已关闭。聊天、画像、历史记录、会话管理和账户操作都必须使用有效登录令牌。
+- 强制登录：匿名访问已关闭。聊天、画像、历史记录、会话管理、账户操作和模拟交易都必须使用有效登录令牌。
 
 ## 工作流程
 
@@ -25,20 +26,25 @@
 用户认证
    |
    v
-Supervisor（任务规划）
+Supervisor Graph（领域分类与路由）
    |
-   +--> Profile Extraction（投资画像提取）
-   +--> 股票识别与校验
-   +--> Data Fetch（按 Provider 顺序降级取数）
-   +--> Stock Analysis（基本面 + 技术面分析）
-   +--> Market Insight（市场洞察：大盘/情绪/资金面/政策事件）
-   +--> Compliance（合规审查）
+   +--> 单领域：Stock Research（基本面 + 技术面）
+   +--> 单领域：Market Insight（大盘/情绪/资金面/政策事件）
+   +--> 单领域：Product Research（产品解读与适配度）
+   +--> 单领域：Account Portfolio（自有账户与持仓，只读）
+   +--> 复合领域：Plan-and-Execute（跨领域拆分与汇总）
+   +--> 无业务领域：Conversation（FAQ 检索 + 受约束叙述）
+   |
+   v
+Compliance（统一合规出口）
    |
    v
 最终回答
 ```
 
-Supervisor 会根据用户意图选择所需节点，并非每次请求都会执行完整流程。多标的请求（选股推荐、
+Supervisor Graph 会按意图选择领域，并非每次请求都执行完整流程。**账户领域是只读的**：它只调用
+账户与持仓查询，命中"买入/卖出/清仓/充值"时返回固定引导文案，不做任何资金操作——交易必须
+在「商品」「持仓」「账户」页面由用户显式完成。多标的请求（选股推荐、
 股票比较）会按标的并行取数并逐只给出独立结论。`Market Insight` 只回答市场整体问题，不输出
 个股结论或推荐，支持四种模式：大盘概览（主要指数 + 市场宽度 + 成交额 + 区间涨跌）、市场情绪（涨跌家数/活跃度）、
 资金面（两市融资融券日频含日环比 + 北向持股市值季度参考）、政策事件影响（政策新闻筛选 + 定性影响解读）。
@@ -66,8 +72,8 @@ Supervisor 会根据用户意图选择所需节点，并非每次请求都会执
 - Vue 3
 - TypeScript
 - Vite
+- Vue Router
 - Element Plus
-- ECharts
 - Axios
 
 ## 项目结构
@@ -75,15 +81,21 @@ Supervisor 会根据用户意图选择所需节点，并非每次请求都会执
 ```text
 FinanceAgent/
 ├── finance_agent/
-│   ├── agents/              # Supervisor 和各专业 Agent
 │   ├── api/                 # FastAPI 路由、请求模型和 SSE
+│   ├── admin/               # 管理后台服务：商品上下架与用户/持仓总览
 │   ├── contracts/           # 请求、响应和运行审计契约
 │   ├── data/                # 认证、业务存储、PostgreSQL 和数据源
 │   ├── middleware/          # 内容过滤和模型重试
 │   ├── orchestrator/        # 工作流编排、记忆、状态和业务工具
+│   ├── portfolio/           # 模拟交易：费率、净值来源与账户/持仓服务
+│   ├── research/            # 确定性股票研究引擎
+│   ├── product_research/    # 产品研究与适配度评估
+│   ├── faq/                 # 本地中文 FAQ 检索（RAG）
 │   ├── config.py            # 模型及运行环境配置
 │   └── main.py              # FastAPI 应用入口
-├── frontend/                # Vue 3 前端
+├── frontend/                # Vue 3 前端（对话 / 商品 / 持仓 / 账户）
+├── sql/                     # PostgreSQL 建表脚本（001-013，含 006/013 补列迁移）
+├── tools/                   # 端到端校验、管理员引导与种子数据生成脚本
 ├── tests/                   # pytest 测试
 ├── pyproject.toml
 ├── requirements.txt
@@ -184,8 +196,14 @@ POSTGRES_DSN=postgresql://postgres:password@localhost:5432/advisor
 # POSTGRES_PASSWORD=your-password
 # POSTGRES_DB=advisor
 POSTGRES_CONNECT_TIMEOUT=10
+# checkpoint 连接池容量：不同会话可并发执行，每个 superstep 都会写 checkpoint。
+# 上限过小会让并发会话在池上排队，因此显式放开（默认 4/16）。
+POSTGRES_POOL_MIN_SIZE=4
+POSTGRES_POOL_MAX_SIZE=16
+POSTGRES_POOL_TIMEOUT=30
 
-# 管理员 customer_id，多个值用逗号分隔
+# 管理员 customer_id 白名单，多个值用逗号分隔；与库内 is_admin 取并集。
+# 日常授权请用 tools/bootstrap_admin.py，这里留空即可。
 # ADMIN_CUSTOMER_IDS=CUST000001,CUST000002
 
 # Tushare MCP 数据源
@@ -203,6 +221,10 @@ TUSHARE_ENABLED=true
 # QUOTE_CACHE_DIR=/abs/path/to/quotes
 # TTL 设为 0 表示关闭缓存
 QUOTE_CACHE_TTL_SECONDS=3600
+
+# 模拟交易限额：充值单笔上限与单笔申购下限（元）
+PORTFOLIO_MAX_DEPOSIT_AMOUNT=10000000
+PORTFOLIO_MIN_ORDER_AMOUNT=100
 
 # 模型和工作流参数
 INTENT_MODEL_PROVIDER=qwen
@@ -231,12 +253,24 @@ POLICY_NEWS_MAX_DAYS=3
 POLICY_NEWS_MAX_ITEMS=50
 PRODUCT_ANALYSIS_TEMPERATURE=0.2
 
-# 混合 LangGraph 编排预算（单一执行路径：Root Graph）
+# 混合 LangGraph 编排预算（单一执行路径：Supervisor Graph）
+# 这些变量是 RunBudgets 的唯一数值源，经 Pydantic 校验后注入会话 ReAct、
+# 计划任务、重规划、合规改写与图递归上限（上限为全局硬天花板，见 contracts.py）。
 ORCHESTRATION_REACT_STEPS=4
 ORCHESTRATION_PLAN_TASKS=8
 ORCHESTRATION_REPLANS=2
 ORCHESTRATION_COMPLIANCE_REWRITES=1
 ORCHESTRATION_GRAPH_STEPS=32
+# 端到端墙钟上限：步数上限只约束"走了多少步"，管不住"某一步卡多久"。
+# 单轮请求整体上限（API 层）与跨领域计划上限（扇出循环）。
+ORCHESTRATION_TURN_TIMEOUT=180
+ORCHESTRATION_PLAN_DEADLINE=120
+
+# 数据源守门：akshare/baostock 内部多数请求不设 socket 超时，
+# 由 ProviderManager 在调用边界强制超时，并熔断连续失败的源。
+DATA_PROVIDER_TIMEOUT=20
+DATA_PROVIDER_FAILURE_THRESHOLD=3
+DATA_PROVIDER_COOLDOWN=60
 
 # Celery 量化计算：独立 Redis DB + 专用队列
 CELERY_REDIS_DB=1
@@ -262,8 +296,13 @@ FAQ_RELATIVE_SCORE_RATIO=0.85
 - 匿名模式已关闭，`AUTH_REQUIRED` 不需要配置，也不能通过环境变量重新开启匿名访问。
 - PostgreSQL 是唯一的关系型存储；未配置、驱动缺失或无法连接时，服务会显式失败，不会回退到 SQLite。
 - 首次连接时程序会自动创建认证、业务、审计、主题注册表与异步任务表。**pgvector 只在 FAQ 索引/检索时使用**（`sql/009_faq_vector.sql`），不属于启动前置条件；缺少 pgvector 只影响 FAQ，不影响登录、对话与管理接口。
-- 管理员接口（主题注册表、待审核线索、clear-records）依赖 `ADMIN_CUSTOMER_IDS` 白名单；未配置时所有管理员接口返回 403，前端会隐藏对应面板。
-- 混合编排只有一条执行路径：Root Graph（分类 → 单领域 Domain ReAct / 复合 Plan-and-Execute → 统一合规出口）。异常显式返回 `run_status="failed"`，不会静默回退到任何旧路径。
+- **新增列必须配幂等 ALTER。** `sql/001_base_schema.sql` 用的是 `CREATE TABLE IF NOT EXISTS`，对已经建好的库**不会补列**。因此给既有表加列时，不能只改 001 的建表语句，必须在编号更大的脚本里同时加一条 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`（参照 `002`/`005`/`006`/`013`）。漏掉这一步会让旧库缺列——历史上 `products.recommended_holding_period` 就是这样丢的，并连带 `sql/007_product_seed.sql` 无法应用。可用下面的漂移诊断工具把关：
+- 管理员接口（主题注册表、待审核线索、clear-records、商品上下架、用户总览）依赖两条路径，取并集：
+  - 库内角色 `finance.users.is_admin`（正式路径，可用 `tools/bootstrap_admin.py` 授予）；
+  - 环境变量 `ADMIN_CUSTOMER_IDS` 白名单（兼容路径，逗号分隔的 customer_id）。
+
+  两条都不满足时所有管理员接口返回 403，前端会隐藏对应面板。角色查询失败时**失败关闭**（按非管理员处理），不会因数据库故障放行。
+- 混合编排只有一条执行路径：Supervisor Graph（分类 → 单领域 Domain ReAct / 复合 Plan-and-Execute → 统一合规出口）。异常显式返回 `run_status="failed"`，不会静默回退到任何旧路径。
 - 不要将包含真实密钥的 `.env` 文件提交到版本库。
 
 ### 3.1 FAQ 索引、Celery worker 与异步状态
@@ -333,15 +372,166 @@ npm run dev
 
 访问 http://localhost:5173。前端开发服务器会将 `/api` 请求代理到 `http://127.0.0.1:8000`。
 
+### 7. 一键启动（推荐）
+
+上面 4-6 步合计要开三个终端，且顺序不能错：数据库没就绪就起后端会直接 `connection timeout`。
+`scripts/start-all.ps1` 把整套环境按依赖顺序拉起，**每一步都等真正就绪才继续**：
+
+```powershell
+# 直接双击此文件即可（内部会以 Bypass 执行策略调用脚本）
+scripts\start-all.bat
+
+# 或显式调用
+powershell -ExecutionPolicy Bypass -File scripts\start-all.ps1
+```
+
+它按顺序做这些事：
+
+1. 确保 Docker Desktop 已运行，并启动 `postgres-prod` / `redis-prod` 容器；
+2. **用应用自身的配置探测**数据库与 Redis 可连接（不是只看端口通不通，因此能同时验证
+   库名、密码、目标库是否正确）；
+3. 启动后端，并轮询 `/api/health` 直到真正响应；
+4. 启动 Celery worker（量化计算队列）；
+5. 启动前端，并确认它真的能返回页面。
+
+每一步都在独立窗口运行，日志可随时查看。脚本**幂等**：已在运行的服务会被识别并跳过，
+不会重复拉起（Celery 不占固定端口，按进程判重，避免多 worker 争抢同一队列）。
+任一步在超时内未就绪就报错退出，不会谎报成功。
+
+常用参数：
+
+```powershell
+# 只起数据库 + 后端（不跑前端和量化计算）
+.\scripts\start-all.ps1 -SkipCelery -SkipFrontend
+
+# 后端带热重载（改代码即生效）
+.\scripts\start-all.ps1 -Reload
+
+# 指定端口
+.\scripts\start-all.ps1 -BackendPort 8000 -FrontendPort 5173
+```
+
+停止：
+
+```powershell
+# 只停应用进程，保留数据库/Redis 容器
+powershell -ExecutionPolicy Bypass -File scripts\stop-all.ps1
+
+# 连容器一起停
+.\scripts\stop-all.ps1 -IncludeDocker
+```
+
+停止脚本按「本项目进程及其后代」精确终止，而不是按端口杀进程，因此不会误伤同机的其他
+Python/Node 项目。它会额外处理 `uvicorn --reload` 的派生工作进程——该进程命令行不含项目标识，
+且监听 socket 由已被终止的父进程创建（Windows 会把持有者记成那个已死的 PID），是"停了但端口
+还占着"的常见根源。结束后会复核端口是否真正释放并如实报告。
+
 ## 使用流程
 
-1. 打开前端页面并注册账号。
+1. 打开前端页面并注册账号（**后台管理员**无需注册，本地开发用内置账号
+   `admin` / `admin123` 直接登录，详见「管理员账号」一节）。
 2. 使用注册的用户名和密码登录。
 3. 登录成功后，前端会在 API 请求中自动携带 `Authorization: Bearer <token>`。
 4. 登录用户可以创建会话、发送投顾问题、查看画像和历史记录。
-5. 注销账户会删除认证记录，以及该用户的会话、画像和相关业务数据。
+5. 注销账户会删除认证记录，以及该用户的会话、画像、模拟交易和其他业务数据。
 
 未登录或令牌无效的业务请求返回 HTTP `401`。访问其他用户的资源返回 HTTP `403`。`customer_id` 仅用于标识当前登录用户，不能通过请求体或 `X-Customer-ID` 请求头伪造身份。
+
+### 模拟交易流程
+
+前端顶部导航分四个页面，登录后即可切换：
+
+| 页面 | 路径 | 用途 |
+| --- | --- | --- |
+| 投顾对话 | `/chat` | 原有对话、画像与历史记录 |
+| 商品 | `/market` | 商品货架，按金额或份额申购 |
+| 持仓 | `/positions` | 持仓明细与盈亏，部分/全部卖出，一键清仓 |
+| 账户 | `/account` | 账户数据面板、充值、资金流水与成交记录 |
+
+典型路径：先在「账户」充值虚拟资金 → 到「商品」申购 → 在「持仓」查看盈亏并卖出或清仓 →
+回到「账户」核对总资产与盈亏。也可以在「投顾对话」里直接问"我的持仓怎么样""账户里还有多少钱"，
+由账户领域只读地给出同一份口径的数据。
+
+与真实交易的区别（均为有意设计）：
+
+- **无初始资金**：账户首次访问自动开立但余额为 0，必须先充值；单笔充值有上限。
+- **按最新净值即时成交**：没有撮合、没有 T+N 确认，买入与赎回都立即完成。
+- **费率未披露时不臆造**：产品费率缺失时照常成交，但订单会带
+  `fee_unavailable:*` 限制项并在界面提示，不会静默按某个猜测值计算。
+- **无净值不可交易**：取不到最新净值的商品仍会展示，但标记为不可申购/不可赎回。
+- **仓容口径不隐藏缺口**：任一持仓缺少净值时，`market_value_complete=false` 且列出
+  `pricing_issues`，界面显式提示市值口径不完整，而不是把市值悄悄算小。
+- **对话不代客操作**：账户领域是只读的，命中"买入/卖出/清仓/充值"只返回引导文案。
+  下单与充值必须由用户在页面显式完成。
+
+### 管理员账号
+
+本地开发环境预置一个管理员账号，用于登录后台（`/admin`）：
+
+| 用户名 | 密码 | customer_id |
+| --- | --- | --- |
+| `admin` | `admin123` | `CUST000088` |
+
+> ⚠️ **仅限本地开发。** 这是开发固定口令，明文落在版本库里，**上线前必须改掉**：
+> 用下面的脚本重置，或改由 `.env` / 部署密钥注入 `FINANCE_ADMIN_PASSWORD`。
+> 生产环境沿用该口令等于把后台开放给任何人。
+
+管理员不是固定账号，而是**角色**：由 `finance.users.is_admin` 决定，
+并与 `ADMIN_CUSTOMER_IDS` 白名单取并集。授予/回收角色用引导脚本（幂等）：
+
+```bash
+# 创建（或提升）admin 并重置其密码；默认把其他用户全部降为普通用户
+python tools/bootstrap_admin.py --username admin --password '你的密码'
+# 也可用环境变量传密码，避免出现在 shell 历史里
+FINANCE_ADMIN_PASSWORD='你的密码' python tools/bootstrap_admin.py --username admin
+# 只查看当前角色分布，不写入
+python tools/bootstrap_admin.py --dry-run
+```
+
+密码不回显、明文不落库（PBKDF2-SHA256 + 随机盐），因此**无法从库或仓库反查**——
+忘记口令时只能按上面的命令重置。
+
+脚本会提示检查 `.env`：白名单与库内角色是并集，把已降级的用户留在
+`ADMIN_CUSTOMER_IDS` 里会让他继续拥有管理员权限，因此日常授权请只用脚本、白名单留空。
+
+管理员与普通用户看到的是**两套互不重叠的界面**：管理员登录后直接进入独立的后台页面
+（`/admin`），不会渲染投顾对话、商品、持仓、账户等用户侧入口；普通用户也进不去 `/admin`
+（前端跳回 `/chat`，后端接口另返回 403 兜底）。角色在本地登录态与服务端不一致时（如刚被
+授予或撤销），前端会在身份刷新后重新校正路由，不会渲染出对方的界面。
+
+未登录访问后台地址时**守卫不做重定向**：登录页由 `App.vue` 依据登录态渲染，此时后台
+`router-view` 根本不挂载，因此不会泄漏任何受保护内容；登录后会被直接送回后台页面。
+改为重定向到 `/chat` 反而会触发 Vue Router 的"重定向到自身"判定并中止整次导航，
+把地址栏留在 `/admin/*`。
+
+后台按功能分区成独立页面，通过顶部「后台导航」切换，每页只展示一个功能模块：
+
+| 页面 | 路径 | 用途 |
+| --- | --- | --- |
+| 用户与持仓 | `/admin/users` | 全部用户的资金、持仓数量与盈亏；点开可看某人的持仓明细 |
+| 商品管理 | `/admin/products` | 发行/编辑商品；下架或重新上架 |
+| 线索审核 | `/admin/leads` | 审核外部数据写入的主题线索 |
+| 主题注册表 | `/admin/themes` | 主题名称/别名与代表股配置 |
+
+`/admin` 重定向到 `/admin/users`。每个子路由都独立标注管理员守卫，不依赖父记录
+`meta` 的隐式合并 —— 守卫漏判会让普通用户直接看到后台，代价太高，不值得省这几行。
+
+用户总览里的账户数字与用户自己在「账户」页看到的同源（都由模拟交易服务计算），
+管理端不另立口径。
+
+下架是**软下架**（`products.is_active=false`），不是删除：
+
+- 商品与历史成交记录都保留。`finance.orders.product_code` 有外键指向
+  `finance.products(code)`，删除有成交记录的商品会直接外键失败；即便删得掉，
+  历史成交与持仓也会失去可解释的标的。
+- 下架后该商品从用户货架消失、不再出现在名称候选里，申购被拒（`product_offline`）。
+- **既有持仓仍然可以赎回** —— 只挡买入，否则用户会被困在无法退出的持仓里。
+
+主题注册表是**库内记录与内置主题的并集**：库内登记的记录优先（可覆盖内置主题的别名与
+代表股，也可显式停用），库内没有的内置主题照常保留。两者按 `theme_id` 合并，因此
+在后台登记新主题**不会**停用内置主题 —— 这一点很关键：请求解析器要扫描 `list_themes`
+才能把"推荐人工智能主题股票"识别为主题筛选，若库内一有记录就丢掉内置主题，内置主题会
+被静默停用并退化成候选股比对。
 
 ## API 概览
 
@@ -362,15 +552,35 @@ npm run dev
 | `DELETE` | `/api/conversations/{customer_id}/{conversation_id}` | 删除会话 | 是，仅限本人 |
 | `POST` | `/api/reset/{customer_id}` | 重置用户会话 | 是，仅限本人 |
 | `POST` | `/api/admin/clear-records` | 清除记录 | 是，全部清除仅管理员 |
+| `GET` | `/api/admin/users` | 全部用户及账户概览（资金、持仓、盈亏） | 是，仅管理员 |
+| `GET` | `/api/admin/users/{customer_id}/portfolio` | 指定用户的账户与持仓明细 | 是，仅管理员 |
+| `GET` | `/api/admin/products` | 完整商品列表（含已下架） | 是，仅管理员 |
+| `POST` | `/api/admin/products` | 发行/编辑商品 | 是，仅管理员 |
+| `POST` | `/api/admin/products/{code}/offline` | 下架商品（软下架，不可申购） | 是，仅管理员 |
+| `POST` | `/api/admin/products/{code}/publish` | 重新上架商品 | 是，仅管理员 |
 | `GET` | `/api/admin/themes/{theme_id}/leads` | 查看主题待核验线索 | 是，仅管理员 |
 | `POST` | `/api/admin/theme-leads/{lead_id}/review` | 审核主题线索 | 是，仅管理员 |
 | `GET` | `/api/admin/themes` | 查看主题注册表 | 是，仅管理员 |
 | `POST` | `/api/admin/themes` | 新增/更新主题（名称、别名、代表股） | 是，仅管理员 |
 | `DELETE` | `/api/admin/themes/{theme_id}` | 停用主题（软删） | 是，仅管理员 |
 | `DELETE` | `/api/account` | 删除当前账户 | 是 |
+| `GET` | `/api/portfolio/products` | 商品货架（净值、风险等级、费率） | 是 |
+| `GET` | `/api/portfolio/products/{code}` | 单个商品详情 | 是 |
+| `GET` | `/api/portfolio/account` | 账户数据面板 | 是 |
+| `GET` | `/api/portfolio/positions` | 持仓明细（含浮动盈亏） | 是 |
+| `POST` | `/api/portfolio/deposit` | 充值虚拟资金 | 是 |
+| `POST` | `/api/portfolio/orders` | 申购 / 赎回 | 是 |
+| `POST` | `/api/portfolio/liquidate` | 一键清仓 | 是 |
+| `GET` | `/api/portfolio/orders` | 成交记录 | 是 |
+| `GET` | `/api/portfolio/transactions` | 资金流水 | 是 |
 | `GET` | `/api/health` | 服务健康检查 | 否 |
 
 完整请求和响应结构请以 Swagger 文档为准。
+
+模拟交易接口的身份**只从 Bearer Token 解析**，路径与请求体都不带 `customer_id`，
+因此不存在通过参数读取他人账户的可能。所有写接口（充值、下单、清仓）都接受可选的
+`idempotency_key`：同一键重复提交只入账一次，用于抵御网络重试造成的重复扣款。
+资金操作在单个数据库事务内完成并对账户行加锁，避免并发下单超支。
 
 ### 注册和登录示例
 
@@ -443,6 +653,39 @@ python tools/generate_product_seed.py \
 生成器只接受 `products` / `holdings` / `performance` 三类记录，按外键顺序输出
 `INSERT ... ON CONFLICT`（明细表先按产品清空再写入，因此可重复执行）；所有值经类型
 白名单与单引号加倍转义。`tools/data/products.sample.json` 是可直接使用的样例。
+
+模拟交易的端到端自检（需要可用的 PostgreSQL；用一次性用户与商品跑完
+充值 → 申购 → 持仓 → 部分赎回 → 清仓 → 注销级联，结束后自动清理）：
+
+```bash
+python tools/verify_portfolio_live.py
+```
+
+管理员账号的创建与角色授予（幂等；详见「管理员账号」一节）。
+本地开发内置 `admin` / `admin123`，如需更换口令：
+
+```bash
+python tools/bootstrap_admin.py --dry-run                 # 查看当前角色分布
+python tools/bootstrap_admin.py --username admin --password '你的密码'
+```
+
+模拟交易的建表脚本为 `sql/011_portfolio.sql`（账户、资金流水、委托与持仓）。
+它已接入 `_ensure_schema` / `setup_schema`，因此应用启动或首次访问业务存储时会自动
+幂等应用，无需手工执行；需要单独建表时也可 `psql -f sql/011_portfolio.sql`。
+
+管理后台的角色与上下架列为 `sql/013_admin_console.sql`（`users.is_admin`、
+`products.is_active`）。同样接入 `_ensure_schema`，启动或首次访问认证/业务存储时自动
+幂等应用；需要单独执行时 `psql -f sql/013_admin_console.sql`。
+
+库表漂移诊断（对比 `sql/` 声明的期望结构与线上实际结构，可用于 CI 把关）：
+
+```bash
+python tools/diagnose_schema_drift.py
+```
+
+它会把建表脚本应用到一个一次性探针库作为权威期望结构，再与线上库逐表逐列比对，
+结束后自动删除探针库；线上库只执行只读查询。发现缺失表/列或类型不一致时退出码为 1，
+`--keep-probe` 可保留探针库以便人工检查。
 
 首次建立或补充主题候选池时，配置 `THEME_DISCOVERY_ENDPOINT`、
 `THEME_DISCOVERY_SOURCE_NAME`、`THEME_DISCOVERY_SOURCE_CLASS` 和可选的

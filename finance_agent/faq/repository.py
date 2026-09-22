@@ -43,6 +43,21 @@ class AsyncRunRepository(Protocol):
 
     def get_job_ref(self, job_id: str, customer_id: str) -> AsyncJobRef | None: ...
 
+    def save_pending_outcome(
+        self,
+        *,
+        customer_id: str,
+        thread_id: str,
+        run_id: str,
+        conversation_id: str,
+        job_id: str,
+        outcome: dict[str, Any],
+    ) -> None: ...
+
+    def get_pending_outcome(self, job_id: str, customer_id: str) -> dict[str, Any] | None: ...
+
+    def delete_pending_outcome(self, job_id: str) -> None: ...
+
 
 class _PostgresRepository:
     def __init__(self, connection_factory) -> None:
@@ -87,6 +102,7 @@ class PostgresFaqRepository(_PostgresRepository):
             return
         from finance_agent.data.postgres_schema import (
             FAQ_BIGRAM_SCHEMA_SQL,
+            FAQ_QA_PAIR_SCHEMA_SQL,
             FAQ_VECTOR_SCHEMA_SQL,
         )
 
@@ -96,6 +112,8 @@ class PostgresFaqRepository(_PostgresRepository):
                 cursor.execute(FAQ_VECTOR_SCHEMA_SQL)
                 # 中文关键词检索需要的二元组函数、生成列与索引（见 sql/010）。
                 cursor.execute(FAQ_BIGRAM_SCHEMA_SQL)
+                # 在二元组函数创建后，为已有数据补齐显式问答字段和加权索引。
+                cursor.execute(FAQ_QA_PAIR_SCHEMA_SQL)
             except Exception as exc:
                 message = str(exc)
                 if "vector" in message and (
@@ -153,13 +171,16 @@ class PostgresFaqRepository(_PostgresRepository):
                         raise ValueError("FAQ embedding must contain 512 dimensions")
                     cursor.execute(
                         """INSERT INTO finance.faq_chunks
-                           (chunk_id, index_version, faq_id, source_path, chunk_ordinal, content,
-                            content_hash, embedding, is_active)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s::vector, false)
+                           (chunk_id, index_version, faq_id, source_path, chunk_ordinal,
+                            question, answer, embedding_text, content, content_hash, embedding, is_active)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector, false)
                            ON CONFLICT (index_version, faq_id, chunk_ordinal) DO UPDATE SET
-                             source_path = EXCLUDED.source_path,
-                             content = EXCLUDED.content,
-                             content_hash = EXCLUDED.content_hash,
+                              source_path = EXCLUDED.source_path,
+                              question = EXCLUDED.question,
+                              answer = EXCLUDED.answer,
+                              embedding_text = EXCLUDED.embedding_text,
+                              content = EXCLUDED.content,
+                              content_hash = EXCLUDED.content_hash,
                              embedding = EXCLUDED.embedding,
                              is_active = false""",
                         (
@@ -168,6 +189,9 @@ class PostgresFaqRepository(_PostgresRepository):
                             chunk["faq_id"],
                             chunk["source_path"],
                             chunk["chunk_ordinal"],
+                            chunk["question"],
+                            chunk["answer"],
+                            chunk["embedding_text"],
                             chunk["content"],
                             chunk["content_hash"],
                             json.dumps(embedding),
@@ -218,8 +242,8 @@ class PostgresFaqRepository(_PostgresRepository):
             try:
                 cursor.execute(
                     """WITH vector_candidates AS (
-                           SELECT chunk_id, faq_id, index_version, source_path, content,
-                                  embedding <=> %s::vector AS vector_distance,
+                           SELECT chunk_id, faq_id, index_version, source_path, question, answer,
+                                   embedding <=> %s::vector AS vector_distance,
                                   NULL::double precision AS keyword_score,
                                   0 AS channel
                            FROM finance.faq_chunks
@@ -227,18 +251,18 @@ class PostgresFaqRepository(_PostgresRepository):
                            ORDER BY embedding <=> %s::vector
                            LIMIT %s
                        ), keyword_candidates AS (
-                           SELECT chunk_id, faq_id, index_version, source_path, content,
-                                  embedding <=> %s::vector AS vector_distance,
-                                  ts_rank_cd(search_bigrams,
-                                             websearch_to_tsquery('simple', finance.faq_bigrams(%s))) AS keyword_score,
+                           SELECT chunk_id, faq_id, index_version, source_path, question, answer,
+                                   embedding <=> %s::vector AS vector_distance,
+                                   ts_rank_cd(search_qa_bigrams,
+                                              websearch_to_tsquery('simple', finance.faq_bigrams(%s))) AS keyword_score,
                                   1 AS channel
                            FROM finance.faq_chunks
                            WHERE is_active
-                             AND search_bigrams @@ websearch_to_tsquery('simple', finance.faq_bigrams(%s))
+                              AND search_qa_bigrams @@ websearch_to_tsquery('simple', finance.faq_bigrams(%s))
                            ORDER BY keyword_score DESC
                            LIMIT %s
                        )
-                       SELECT chunk_id, faq_id, index_version, source_path, content,
+                       SELECT chunk_id, faq_id, index_version, source_path, question, answer,
                               vector_distance, keyword_score, channel
                        FROM (
                            SELECT * FROM vector_candidates
@@ -334,3 +358,166 @@ class PostgresAsyncRunRepository(_PostgresRepository):
             AsyncJobRef(job_id=row[0], kind=row[1], status=row[2], task_id=row[3])
             for row in rows
         ]
+
+    def save_pending_outcome(
+        self,
+        *,
+        customer_id: str,
+        thread_id: str,
+        run_id: str,
+        conversation_id: str,
+        job_id: str,
+        outcome: dict[str, Any],
+        code: str = "",
+    ) -> None:
+        """落库一条待完成的领域结论快照（按 job_id 幂等 upsert）。
+
+        以 ``job_id`` 为主键：一次领域执行提交的每个量化任务各一行，共享同一份
+        结论快照；重复写入（同 job 重试）只更新，不产生多行。``code`` 记录该
+        job 对应的标的，恢复时据此把指标合并回 ``technical_analysis[code]``。
+        """
+        if not job_id:
+            raise ValueError("pending outcome requires a job_id")
+        task_id = str(outcome.get("task_id") or "")
+        if not task_id:
+            raise ValueError("pending outcome requires a task_id")
+        self._ensure_schema()
+        with self._transaction() as connection:
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    """INSERT INTO finance.pending_outcomes
+                       (job_id, task_id, code, customer_id, thread_id, run_id, conversation_id, outcome)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                       ON CONFLICT (job_id) DO UPDATE SET
+                         task_id = EXCLUDED.task_id,
+                         code = EXCLUDED.code,
+                         customer_id = EXCLUDED.customer_id,
+                         thread_id = EXCLUDED.thread_id,
+                         run_id = EXCLUDED.run_id,
+                         conversation_id = EXCLUDED.conversation_id,
+                         outcome = EXCLUDED.outcome,
+                         updated_at = now()""",
+                    (
+                        job_id, task_id, code, customer_id, thread_id,
+                        run_id, conversation_id, json.dumps(outcome, ensure_ascii=False),
+                    ),
+                )
+            finally:
+                cursor.close()
+
+    def get_pending_outcome(self, job_id: str, customer_id: str) -> dict[str, Any] | None:
+        """取回待完成结论快照；按 customer_id 隔离，非本人任务返回 None。"""
+        return self._load_pending_outcome(job_id, customer_id=customer_id)
+
+    def get_pending_outcome_by_job(self, job_id: str) -> dict[str, Any] | None:
+        """按 job_id 取快照（不校验归属）；仅供编排进程内部恢复使用。"""
+        return self._load_pending_outcome(job_id, customer_id="")
+
+    def _load_pending_outcome(
+        self, job_id: str, *, customer_id: str
+    ) -> dict[str, Any] | None:
+        self._ensure_schema()
+        with self._transaction() as connection:
+            cursor = connection.cursor()
+            try:
+                if customer_id:
+                    cursor.execute(
+                        """SELECT outcome, task_id, code, conversation_id, thread_id, run_id
+                           FROM finance.pending_outcomes
+                           WHERE job_id = %s AND customer_id = %s""",
+                        (job_id, customer_id),
+                    )
+                else:
+                    cursor.execute(
+                        """SELECT outcome, task_id, code, conversation_id, thread_id, run_id
+                           FROM finance.pending_outcomes
+                           WHERE job_id = %s""",
+                        (job_id,),
+                    )
+                row = cursor.fetchone()
+            finally:
+                cursor.close()
+        if row is None:
+            return None
+        outcome = row[0]
+        if isinstance(outcome, str):
+            outcome = json.loads(outcome)
+        return {
+            "outcome": outcome,
+            "task_id": row[1],
+            "code": row[2],
+            "conversation_id": row[3],
+            "thread_id": row[4],
+            "run_id": row[5],
+        }
+
+    def delete_pending_outcome(self, job_id: str) -> None:
+        """删除该 job 的快照行（该 job 已收尾）。"""
+        self._ensure_schema()
+        with self._transaction() as connection:
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    "DELETE FROM finance.pending_outcomes WHERE job_id = %s", (job_id,)
+                )
+            finally:
+                cursor.close()
+
+    def list_pending_outcomes_for_task(self, task_id: str) -> list[dict[str, Any]]:
+        """列出同一领域任务下仍待完成的 job 行（判定该结论是否可收尾）。"""
+        self._ensure_schema()
+        with self._transaction() as connection:
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    """SELECT job_id, code, outcome, conversation_id
+                       FROM finance.pending_outcomes
+                       WHERE task_id = %s
+                       ORDER BY created_at""",
+                    (task_id,),
+                )
+                rows = cursor.fetchall()
+            finally:
+                cursor.close()
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            outcome = row[2]
+            if isinstance(outcome, str):
+                outcome = json.loads(outcome)
+            results.append(
+                {
+                    "job_id": row[0], "code": row[1],
+                    "outcome": outcome, "conversation_id": row[3],
+                }
+            )
+        return results
+
+    def list_pending_outcomes(self, thread_id: str) -> list[dict[str, Any]]:
+        """列出某线程下全部待完成结论快照（供批量恢复/观测）。"""
+        self._ensure_schema()
+        with self._transaction() as connection:
+            cursor = connection.cursor()
+            try:
+                cursor.execute(
+                    """SELECT job_id, task_id, outcome, conversation_id
+                       FROM finance.pending_outcomes
+                       WHERE thread_id = %s
+                       ORDER BY created_at""",
+                    (thread_id,),
+                )
+                rows = cursor.fetchall()
+            finally:
+                cursor.close()
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            outcome = row[2]
+            if isinstance(outcome, str):
+                outcome = json.loads(outcome)
+            results.append(
+                {
+                    "job_id": row[0], "task_id": row[1],
+                    "outcome": outcome, "conversation_id": row[3],
+                }
+            )
+        return results

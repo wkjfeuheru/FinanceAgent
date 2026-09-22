@@ -276,12 +276,18 @@ def test_stock_domain_reports_theme_coverage_shortage():
 
 def test_stock_domain_returns_clarification_when_unknown_theme_has_no_candidates():
     """未注册主题改用候选搜索；无候选时澄清，且不泄露内部异常。"""
+    from finance_agent.research.theme_registry import InMemoryThemeRegistry
+
     class EmptySearch:
         def invoke(self, _payload):
             return []
 
+    # 显式注入空注册表：某主题是否已注册取决于运行时库内数据（管理后台可登记
+    # "新能源"），用生产注册表会让本用例的结果随库内容漂移。本用例要走的正是
+    # "主题未注册"这条分支，因此必须把注册表钉死。
     deps = StockDeps(
         pipeline=_pipeline(), injected_pipeline=True,
+        theme_registry=InMemoryThemeRegistry(),
         theme_screener=ThemeScreener(_theme_repo(5), ThemeGateway()),
         candidate_search=EmptySearch(),
     )

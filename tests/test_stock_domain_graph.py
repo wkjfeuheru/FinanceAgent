@@ -152,3 +152,83 @@ def test_resolve_stock_request_ignores_unrelated_search_hits(monkeypatch):
 
     assert req is None
     assert err is not None
+
+
+def _resolve_with_parser_error(monkeypatch, stock_domain, error: Exception):
+    """构造仅解析器抛指定异常的解析场景，返回 (req, err)。"""
+
+    def _raise(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(stock_domain, "parse_analysis_request", _raise)
+    return stock_domain.resolve_stock_request(
+        StockDeps(),
+        {"user_message": "分析贵州茅台", "current_task_intent": "stock_analysis",
+         "intent_slots": {}, "user_profile": {}, "resolved_stocks": []},
+        "分析贵州茅台",
+    )
+
+
+def test_single_stock_shape_error_triggers_name_resolution(monkeypatch):
+    """抛 SingleStockShapeError 时按异常类型判定，走名称→代码补救分支。"""
+    from finance_agent.orchestrator.domains import stock as stock_domain
+    from finance_agent.research.contracts import SingleStockShapeError
+
+    monkeypatch.setattr(
+        stock_domain, "resolve_named_stock_code", lambda deps, message: ["600519"],
+    )
+
+    req, err = _resolve_with_parser_error(
+        monkeypatch, stock_domain, SingleStockShapeError("单股分析必须且只能包含一只股票"),
+    )
+
+    assert err is None
+    assert req is not None
+    assert req.stock_codes == ["600519"]
+
+
+def test_plain_value_error_is_not_mistaken_for_single_stock_shape(monkeypatch):
+    """普通 ValueError 即使文案与单股形态错误完全一致，也不得被误判并触发补救。"""
+    from finance_agent.orchestrator.domains import stock as stock_domain
+
+    called: list[str] = []
+
+    def _spy_resolve_named_stock_code(deps, message):
+        called.append(message)
+        return ["600519"]
+
+    monkeypatch.setattr(stock_domain, "resolve_named_stock_code", _spy_resolve_named_stock_code)
+
+    # 文案故意与 SingleStockShapeError 相同，唯一区别是异常类型。
+    req, err = _resolve_with_parser_error(
+        monkeypatch, stock_domain, ValueError("单股分析必须且只能包含一只股票"),
+    )
+
+    assert req is None
+    assert err is not None
+    assert called == []
+
+
+def _fact(fact_id: str):
+    from datetime import datetime, timezone
+
+    from finance_agent.contracts import FactSnapshot
+
+    return FactSnapshot(
+        fact_id=fact_id, domain="stock", source="test",
+        fetched_at=datetime.now(timezone.utc),
+    )
+
+
+def test_merge_facts_dedupes_by_fact_id_and_keeps_order():
+    """统一事实合并：重复 fact_id 不重复追加、新事实追加在后、既有顺序保持。"""
+    from finance_agent.orchestrator.domains.base import merge_facts
+
+    existing = [_fact("b"), _fact("a")]
+    merged = merge_facts(existing, [_fact("a"), _fact("c"), _fact("c"), _fact("b")])
+
+    assert [fact.fact_id for fact in merged] == ["b", "a", "c"]
+    # 既有项本身按原顺序保留，新项追加在尾部
+    assert merged[:2] == existing
+    # 空新增不改变既有集合
+    assert [fact.fact_id for fact in merge_facts(existing, [])] == ["b", "a"]

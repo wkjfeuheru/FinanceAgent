@@ -13,15 +13,26 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from finance_agent.orchestrator.contracts import BusinessDomain, DomainTaskContext
+from finance_agent.orchestrator.contracts import (
+    DEGRADED_INTENT_STATUSES,
+    AsyncJobRef,
+    BusinessDomain,
+    DomainTaskContext,
+)
 from finance_agent.orchestrator.domains.base import (
     DomainOperation,
     OperationResult,
     build_domain_graph,
     context_text,
     keyword_mode,
+    merge_facts,
 )
-from finance_agent.research.contracts import Action, AnalysisKind, AnalysisRequest
+from finance_agent.research.contracts import (
+    Action,
+    AnalysisKind,
+    AnalysisRequest,
+    SingleStockShapeError,
+)
 from finance_agent.research.legacy_adapter import project_legacy_many
 from finance_agent.research.pipeline import ResearchPipeline
 from finance_agent.research.request_parser import UnknownThemeError, parse_analysis_request
@@ -223,6 +234,15 @@ def resolve_named_stock_code(deps: StockDeps, message: str) -> list[str]:
     return named[:5]
 
 
+def _unrecognizable_request() -> dict[str, Any]:
+    """统一的"请求无法识别"降级响应；不泄露内部校验细节。"""
+    return {
+        "content": "股票研究暂不可用：请求无法识别，请明确提供股票名称或6位代码。",
+        "status": "degraded",
+        "clarification": None,
+    }
+
+
 def resolve_stock_request(
     deps: StockDeps, state: dict[str, Any], message: str,
 ) -> tuple[AnalysisRequest | None, dict[str, Any] | None]:
@@ -251,7 +271,9 @@ def resolve_stock_request(
         # 请求形态不合法：单股请求必须恰好一只代码。按意图决定补救方式：
         # - stock_recommendation：走候选发现（代表股优先，其次关键词搜索）；
         # - stock_analysis：消息里只有股票名称（无 6 位代码）时，用名称→代码补齐。
-        single_stock_shape_error = "单股分析必须且只能包含一只股票" in str(exc)
+        # 判定按**异常类型**而非报错文案：文案优化不应让补救逻辑静默失效，
+        # 其它 ValueError（如比较请求股票不足）也不会被误判为单股形态错误。
+        single_stock_shape_error = isinstance(exc, SingleStockShapeError)
         intent = str(state.get("current_task_intent", ""))
         if single_stock_shape_error and intent == "stock_recommendation":
             codes = resolve_candidate_codes(deps, message)
@@ -273,11 +295,7 @@ def resolve_stock_request(
             }
         logger.debug("股票请求解析失败 intent=%s error=%s",
                      state.get("current_task_intent"), exc)
-        return None, {
-            "content": "股票研究暂不可用：请求无法识别，请明确提供股票名称或6位代码。",
-            "status": "degraded",
-            "clarification": None,
-        }
+        return None, _unrecognizable_request()
     if request.kind.value == "theme_screening":
         return request, None
     if not request.stock_codes:
@@ -347,17 +365,36 @@ def _technical_series(stock_data: Any, code: str) -> tuple[list[float], list[flo
 
 
 def compute_technical_via_gateway(
-    deps: StockDeps, stock_data: Any, codes: Any, analysis_type: str = "both",
-) -> tuple[dict[str, Any], bool]:
+    deps: StockDeps,
+    stock_data: Any,
+    codes: Any,
+    analysis_type: str = "both",
+    *,
+    context: DomainTaskContext | None = None,
+) -> tuple[dict[str, Any], bool, list[tuple[str, AsyncJobRef]]]:
     """经 QuantGateway 卸载技术指标计算。
 
-    返回 ``(indicators, pending)``：``pending=True`` 表示任务仍在预算内未完成，
-    调用方应写入 ``AsyncJobRef`` 并中断图（``awaiting_quant``），不得伪造结果。
+    返回 ``(indicators, pending, pending_jobs)``：``pending=True`` 表示任务仍在
+    预算内未完成，调用方应把 ``pending_jobs``（``(标的代码, AsyncJobRef)`` 对，
+    代码用于恢复时把指标合并回 ``technical_analysis[code]``）写入结论并中断图
+    （``awaiting_quant``），不得伪造结果。
+
+    ``context`` 提供 customer_id/thread_id/run_id/领域 task_id，使 Celery 网关
+    能把 job 引用落库（幂等、可授权查询），状态端点随后可据此恢复原会话。
     """
     if analysis_type == "fundamental" or not isinstance(stock_data, dict):
-        return {}, False
+        return {}, False, []
     gateway = deps.quant_gateway
     indicators: dict[str, Any] = {}
+    pending_jobs: list[tuple[str, AsyncJobRef]] = []
+    submit_kwargs: dict[str, str] = {}
+    if context is not None:
+        submit_kwargs = {
+            "customer_id": str(context.customer_id),
+            "thread_id": str(context.thread_id),
+            "run_id": str(context.run_id),
+            "task_id": str(context.task.task_id),
+        }
     for code in codes or []:
         series = _technical_series(stock_data, code)
         if series is None:
@@ -367,13 +404,16 @@ def compute_technical_via_gateway(
             "technical_indicators",
             {"high": high, "low": low, "close": close},
             f"technical_indicators:{code}",
+            **submit_kwargs,
         )
+        pending_jobs.append((str(code), ref))
         if _wait_for_job(gateway, ref.job_id, deps.quant_wait_seconds):
             result = gateway.result(ref.job_id) or {}
             indicators[code] = result.get("indicators", {})
+            pending_jobs.pop()
         else:
-            return indicators, True
-    return indicators, False
+            return indicators, True, pending_jobs
+    return indicators, False, pending_jobs
 
 
 def _wait_for_job(gateway: Any, job_id: str, budget_seconds: float) -> bool:
@@ -519,9 +559,7 @@ def run_resolved(deps: StockDeps, state: dict[str, Any], request: AnalysisReques
     state["analysis_results"] = projected["analysis_results"]
     state["research_request"] = request.model_dump(mode="json")
     if facts:
-        existing = state.get("facts", []) or []
-        existing_ids = {fact.fact_id for fact in existing}
-        state["facts"] = existing + [fact for fact in facts if fact.fact_id not in existing_ids]
+        state["facts"] = merge_facts(state.get("facts", []) or [], facts)
     content = _content(results)
     state["agent_response"] = content
     write_intent_result(state, content, _status(results))
@@ -570,11 +608,7 @@ def _run_theme_screening(
         item.model_dump(mode="json") for item in screening.analysis_results
     ]
     if screening.facts:
-        existing = state.get("facts", []) or []
-        existing_ids = {fact.fact_id for fact in existing}
-        state["facts"] = existing + [
-            fact for fact in screening.facts if fact.fact_id not in existing_ids
-        ]
+        state["facts"] = merge_facts(state.get("facts", []) or [], screening.facts)
     content = (
         "主题候选研究已完成。"
         if screening.status == "complete"
@@ -672,7 +706,7 @@ def _stock_research(deps: StockDeps, context: DomainTaskContext) -> OperationRes
     intent_results = result_state.get("intent_results", {}) or {}
     status = "success"
     for payload in intent_results.values():
-        if isinstance(payload, dict) and payload.get("status") in {"degraded", "failed"}:
+        if isinstance(payload, dict) and payload.get("status") in DEGRADED_INTENT_STATUSES:
             status = "partial"
             break
     limitations = [str(result_state.get("clarification_question"))] if result_state.get("clarification_question") else []
@@ -681,8 +715,8 @@ def _stock_research(deps: StockDeps, context: DomainTaskContext) -> OperationRes
     if deps.quant_gateway is not None:
         codes = [code for code in (result_state.get("stock_analysis", {}) or {})]
         try:
-            indicators, pending = compute_technical_via_gateway(
-                deps, structured["stock_data"], codes,
+            indicators, pending, pending_jobs = compute_technical_via_gateway(
+                deps, structured["stock_data"], codes, context=context,
             )
         except Exception:  # noqa: BLE001 - 网关异常不阻断研究结论
             logger.warning("quant gateway 技术指标失败", exc_info=True)
@@ -690,11 +724,21 @@ def _stock_research(deps: StockDeps, context: DomainTaskContext) -> OperationRes
             if indicators:
                 structured["technical_analysis"] = indicators
             if pending:
+                # 把实际提交的 AsyncJobRef 写进结论：上层据此写入 pending_jobs、
+                # 端点按真实 Celery job_id 授权查询并恢复原会话。codes 记录每个
+                # job 对应的标的，恢复时把指标合并回 technical_analysis[code]。
+                structured["pending_jobs"] = [
+                    ref.model_dump(mode="json") for _, ref in pending_jobs
+                ]
+                structured["pending_job_codes"] = {
+                    ref.job_id: code for code, ref in pending_jobs
+                }
                 return OperationResult(
                     structured_data=structured,
                     summary=summary,
                     status="processing",
                     limitations=[*limitations, "awaiting_quant"],
+                    pending_jobs=[ref for _, ref in pending_jobs],
                 )
 
     return OperationResult(structured_data=structured, summary=summary, status=status, limitations=limitations)
@@ -712,13 +756,18 @@ def default_stock_operations(deps: StockDeps) -> list[DomainOperation]:
 
 
 def build_stock_domain_graph(deps: StockDeps | None = None, *, operations=None):
-    """编译股票领域子图；默认白名单为解析/取数/研究/主题筛选。"""
-    deps = deps or default_stock_deps()
+    """编译股票领域子图；白名单来自 operation 注册表（唯一事实源）。
+
+    ``operations=[]`` 是合法输入（白名单为空），用 ``is None`` 判缺省。
+    """
+    from finance_agent.orchestrator.operations import default_operation_registry
+
+    registry = default_operation_registry()
     return build_domain_graph(
         BusinessDomain.STOCK_RESEARCH,
-        operations or default_stock_operations(deps),
-        default_mode="single_analysis",
-        mode_resolver=_resolve_stock_mode,
+        default_stock_operations(deps) if operations is None else operations,
+        default_mode=registry.spec(BusinessDomain.STOCK_RESEARCH).default_mode,
+        mode_resolver=registry.spec(BusinessDomain.STOCK_RESEARCH).mode_resolver,
     )
 
 

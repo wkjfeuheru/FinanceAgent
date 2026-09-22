@@ -41,7 +41,8 @@ def _row(chunk_id: str, faq_id: str, vector_distance: float, keyword_score: floa
         "faq_id": faq_id,
         "index_version": "index-1",
         "source_path": "docs/faq/trading-rules.md",
-        "content": f"{faq_id} 的答案内容",
+        "question": f"{faq_id} 的问题？",
+        "answer": f"{faq_id} 的答案内容",
         "vector_distance": vector_distance,
         "keyword_score": keyword_score,
     }
@@ -73,6 +74,8 @@ def test_retriever_returns_matches_with_provenance():
     assert match.chunk_id == "c1"
     assert match.index_version == "index-1"
     assert match.source_path == "docs/faq/trading-rules.md"
+    assert match.question == "FAQ-001 的问题？"
+    assert match.answer == "FAQ-001 的答案内容"
     assert match.score == pytest.approx(0.95)
     assert repository.searches[0]["limit"] == 12
 
@@ -156,9 +159,11 @@ def test_keyword_channel_is_merged_not_overwritten():
     """
     repository = _FakeRepository([
         {"chunk_id": "c1", "faq_id": "FAQ-004", "index_version": "i",
-         "source_path": "p", "content": "c", "vector_distance": 0.2, "keyword_score": None},
+         "source_path": "p", "question": "q", "answer": "a",
+         "vector_distance": 0.2, "keyword_score": None},
         {"chunk_id": "c1", "faq_id": "FAQ-004", "index_version": "i",
-         "source_path": "p", "content": "c", "vector_distance": 0.2, "keyword_score": 0.5},
+         "source_path": "p", "question": "q", "answer": "a",
+         "vector_distance": 0.2, "keyword_score": 0.5},
     ])
     retriever = FaqRetriever(repository, _FakeEmbedding(), min_score=0.0)
 

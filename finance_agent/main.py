@@ -9,6 +9,8 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from finance_agent.api.admin_routes import router as admin_router
+from finance_agent.api.portfolio_routes import router as portfolio_router
 from finance_agent.api.routes import router
 
 
@@ -33,6 +35,10 @@ app.add_middleware(
 
 # 挂载路由
 app.include_router(router)
+# 模拟交易：商品展示、购买、持仓、清仓与账户面板
+app.include_router(portfolio_router)
+# 管理后台：商品发行/上下架与全站用户总览（仅管理员）
+app.include_router(admin_router)
 
 
 @app.get("/")
@@ -57,8 +63,23 @@ async def root():
             "DELETE /api/conversations/{customer_id}/{conversation_id}",
             "POST /api/reset/{customer_id}",
             "POST /api/admin/clear-records",
+            "GET  /api/admin/users",
+            "GET  /api/admin/users/{customer_id}/portfolio",
+            "GET  /api/admin/products",
+            "POST /api/admin/products",
+            "POST /api/admin/products/{code}/offline",
+            "POST /api/admin/products/{code}/publish",
             "DELETE /api/account",
             "GET  /api/health",
+            "GET  /api/portfolio/products",
+            "GET  /api/portfolio/products/{code}",
+            "GET  /api/portfolio/account",
+            "GET  /api/portfolio/positions",
+            "POST /api/portfolio/deposit",
+            "POST /api/portfolio/orders",
+            "POST /api/portfolio/liquidate",
+            "GET  /api/portfolio/orders",
+            "GET  /api/portfolio/transactions",
         ],
     }
 

@@ -15,7 +15,7 @@ from finance_agent.orchestrator.domains.market import (
     build_market_domain_graph,
     run_market_mode,
 )
-from finance_agent.orchestrator.root_graph import RootGraphDependencies, build_root_graph
+from finance_agent.orchestrator.supervisor_graph import SupervisorDependencies, build_supervisor_graph
 
 
 def _render(mode: str, *, interpreter=None):
@@ -59,7 +59,7 @@ def overview_data(monkeypatch):
         "limitations": [],
         "note": "",
     }
-    monkeypatch.setattr(market_module, "get_market_overview_data", lambda: payload)
+    monkeypatch.setitem(market_module.MODE_COLLECTORS, "market_overview", lambda: payload)
     return payload
 
 
@@ -78,7 +78,7 @@ def test_overview_mode_renders_real_numbers(overview_data):
 
 
 def test_sentiment_mode_renders_breadth(monkeypatch):
-    monkeypatch.setattr(market_module, "get_market_sentiment_data", lambda: {
+    monkeypatch.setitem(market_module.MODE_COLLECTORS, "market_sentiment", lambda: {
         "as_of": "2026-09-11",
         "breadth": {"advancing": 604, "declining": 4567, "limit_up": 40,
                     "limit_down": 21, "flat": 36, "suspended": 12, "activity": 11.57},
@@ -97,7 +97,7 @@ def test_sentiment_mode_renders_breadth(monkeypatch):
 
 def test_capital_flow_mode_renders_margin_and_holdings(monkeypatch):
     """capital_flow 以融资融券（日频主指标）+ 北向持股市值（季度参考）呈现。"""
-    monkeypatch.setattr(market_module, "get_capital_flow_data", lambda: {
+    monkeypatch.setitem(market_module.MODE_COLLECTORS, "capital_flow", lambda: {
         "as_of": "2026-09-10",
         "margin": {
             "as_of": "2026-09-10", "financing_balance_yi": 26171.760561,
@@ -121,7 +121,7 @@ def test_capital_flow_mode_renders_margin_and_holdings(monkeypatch):
 
 
 def test_capital_flow_lists_missing_source_instead_of_faking(monkeypatch):
-    monkeypatch.setattr(market_module, "get_capital_flow_data", lambda: {
+    monkeypatch.setitem(market_module.MODE_COLLECTORS, "capital_flow", lambda: {
         "as_of": "2026-09-10",
         "margin": {"as_of": "2026-09-10", "financing_balance_yi": 26171.760561},
         "northbound_holdings": {},
@@ -136,7 +136,7 @@ def test_capital_flow_lists_missing_source_instead_of_faking(monkeypatch):
 
 
 def test_capital_flow_degrades_when_all_missing(monkeypatch):
-    monkeypatch.setattr(market_module, "get_capital_flow_data", lambda: {
+    monkeypatch.setitem(market_module.MODE_COLLECTORS, "capital_flow", lambda: {
         "as_of": "", "margin": {}, "northbound_holdings": {},
         "limitations": ["margin_summary", "northbound_holdings"], "note": "",
     })
@@ -148,7 +148,7 @@ def test_capital_flow_degrades_when_all_missing(monkeypatch):
 
 
 def test_partial_failures_are_disclosed_not_faked(monkeypatch):
-    monkeypatch.setattr(market_module, "get_market_overview_data", lambda: {
+    monkeypatch.setitem(market_module.MODE_COLLECTORS, "market_overview", lambda: {
         "as_of": "2026-09-11",
         "indices": [{"symbol": "sh000001", "name": "上证指数", "close": 3888.11,
                      "pct_chg": -1.18}],
@@ -165,7 +165,7 @@ def test_partial_failures_are_disclosed_not_faked(monkeypatch):
 
 
 def test_all_data_missing_degrades_honestly(monkeypatch):
-    monkeypatch.setattr(market_module, "get_market_overview_data", lambda: {
+    monkeypatch.setitem(market_module.MODE_COLLECTORS, "market_overview", lambda: {
         "as_of": "", "indices": [], "breadth": {}, "limitations": ["market_breadth"], "note": "",
     })
 
@@ -184,7 +184,7 @@ def test_market_domain_rejects_unknown_mode():
 
 def test_market_overview_renders_turnover_and_range(monkeypatch):
     """大盘概览盘活已有数据：成交额与近 5/20 日区间涨跌。"""
-    monkeypatch.setattr(market_module, "get_market_overview_data", lambda: {
+    monkeypatch.setitem(market_module.MODE_COLLECTORS, "market_overview", lambda: {
         "as_of": "2026-09-11",
         "indices": [{
             "symbol": "sh000001", "name": "上证指数", "close": 3888.11, "pct_chg": -1.18,
@@ -204,7 +204,7 @@ def test_market_overview_renders_turnover_and_range(monkeypatch):
 
 def test_capital_flow_renders_day_over_day_change(monkeypatch):
     """资金面盘活已有数据：融资余额日环比。"""
-    monkeypatch.setattr(market_module, "get_capital_flow_data", lambda: {
+    monkeypatch.setitem(market_module.MODE_COLLECTORS, "capital_flow", lambda: {
         "as_of": "2026-09-10",
         "margin": {
             "as_of": "2026-09-10", "financing_balance_yi": 26171.76,
@@ -223,7 +223,7 @@ def test_capital_flow_renders_day_over_day_change(monkeypatch):
 
 def test_unavailable_message_is_mode_specific(monkeypatch):
     """整体降级文案按模式区分，资金面不得误报“指数与宽度”。"""
-    monkeypatch.setattr(market_module, "get_capital_flow_data", lambda: {
+    monkeypatch.setitem(market_module.MODE_COLLECTORS, "capital_flow", lambda: {
         "as_of": "", "margin": {}, "northbound_holdings": {},
         "limitations": ["margin_summary", "northbound_holdings"], "note": "",
     })
@@ -262,7 +262,7 @@ _POLICY_PAYLOAD = {
 
 def test_policy_impact_renders_events_and_interpretation(monkeypatch):
     """政策事件模式：确定性清单 + LLM 定性解读。"""
-    monkeypatch.setattr(market_module, "get_policy_events_data", lambda: dict(_POLICY_PAYLOAD))
+    monkeypatch.setitem(market_module.MODE_COLLECTORS, "policy_impact", lambda: dict(_POLICY_PAYLOAD))
     interpreter = _FakeInterpreter(text="流动性边际宽松，利好市场风险偏好。")
 
     result = run_market_mode("policy_impact", interpreter=interpreter)
@@ -279,7 +279,7 @@ def test_policy_impact_renders_events_and_interpretation(monkeypatch):
 
 def test_policy_impact_falls_back_to_plain_list_on_llm_failure(monkeypatch):
     """LLM 解读失败时回退纯事件清单并标注，不伪造解读。"""
-    monkeypatch.setattr(market_module, "get_policy_events_data", lambda: dict(_POLICY_PAYLOAD))
+    monkeypatch.setitem(market_module.MODE_COLLECTORS, "policy_impact", lambda: dict(_POLICY_PAYLOAD))
     interpreter = _FakeInterpreter(error=RuntimeError("llm down"))
 
     result = run_market_mode("policy_impact", interpreter=interpreter)
@@ -292,7 +292,7 @@ def test_policy_impact_falls_back_to_plain_list_on_llm_failure(monkeypatch):
 
 def test_policy_impact_reports_empty_state_honestly(monkeypatch):
     """取数成功但无政策类事件时，诚实返回空态而非硬凑。"""
-    monkeypatch.setattr(market_module, "get_policy_events_data", lambda: {
+    monkeypatch.setitem(market_module.MODE_COLLECTORS, "policy_impact", lambda: {
         "as_of": "", "events": [], "categories_summary": {},
         "window_days": 3, "limitations": [], "note": "",
     })
@@ -304,7 +304,7 @@ def test_policy_impact_reports_empty_state_honestly(monkeypatch):
 
 
 def test_policy_impact_degrades_when_news_source_unavailable(monkeypatch):
-    monkeypatch.setattr(market_module, "get_policy_events_data", lambda: {
+    monkeypatch.setitem(market_module.MODE_COLLECTORS, "policy_impact", lambda: {
         "as_of": "", "events": [], "categories_summary": {},
         "window_days": 3, "limitations": ["policy_news"], "note": "",
     })
@@ -343,8 +343,8 @@ def _market_classifier(intent: str):
 
 def test_market_overview_end_to_end_routes_to_market_insight(monkeypatch, overview_data):
     """"今天大盘怎么样"走市场洞察，不触发股票取数，也不产出个股结论。"""
-    graph = build_root_graph(
-        RootGraphDependencies(
+    graph = build_supervisor_graph(
+        SupervisorDependencies(
             classifier=_market_classifier("market_insight"),
             domain_runner=lambda context: build_market_domain_graph().invoke(
                 {"context": context}

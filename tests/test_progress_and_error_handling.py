@@ -63,8 +63,8 @@ def test_request_shape_error_text_is_not_leaked():
     assert "暂不可用" in response
 
 
-def test_emit_progress_routes_by_thread_id_from_worker_thread():
-    """专家进度在工作线程产生，必须按 thread_id 送达主线程注册的回调。"""
+def test_emit_progress_routes_by_conversation_id_from_worker_thread():
+    """专家进度在工作线程产生，必须按 conversation_id 送达主线程注册的回调。"""
     system = object.__new__(AdvisorSystem)
     system._progress_lock = threading.Lock()
     system._progress_callbacks = {}

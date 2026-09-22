@@ -13,6 +13,14 @@ class ProviderUnavailableError(ProviderError):
     """Provider 当前不可用。"""
 
 
+class ProviderTimeoutError(ProviderError):
+    """Provider 调用超过统一守门超时（底层请求自身未设超时）。
+
+    与 ``ProviderUnavailableError`` 区分：前者是"这次太久，可能仍在跑"，
+    后者是"所有源都试过且都失败了"，审计时意义不同。
+    """
+
+
 class StockDataProvider(Protocol):
     """所有股票数据适配器必须实现的同步业务接口。"""
 

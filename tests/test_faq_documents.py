@@ -64,8 +64,18 @@ def test_parser_keeps_each_faq_question_and_answer_in_one_chunk(tmp_path):
     assert [chunk.faq_id for chunk in chunks] == ["FAQ-001", "FAQ-002"]
     assert chunks[0].chunk_ordinal == 0
     assert chunks[1].chunk_ordinal == 1
-    assert "保证收益" in chunks[0].content
-    assert "R1 至 R5" in chunks[1].content
+    assert chunks[0].question == "什么是保证收益？"
+    assert chunks[0].answer == (
+        "任何声称“保证收益”的私募或理财宣传都涉嫌违规。正规产品不会承诺保本保收益，\n"
+        "收益与风险始终匹配。"
+    )
+    assert chunks[0].embedding_text == (
+        "问题：什么是保证收益？\n"
+        "答案：任何声称“保证收益”的私募或理财宣传都涉嫌违规。正规产品不会承诺保本保收益，\n"
+        "收益与风险始终匹配。"
+    )
+    assert chunks[1].question == "如何理解风险等级？"
+    assert "R1 至 R5" in chunks[1].answer
     assert chunks[0].source_path.endswith("investment-basics.md")
     assert chunks[0].content_hash
 
@@ -95,7 +105,11 @@ class _FakeEmbedding:
     dimension = 512
     descriptor = "fake:512:normalized"
 
+    def __init__(self) -> None:
+        self.inputs: list[str] = []
+
     def embed_documents(self, texts):
+        self.inputs.extend(texts)
         return [[1.0] + [0.0] * 511 for _ in texts]
 
 
@@ -115,9 +129,10 @@ def test_repo_faq_documents_parse_and_publish_one_version():
 
     chunks = parse_faq_root(docs_root)
     repository = _RecordingRepository()
+    embedding = _FakeEmbedding()
     version = index_faq_documents(
         docs_root,
-        embedding_provider=_FakeEmbedding(),
+        embedding_provider=embedding,
         repository=repository,
         index_version="index-test",
     )
@@ -126,10 +141,12 @@ def test_repo_faq_documents_parse_and_publish_one_version():
     assert len(repository.published) == 1
     published = repository.published[0]
     assert len(published["chunks"]) == len(chunks)
+    assert embedding.inputs == [chunk.embedding_text for chunk in chunks]
+    assert all(text.startswith("问题：") and "\n答案：" in text for text in embedding.inputs)
+    assert [chunk["embedding_text"] for chunk in published["chunks"]] == embedding.inputs
     assert {chunk["faq_id"] for chunk in published["chunks"]} >= {"FAQ-001", "FAQ-101", "FAQ-201"}
     assert all(len(chunk["embedding"]) == 512 for chunk in published["chunks"])
     # 三份文件必须都已校验并参与解析。
     assert set(FAQ_DOCUMENT_FILES).issubset(
         {Path(document["source_path"]).name for document in published["documents"]}
     )
-

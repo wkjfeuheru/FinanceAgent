@@ -326,3 +326,15 @@ def test_prompt_forbids_mode_values_in_intent_field():
 
     assert "intent` 字段" in prompt
     assert "不能" in prompt
+
+
+def test_prompt_confidence_threshold_is_not_hardcoded_twice():
+    """提示词里的置信度阈值必须取自常量，避免文案与过滤规则双写漂移。"""
+    from finance_agent.orchestrator.intent import (
+        _INTENT_CLASSIFIER_PROMPT as prompt,
+        _INTENT_CONFIDENCE_THRESHOLD as threshold,
+    )
+
+    assert f"confidence 小于 {threshold}" in prompt
+    # 阈值数值在提示词里只出现一次（即那段由常量插值而来），不得再写死一份
+    assert prompt.count(str(threshold)) == 1

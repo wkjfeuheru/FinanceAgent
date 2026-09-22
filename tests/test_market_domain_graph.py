@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+
 from finance_agent.orchestrator.contracts import BusinessDomain, DomainTaskContext, PlanTask
 from finance_agent.orchestrator.domains.base import DomainOperation
-from finance_agent.orchestrator.domains.market import build_market_domain_graph, run_market_mode
+from finance_agent.orchestrator.domains.market import MODE_COLLECTORS, build_market_domain_graph, collector_for, run_market_mode
 
 
 class _FakeInterpreter:
@@ -85,3 +87,37 @@ def test_market_domain_unsupported_mode_fails_without_other_domain_tools():
 
     assert outcome.status == "failed"
     assert any(limitation.startswith("unsupported_mode") for limitation in outcome.limitations)
+
+
+def test_collector_for_binds_real_callables_and_rejects_unknown_mode():
+    """取数函数解析必须直接返回绑定对象；未知模式返回 None 而非静默降级。"""
+    for mode, collector in MODE_COLLECTORS.items():
+        assert callable(collector)
+        assert collector_for(mode) is collector
+
+    assert collector_for("fx_flow") is None
+    # 显式注入表优先于默认绑定表（测试注入入口）。
+    sentinel = lambda: {}
+    assert collector_for("fx_flow", {"fx_flow": sentinel}) is sentinel
+
+
+def test_domain_operation_failure_is_logged_and_mapped_to_safe_limitation(caplog):
+    """统一错误出口：向用户只暴露安全标识，异常细节必须进日志以便归因。"""
+    def _boom(context):
+        raise RuntimeError("market data source down")
+
+    graph = build_market_domain_graph([
+        DomainOperation(
+            name="get_market_overview_data",
+            modes=frozenset({"market_overview"}),
+            handler=_boom,
+        )
+    ])
+
+    with caplog.at_level(logging.ERROR):
+        outcome = graph.invoke({"context": _context("今天大盘怎么样")})["domain_outcome"]
+
+    assert outcome.status == "failed"
+    assert outcome.limitations == ["tool_failed:get_market_overview_data"]
+    assert "domain_operation_failed" in caplog.text
+    assert "get_market_overview_data" in caplog.text

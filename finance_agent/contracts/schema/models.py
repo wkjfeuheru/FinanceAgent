@@ -54,7 +54,6 @@ class Task(_ContractModel):
     intent: IntentKind | None = None
     expert_name: str = ""
     requirement: str = ""
-    execution_mode: str = ""
     depends_on: list[str] = Field(default_factory=list)
     status: TaskStatus = TaskStatus.PENDING
     retry_count: int = Field(default=0, ge=0)
@@ -92,12 +91,6 @@ class FactSnapshot(_ContractModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
-class PreparedContext(_ContractModel):
-    """数据准备阶段的上下文，包含本轮事实快照。"""
-
-    facts: list[FactSnapshot] = Field(default_factory=list)
-
-
 class ExpertResult(_ContractModel):
     """专家结果包；未知或无效结构化输出不得进入最终合成。"""
 
@@ -116,13 +109,12 @@ class ExpertResult(_ContractModel):
     def normalize_legacy_intent(self) -> "ExpertResult":
         """为旧结果补充可推导的意图，避免历史调用方立即失效。"""
         if self.intent is None:
-            mapping = {
-                "market_insight": IntentKind.MARKET_INSIGHT,
-                "stock_analysis": IntentKind.STOCK_ANALYSIS,
-                "product_analysis": IntentKind.PRODUCT_ANALYSIS,
-                "casual_chat": IntentKind.CASUAL_CHAT,
-            }
-            self.intent = mapping.get(self.expert_name)
+            # expert_name 与意图名同构，直接按 IntentKind 取值：不再维护一份
+            # 容易漂移的映射表（历史上该表就漏掉了 account_query）。
+            try:
+                self.intent = IntentKind(self.expert_name)
+            except ValueError:
+                pass
         if not self.task_id:
             self.task_id = self.expert_name
         return self

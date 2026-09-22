@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Mapping
 
 from finance_agent.middleware import check_sensitive_words
 from finance_agent.orchestrator.contracts import BusinessDomain, DomainTaskContext
@@ -25,11 +25,13 @@ from finance_agent.orchestrator.tools.marketdata import (
     get_policy_events_data,
 )
 
-MODE_COLLECTOR_NAMES = {
-    "market_overview": "get_market_overview_data",
-    "market_sentiment": "get_market_sentiment_data",
-    "capital_flow": "get_capital_flow_data",
-    "policy_impact": "get_policy_events_data",
+# 模式 → 采集器函数对象**直接绑定**：重命名采集器或写错模式键都会在导入期暴露，
+# 不再经 ``globals()`` 按函数名字符串间接解析（IDE/类型检查无法追踪那种写法）。
+MODE_COLLECTORS: Dict[str, Callable[[], Dict[str, Any]]] = {
+    "market_overview": get_market_overview_data,
+    "market_sentiment": get_market_sentiment_data,
+    "capital_flow": get_capital_flow_data,
+    "policy_impact": get_policy_events_data,
 }
 
 # 各模式整体不可用时的降级说明（按模式区分，避免资金面/政策模式误报“指数与宽度”）。
@@ -81,10 +83,12 @@ _MARKET_MODE_KEYWORDS = {
 }
 
 
-def collector_for(mode: str) -> Callable[[], dict[str, Any]] | None:
-    """按模式解析取数函数；在调用时从模块命名空间查找，便于测试注入。"""
-    name = MODE_COLLECTOR_NAMES.get(mode)
-    return globals().get(name) if name else None
+def collector_for(
+    mode: str,
+    registry: Mapping[str, Callable[[], dict[str, Any]]] | None = None,
+) -> Callable[[], dict[str, Any]] | None:
+    """按模式解析取数函数；测试可传 ``registry`` 显式覆盖默认绑定表。"""
+    return (registry if registry is not None else MODE_COLLECTORS).get(mode)
 
 
 def pct(value: Any) -> str:
@@ -354,23 +358,35 @@ def _resolve_market_mode(context: DomainTaskContext) -> str:
     return keyword_mode(context_text(context), _MARKET_MODE_KEYWORDS, "market_overview")
 
 
+def default_market_operations(
+    interpreter: PolicyImpactInterpreter | None = None,
+) -> list[DomainOperation]:
+    """四个市场采集器注册为白名单操作；操作名沿用采集器函数名（tool_trace 既有口径）。"""
+    shared_interpreter = interpreter or PolicyImpactInterpreter()
+    return [
+        DomainOperation(
+            name=MODE_COLLECTORS[mode].__name__,
+            modes=frozenset({mode}),
+            handler=(lambda mode: lambda ctx: run_market_mode(mode, interpreter=shared_interpreter))(mode),
+        )
+        for mode in MODE_COLLECTORS
+    ]
+
+
 def build_market_domain_graph(operations=None, *, interpreter: PolicyImpactInterpreter | None = None):
-    """编译市场领域子图；默认白名单为四个市场采集器。"""
-    if operations is None:
-        shared_interpreter = interpreter or PolicyImpactInterpreter()
-        operations = [
-            DomainOperation(
-                name=MODE_COLLECTOR_NAMES[mode],
-                modes=frozenset({mode}),
-                handler=(lambda mode: lambda ctx: run_market_mode(mode, interpreter=shared_interpreter))(mode),
-            )
-            for mode in MODE_COLLECTOR_NAMES
-        ]
+    """编译市场领域子图；白名单来自 operation 注册表（唯一事实源）。
+
+    ``operations=[]`` 是合法输入（白名单为空，任何模式都安全失败），
+    因此必须用 ``is None`` 判缺省，不能 truthy 判断。
+    """
+    from finance_agent.orchestrator.operations import default_operation_registry
+
+    registry = default_operation_registry()
     return build_domain_graph(
         BusinessDomain.MARKET_INSIGHT,
-        operations,
-        default_mode="market_overview",
-        mode_resolver=_resolve_market_mode,
+        default_market_operations(interpreter) if operations is None else operations,
+        default_mode=registry.spec(BusinessDomain.MARKET_INSIGHT).default_mode,
+        mode_resolver=registry.spec(BusinessDomain.MARKET_INSIGHT).mode_resolver,
     )
 
 
@@ -378,6 +394,7 @@ __all__ = [
     "PolicyImpactInterpreter",
     "build_market_domain_graph",
     "collector_for",
+    "default_market_operations",
     "render",
     "render_capital_flow",
     "render_overview",
