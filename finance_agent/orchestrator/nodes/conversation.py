@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from finance_agent.orchestrator.conversation_graph import ConversationState
+from finance_agent.orchestrator.graphs.conversation_graph import ConversationState
 
 
 def make_respond_node(
@@ -16,7 +16,7 @@ def make_respond_node(
     """respond 节点工厂；``max_steps`` 为 None 时由 run_conversation 取默认。"""
 
     def respond(state: ConversationState) -> dict[str, Any]:
-        from finance_agent.orchestrator.conversation_graph import run_conversation
+        from finance_agent.orchestrator.graphs.conversation_graph import run_conversation
 
         kwargs: dict[str, Any] = {
             "user_message": str(state.get("user_message", "")),

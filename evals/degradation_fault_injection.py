@@ -36,7 +36,7 @@ from finance_agent.data.providers import (  # noqa: E402
     ProviderTimeoutError,
     UnsupportedProviderCapability,
 )
-from finance_agent.orchestrator.intent import (  # noqa: E402
+from finance_agent.orchestrator.routing.intent import (  # noqa: E402
     DeepSeekIntentClassifier,
     IntentClassificationError,
     IntentClassifier,

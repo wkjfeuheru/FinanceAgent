@@ -210,7 +210,7 @@ def test_stock_domain_submits_with_full_context_and_reports_pending_jobs():
 
 
 def test_projection_reports_real_celery_job_ids():
-    from finance_agent.orchestrator.supervisor_graph import project_supervisor_state
+    from finance_agent.orchestrator.graphs.supervisor_graph import project_supervisor_state
 
     outcome = _processing_outcome("single:run-1:stock_research", job_ids=["job-a", "job-b"])
     state = {
@@ -385,7 +385,7 @@ def test_request_stop_revokes_pending_quant_jobs():
 
 
 def test_gateway_submit_is_idempotent_per_key():
-    from finance_agent.orchestrator.quant import InMemoryQuantGateway
+    from finance_agent.orchestrator.runtime.quant import InMemoryQuantGateway
 
     gateway = InMemoryQuantGateway()
     first = gateway.submit("technical_indicators", {"high": [1], "low": [1], "close": [1]}, "same-key")

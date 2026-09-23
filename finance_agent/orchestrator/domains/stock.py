@@ -27,7 +27,7 @@ from finance_agent.orchestrator.domains.base import (
     keyword_mode,
     merge_facts,
 )
-from finance_agent.orchestrator.params import intent_slots_for
+from finance_agent.orchestrator.routing.params import intent_slots_for
 from finance_agent.research.contracts import (
     Action,
     AnalysisKind,
@@ -765,7 +765,7 @@ def build_stock_domain_graph(deps: StockDeps | None = None, *, operations=None):
 
     ``operations=[]`` 是合法输入（白名单为空），用 ``is None`` 判缺省。
     """
-    from finance_agent.orchestrator.operations import default_operation_registry
+    from finance_agent.orchestrator.runtime.operations import default_operation_registry
 
     registry = default_operation_registry()
     return build_domain_graph(

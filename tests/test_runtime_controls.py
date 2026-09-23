@@ -6,7 +6,7 @@ import threading
 import pytest
 from fastapi import HTTPException
 
-from finance_agent.orchestrator.supervisor_graph import (
+from finance_agent.orchestrator.graphs.supervisor_graph import (
     SupervisorDependencies,
     build_supervisor_graph,
     classify_domains,
@@ -64,7 +64,7 @@ def test_low_confidence_intent_routes_to_clarification():
 
 def test_classification_marks_error_when_no_valid_intents():
     """模型返回了 intents 但全部被过滤：必须标记分类失败（否则落含糊回复）。"""
-    from finance_agent.orchestrator.intent import IntentClassifier
+    from finance_agent.orchestrator.routing.intent import IntentClassifier
 
     classifier = IntentClassifier(classifier=_FakeClassifier({
         "intents": [{"intent": "unknown_intent", "query": "x", "confidence": 0.99, "evidence": "x"}],

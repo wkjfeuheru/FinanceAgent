@@ -47,7 +47,7 @@ class _RecordingFactory:
 
 
 def test_get_database_switches_to_postgres(monkeypatch):
-    from finance_agent.orchestrator import database as db
+    from finance_agent.orchestrator.persistence import database as db
     from finance_agent.data.postgres_stores import PostgresBusinessStore
 
     monkeypatch.setattr(

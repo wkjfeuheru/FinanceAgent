@@ -83,7 +83,7 @@ def test_handle_message_has_a_single_v2_path(monkeypatch):
 
 def test_v2_root_graph_has_mandatory_compliance_exit():
     """所有执行分支都必须汇聚到一个合规节点，且只有合规节点通向终点。"""
-    from finance_agent.orchestrator.supervisor_graph import build_supervisor_graph, SupervisorDependencies
+    from finance_agent.orchestrator.graphs.supervisor_graph import build_supervisor_graph, SupervisorDependencies
 
     graph = build_supervisor_graph(SupervisorDependencies(classifier=object()))
     nodes = {name for name in graph.get_graph().nodes}

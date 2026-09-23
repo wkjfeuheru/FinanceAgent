@@ -10,8 +10,8 @@ from langgraph.checkpoint.memory import InMemorySaver
 from finance_agent.orchestrator.contracts import BusinessDomain, DomainOutcome
 from finance_agent.orchestrator.memory import UserProfileCard
 from finance_agent.orchestrator.orchestrator import AdvisorSystem
-from finance_agent.orchestrator.params import ExtractedParams
-from finance_agent.orchestrator.supervisor_graph import SupervisorDependencies, build_supervisor_graph
+from finance_agent.orchestrator.routing.params import ExtractedParams
+from finance_agent.orchestrator.graphs.supervisor_graph import SupervisorDependencies, build_supervisor_graph
 
 
 class _FakeClassifier:

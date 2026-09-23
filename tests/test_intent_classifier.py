@@ -8,7 +8,7 @@ import pytest
 # 占位密钥经环境变量注入，避免在源码中出现凭据形态的字符串。
 _FAKE_API_KEY = os.environ.get("TEST_FAKE_API_KEY", "placeholder")
 
-from finance_agent.orchestrator.intent import (
+from finance_agent.orchestrator.routing.intent import (
     DeepSeekIntentClassifier,
     IntentClassificationError,
 )
@@ -154,7 +154,7 @@ class _BoomClassifier:
 
 
 def test_primary_success_does_not_touch_fallback():
-    from finance_agent.orchestrator.intent import IntentClassifier
+    from finance_agent.orchestrator.routing.intent import IntentClassifier
 
     primary = _OkClassifier(_payload())
     fallback = _BoomClassifier()
@@ -167,7 +167,7 @@ def test_primary_success_does_not_touch_fallback():
 
 
 def test_primary_failure_falls_back_to_secondary_model():
-    from finance_agent.orchestrator.intent import IntentClassifier
+    from finance_agent.orchestrator.routing.intent import IntentClassifier
 
     primary = _BoomClassifier(cause="http")
     fallback = _OkClassifier(_payload())
@@ -180,7 +180,7 @@ def test_primary_failure_falls_back_to_secondary_model():
 
 
 def test_both_models_failing_reports_explicit_error():
-    from finance_agent.orchestrator.intent import IntentClassifier
+    from finance_agent.orchestrator.routing.intent import IntentClassifier
 
     result = IntentClassifier(
         classifier=_BoomClassifier(cause="http"),
@@ -195,7 +195,7 @@ def test_both_models_failing_reports_explicit_error():
 
 def test_injected_classifier_has_no_config_fallback():
     """注入主分类器时不自动构造联网备用模型，避免测试意外发起真实请求。"""
-    from finance_agent.orchestrator.intent import IntentClassifier
+    from finance_agent.orchestrator.routing.intent import IntentClassifier
 
     classifier = IntentClassifier(classifier=_BoomClassifier())
     assert classifier.fallback_classifier is None
@@ -207,7 +207,7 @@ def test_injected_classifier_has_no_config_fallback():
 def test_prompt_defines_product_vs_knowledge_boundary():
     """分类提示词必须写明 product_analysis 与 casual_chat(FAQ) 的边界，
     否则模型会把含“基金”的知识问答（如风险等级含义）误判为产品分析。"""
-    from finance_agent.orchestrator.intent import _INTENT_CLASSIFIER_PROMPT as prompt
+    from finance_agent.orchestrator.routing.intent import _INTENT_CLASSIFIER_PROMPT as prompt
 
     assert "casual_chat" in prompt
     # 明确的知识问答示例必须出现在提示词里，作为边界锚点
@@ -220,7 +220,7 @@ def test_prompt_defines_product_vs_knowledge_boundary():
 # ── 逐条容错：单条小问题不得拖垮整批意图 ────────────────────────────────────
 
 def _validate(payload, message):
-    from finance_agent.orchestrator.intent import DeepSeekIntentClassifier
+    from finance_agent.orchestrator.routing.intent import DeepSeekIntentClassifier
 
     return DeepSeekIntentClassifier._validate(payload, message)
 
@@ -255,7 +255,7 @@ def test_invalid_execution_mode_does_not_discard_valid_siblings():
 
 def test_unknown_intent_is_dropped_downstream_not_fatal():
     """未知 intent 由 normalize 丢弃，最终如实上报 no_valid_intents（而非崩溃）。"""
-    from finance_agent.orchestrator.intent import IntentClassifier
+    from finance_agent.orchestrator.routing.intent import IntentClassifier
 
     class _Model:
         def classify(self, message, context_summary=""):
@@ -292,7 +292,7 @@ def test_execution_mode_misused_as_intent_is_recovered():
     这是可修复的格式错误，必须还原成所属意图，而不是丢弃整条分类
     （否则“今天大盘怎么样”会间歇性失败）。
     """
-    from finance_agent.orchestrator.intent import normalize_intent_item
+    from finance_agent.orchestrator.routing.intent import normalize_intent_item
 
     cases = {
         "market_overview": ("market_insight", "market_overview"),
@@ -313,7 +313,7 @@ def test_execution_mode_misused_as_intent_is_recovered():
 
 
 def test_unknown_intent_is_still_rejected():
-    from finance_agent.orchestrator.intent import normalize_intent_item
+    from finance_agent.orchestrator.routing.intent import normalize_intent_item
 
     assert normalize_intent_item(
         {"intent": "totally_unknown", "query": "x", "confidence": 0.9, "evidence": "x"},
@@ -322,7 +322,7 @@ def test_unknown_intent_is_still_rejected():
 
 
 def test_prompt_forbids_mode_values_in_intent_field():
-    from finance_agent.orchestrator.intent import _INTENT_CLASSIFIER_PROMPT as prompt
+    from finance_agent.orchestrator.routing.intent import _INTENT_CLASSIFIER_PROMPT as prompt
 
     assert "intent` 字段" in prompt
     assert "不能" in prompt
@@ -330,7 +330,7 @@ def test_prompt_forbids_mode_values_in_intent_field():
 
 def test_prompt_confidence_threshold_is_not_hardcoded_twice():
     """提示词里的置信度阈值必须取自常量，避免文案与过滤规则双写漂移。"""
-    from finance_agent.orchestrator.intent import (
+    from finance_agent.orchestrator.routing.intent import (
         _INTENT_CLASSIFIER_PROMPT as prompt,
         _INTENT_CONFIDENCE_THRESHOLD as threshold,
     )

@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 
 from finance_agent.orchestrator.contracts import AsyncJobRef
-from finance_agent.orchestrator.quant import InMemoryQuantGateway
-from finance_agent.orchestrator.resume import ResumeCoordinator
+from finance_agent.orchestrator.runtime.quant import InMemoryQuantGateway
+from finance_agent.orchestrator.runtime.resume import ResumeCoordinator
 
 
 def _payload():
@@ -140,7 +140,7 @@ def test_technical_offload_reports_pending_without_faking_indicators():
 
 def test_technical_offload_returns_indicators_when_gateway_completes():
     from finance_agent.orchestrator.domains.stock import StockDeps, compute_technical_via_gateway
-    from finance_agent.orchestrator.quant import InMemoryQuantGateway
+    from finance_agent.orchestrator.runtime.quant import InMemoryQuantGateway
 
     deps = StockDeps(quant_gateway=InMemoryQuantGateway(), quant_wait_seconds=1.0)
 

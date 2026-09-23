@@ -16,7 +16,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from finance_agent.api import routes as r
 from finance_agent.orchestrator.orchestrator import AdvisorSystem
-from finance_agent.orchestrator.supervisor_graph import SupervisorDependencies, build_supervisor_graph
+from finance_agent.orchestrator.graphs.supervisor_graph import SupervisorDependencies, build_supervisor_graph
 
 
 class _FakeClassifier:
@@ -70,7 +70,7 @@ def test_root_graph_without_checkpointer_still_runs():
 
 def test_handle_message_passes_thread_id_in_config(monkeypatch):
     """thread_id 必须出现在 invoke 的 config 里；只在 state 里传对 checkpoint 无效。"""
-    from finance_agent.orchestrator.thread_key import build_thread_id
+    from finance_agent.orchestrator.persistence.thread_key import build_thread_id
 
     system = object.__new__(AdvisorSystem)
     system._stop_lock = threading.Lock()

@@ -13,7 +13,7 @@ from finance_agent.orchestrator.contracts import (
     ExecutionProfile,
     RunBudgets,
 )
-from finance_agent.orchestrator.operations import OperationRegistry, default_operation_registry
+from finance_agent.orchestrator.runtime.operations import OperationRegistry, default_operation_registry
 
 
 # ── RunBudgets：单一配置源与全局硬上限 ───────────────────────────────────
@@ -50,7 +50,7 @@ def test_run_budgets_rejects_values_beyond_hard_caps():
 def test_plan_task_limit_alias_follows_config(monkeypatch):
     """plan_execute 的上限取值函数必须直接读 config，不自带数值副本。"""
     import finance_agent.config as config
-    import finance_agent.orchestrator.plan_execute as plan_execute
+    import finance_agent.orchestrator.graphs.plan_execute_graph as plan_execute
 
     monkeypatch.setattr(config, "ORCHESTRATION_PLAN_TASKS", 3)
     monkeypatch.setattr(config, "ORCHESTRATION_REPLANS", 1)
@@ -120,7 +120,7 @@ def test_registry_exposes_operation_names_and_modes():
 
 def test_registry_rejects_duplicate_domain_registration():
     registry = OperationRegistry(specs=[])
-    from finance_agent.orchestrator.operations import DomainSpec
+    from finance_agent.orchestrator.runtime.operations import DomainSpec
 
     spec = DomainSpec(
         domain=BusinessDomain.STOCK_RESEARCH,
@@ -143,7 +143,7 @@ def test_registry_unknown_domain_raises():
 
 def test_conversation_respects_configured_react_steps(monkeypatch):
     import finance_agent.config as config
-    from finance_agent.orchestrator.conversation_graph import run_conversation
+    from finance_agent.orchestrator.graphs.conversation_graph import run_conversation
 
     monkeypatch.setattr(config, "ORCHESTRATION_REACT_STEPS", 2)
 

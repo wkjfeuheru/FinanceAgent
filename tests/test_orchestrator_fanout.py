@@ -1,6 +1,6 @@
 """统一调度回归：跨领域任务经 Plan-and-Execute 的 Send 调度、reducer 与旧旁路清零。
 
-V2 中所有领域任务统一由 ``orchestrator.plan_execute`` 调度（LangGraph ``Send``），
+V2 中所有领域任务统一由 ``orchestrator.graphs.plan_execute_graph`` 调度（LangGraph ``Send``），
 股票、市场、产品使用同一协议，不存在领域专用旁路；旧的 DAG 调度器已删除。
 """
 
@@ -12,11 +12,11 @@ from finance_agent.orchestrator.contracts import (
     ExecutionPlan,
     PlanTask,
 )
-from finance_agent.orchestrator.plan_execute import (
+from finance_agent.orchestrator.graphs.plan_execute_graph import (
     dispatch_ready_tasks,
     run_plan_execute,
 )
-from finance_agent.orchestrator.state import dedupe_concat, merge_dict
+from finance_agent.orchestrator.runtime.state import dedupe_concat, merge_dict
 
 
 def _task(task_id: str, *, depends_on=None, domain: str = "stock_research") -> PlanTask:

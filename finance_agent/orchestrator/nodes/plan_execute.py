@@ -27,7 +27,7 @@ def make_plan_node(
     """规划节点工厂；``task_limit`` 为 0 时沿用模块默认上限。"""
 
     def plan_node(state: dict[str, Any]) -> dict[str, Any]:
-        from finance_agent.orchestrator.plan_execute import (
+        from finance_agent.orchestrator.graphs.plan_execute_graph import (
             _as_plan,
             deterministic_planner,
             validate_execution_plan,
@@ -104,7 +104,7 @@ def make_evaluate_node(
     """汇合节点工厂：检查协作式停止与墙钟截止。"""
 
     def evaluate_node(state: dict[str, Any]) -> dict[str, Any]:
-        from finance_agent.orchestrator.plan_execute import (
+        from finance_agent.orchestrator.graphs.plan_execute_graph import (
             PLAN_CANCELLED_WARNING,
             PLAN_DEADLINE_WARNING,
         )
@@ -123,7 +123,7 @@ def route_after_evaluate(state: dict[str, Any]):
     """汇合后的条件路由：继续扇出 / 重规划 / 结束。"""
     from langgraph.graph import END
 
-    from finance_agent.orchestrator.plan_execute import (
+    from finance_agent.orchestrator.graphs.plan_execute_graph import (
         dispatch_ready_tasks,
         evaluate_plan_results,
     )

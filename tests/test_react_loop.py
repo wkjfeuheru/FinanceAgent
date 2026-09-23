@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from finance_agent.orchestrator.react import ToolSpec, build_chat_model_callable, run_bounded_react
+from finance_agent.orchestrator.runtime.react import ToolSpec, build_chat_model_callable, run_bounded_react
 
 
 class _Query(BaseModel):

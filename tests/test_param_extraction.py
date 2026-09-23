@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from finance_agent.orchestrator.contracts import BusinessDomain
-from finance_agent.orchestrator.params import (
+from finance_agent.orchestrator.routing.params import (
     CANCEL_SENTINEL,
     PARAM_SPECS,
     ExtractedParams,

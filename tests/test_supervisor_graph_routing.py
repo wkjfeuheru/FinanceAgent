@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 
 from finance_agent.orchestrator.contracts import BusinessDomain, DomainOutcome
-from finance_agent.orchestrator.plan_execute import PLAN_CANCELLED_WARNING
-from finance_agent.orchestrator.supervisor_graph import (
+from finance_agent.orchestrator.graphs.plan_execute_graph import PLAN_CANCELLED_WARNING
+from finance_agent.orchestrator.graphs.supervisor_graph import (
     CLASSIFICATION_FAILED_RESPONSE,
     SupervisorDependencies,
     build_supervisor_graph,
@@ -104,7 +104,7 @@ def test_root_graph_creates_deterministic_single_domain_task_id():
 
 def test_validate_node_passes_through_when_params_complete():
     """参数齐备（消息中含 6 位代码）时校验节点直通，路由结果不变。"""
-    from finance_agent.orchestrator.params import extract_params
+    from finance_agent.orchestrator.routing.params import extract_params
 
     captured = {}
 
@@ -233,7 +233,7 @@ def test_single_domain_routing_uses_scoped_query_for_task():
 
 
 def test_deterministic_plan_uses_scoped_domain_queries():
-    from finance_agent.orchestrator.plan_execute import deterministic_planner
+    from finance_agent.orchestrator.graphs.plan_execute_graph import deterministic_planner
 
     plan = deterministic_planner(
         {
@@ -256,7 +256,7 @@ def test_deterministic_plan_uses_scoped_domain_queries():
 def test_default_plan_branch_invokes_compiled_langgraph_subgraph(monkeypatch):
     """复合请求必须由已编译的 Plan-and-Execute 图执行，而非顺序 while 循环。"""
     from finance_agent.orchestrator.contracts import DomainOutcome
-    import finance_agent.orchestrator.plan_execute as plan_execute
+    import finance_agent.orchestrator.graphs.plan_execute_graph as plan_execute
 
     captured: dict = {}
 
@@ -370,8 +370,8 @@ def test_fully_covered_request_has_no_clarification_note():
 def test_intent_domain_registry_covers_every_intent_including_account_query():
     """意图→领域映射必须与意图注册表同源同覆盖，防止未来新增意图再次漂移。"""
     from finance_agent.contracts import IntentKind
-    from finance_agent.orchestrator import intent as intent_module
-    from finance_agent.orchestrator import supervisor_graph as supervisor_graph_module
+    from finance_agent.orchestrator.routing import intent as intent_module
+    from finance_agent.orchestrator.graphs import supervisor_graph as supervisor_graph_module
 
     # 三张表键集完全一致：领域归属、执行模式、意图顺序都覆盖同一批意图
     assert set(intent_module._INTENT_TO_DOMAIN) == set(intent_module._INTENTS)

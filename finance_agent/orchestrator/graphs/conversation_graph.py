@@ -12,7 +12,7 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel
 from typing_extensions import TypedDict
 
-from finance_agent.orchestrator.react import ToolSpec, run_bounded_react
+from finance_agent.orchestrator.runtime.react import ToolSpec, run_bounded_react
 
 CONVERSATION_REFUSAL = "暂时无法执行该操作。"
 

@@ -32,7 +32,7 @@ def make_classify_node(classifier: Any) -> Callable[[dict[str, Any]], dict[str, 
     """分类节点工厂：``classifier`` 由 SupervisorDependencies 注入。"""
 
     def classify_node(state: dict[str, Any]) -> dict[str, Any]:
-        from finance_agent.orchestrator.supervisor_graph import classify_domains
+        from finance_agent.orchestrator.graphs.supervisor_graph import classify_domains
 
         routing = classify_domains(
             str(state.get("user_message", "")),
@@ -108,7 +108,7 @@ def make_validate_node(
     """
 
     def validate_node(state: dict[str, Any]) -> dict[str, Any]:
-        from finance_agent.orchestrator.params import (
+        from finance_agent.orchestrator.routing.params import (
             ExtractedParams,
             apply_answers,
             build_form,
@@ -116,7 +116,7 @@ def make_validate_node(
             is_cancel,
             merge_target_queries,
         )
-        from finance_agent.orchestrator.supervisor_graph import PARAM_CANCELLED_RESPONSE
+        from finance_agent.orchestrator.graphs.supervisor_graph import PARAM_CANCELLED_RESPONSE
 
         routing = state.get("routing", {}) or {}
         if routing.get("error_code") or routing.get("execution_mode") in ("conversation", "clarify"):
@@ -202,7 +202,7 @@ def make_conversation_node(
 
 def clarify_node(state: dict[str, Any]) -> dict[str, Any]:
     """澄清分支：显式转述澄清问题，分类协议错误显式失败。"""
-    from finance_agent.orchestrator.supervisor_graph import (
+    from finance_agent.orchestrator.graphs.supervisor_graph import (
         CLASSIFICATION_FAILED_RESPONSE,
         CLARIFICATION_FALLBACK,
     )
@@ -227,7 +227,7 @@ def make_single_domain_node(
     """单领域节点工厂：以该领域的子请求直达领域执行器。"""
 
     def single_domain_node(state: dict[str, Any]) -> dict[str, Any]:
-        from finance_agent.orchestrator.supervisor_graph import (
+        from finance_agent.orchestrator.graphs.supervisor_graph import (
             CANCELLED_RESPONSE,
             _single_task,
             _single_task_id,
@@ -299,7 +299,7 @@ def make_plan_node(
     """计划节点工厂：跨领域 Plan-and-Execute 分支。"""
 
     def plan_node(state: dict[str, Any]) -> dict[str, Any]:
-        from finance_agent.orchestrator.supervisor_graph import PlanRunResult, reduce_run_status
+        from finance_agent.orchestrator.graphs.supervisor_graph import PlanRunResult, reduce_run_status
 
         routing = state.get("routing", {}) or {}
         domains = [BusinessDomain(value) for value in routing.get("domains", [])]
@@ -415,7 +415,7 @@ def degradation_error_handler(state: dict[str, Any], error: NodeError) -> Comman
 
 def classification_error_handler(state: dict[str, Any], error: NodeError) -> Command:
     """分类节点失败：显式报告无法识别领域，绝不静默猜测业务领域。"""
-    from finance_agent.orchestrator.supervisor_graph import CLASSIFICATION_FAILED_RESPONSE
+    from finance_agent.orchestrator.graphs.supervisor_graph import CLASSIFICATION_FAILED_RESPONSE
 
     return Command(
         update={

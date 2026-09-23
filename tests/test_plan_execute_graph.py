@@ -8,7 +8,7 @@ from finance_agent.orchestrator.contracts import (
     ExecutionPlan,
     PlanTask,
 )
-from finance_agent.orchestrator.plan_execute import (
+from finance_agent.orchestrator.graphs.plan_execute_graph import (
     PLAN_TASK_LIMIT,
     build_plan_execute_graph,
     deterministic_planner,
@@ -226,7 +226,7 @@ def test_deterministic_planner_creates_one_task_per_domain():
 
 def test_llm_planner_over_decomposition_is_normalized_to_one_task_per_domain():
     """LLM 把请求拆成领域内多子任务时必须收敛为每领域一个任务，且保留原始请求。"""
-    from finance_agent.orchestrator.plan_execute import build_llm_planner
+    from finance_agent.orchestrator.graphs.plan_execute_graph import build_llm_planner
 
     message = "分析贵州茅台并比较合适的基金产品"
     payload = {
@@ -263,7 +263,7 @@ def test_llm_planner_over_decomposition_is_normalized_to_one_task_per_domain():
 
 
 def test_llm_planner_falls_back_when_a_domain_is_missing():
-    from finance_agent.orchestrator.plan_execute import build_llm_planner
+    from finance_agent.orchestrator.graphs.plan_execute_graph import build_llm_planner
 
     payload = {"tasks": [
         {"task_id": "t1", "domain": "stock_research", "goal": "x", "instruction": "x", "expected_output": "x"},

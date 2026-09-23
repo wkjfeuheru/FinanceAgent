@@ -10,7 +10,7 @@ from finance_agent.orchestrator.contracts import (
     NodeError,
     RunBudgets,
 )
-from finance_agent.orchestrator.thread_key import build_thread_id, parse_thread_id
+from finance_agent.orchestrator.persistence.thread_key import build_thread_id, parse_thread_id
 
 
 def test_thread_key_is_customer_scoped_and_round_trips():

@@ -14,12 +14,12 @@ from langgraph.errors import NodeError
 from langgraph.types import RetryPolicy
 
 from finance_agent.orchestrator.contracts import BusinessDomain, DomainOutcome
-from finance_agent.orchestrator.plan_execute import (
+from finance_agent.orchestrator.graphs.plan_execute_graph import (
     PLAN_CANCELLED_WARNING,
     PLAN_DEADLINE_WARNING,
     run_plan_execute,
 )
-from finance_agent.orchestrator.supervisor_graph import (
+from finance_agent.orchestrator.graphs.supervisor_graph import (
     CANCELLED_RESPONSE,
     CLASSIFICATION_FAILED_RESPONSE,
     SupervisorDependencies,
@@ -62,7 +62,7 @@ def test_plan_execute_stops_at_deadline_and_marks_partial():
     （同步 in-flight 调用不可中断）。单个任务自身由 provider 超时与节点超时
     约束；这里的职责是防止任务串行累加把整轮拖到无限长。
     """
-    from finance_agent.orchestrator.plan_execute import deterministic_planner
+    from finance_agent.orchestrator.graphs.plan_execute_graph import deterministic_planner
     from finance_agent.orchestrator.contracts import BusinessDomain as BD
 
     domains = [BD.STOCK_RESEARCH, BD.PRODUCT_RESEARCH]
@@ -89,7 +89,7 @@ def test_plan_execute_stops_at_deadline_and_marks_partial():
 
 def test_plan_execute_stop_callback_skips_remaining_tasks():
     """协作式停止：请求停止后不得再启动新的领域任务。"""
-    from finance_agent.orchestrator.plan_execute import deterministic_planner
+    from finance_agent.orchestrator.graphs.plan_execute_graph import deterministic_planner
     from finance_agent.orchestrator.contracts import BusinessDomain as BD
 
     domains = [BD.STOCK_RESEARCH, BD.PRODUCT_RESEARCH]

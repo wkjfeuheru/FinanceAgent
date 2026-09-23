@@ -42,7 +42,7 @@ from finance_agent.orchestrator.domains.stock import (  # noqa: E402
     fetch_stock_data_parallel,
     _MAX_FETCH_WORKERS,
 )
-from finance_agent.orchestrator.plan_execute import (  # noqa: E402
+from finance_agent.orchestrator.graphs.plan_execute_graph import (  # noqa: E402
     build_plan_execute_graph,
     run_plan_execute,
 )

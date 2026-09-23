@@ -26,7 +26,7 @@ from finance_agent.orchestrator.contracts import (
 )
 # 意图 → 业务领域沿用分类器的注册表（唯一事实源），此处不再硬编码一份：
 # 两份映射曾发生漂移（account_query 只在分类器登记、路由表却缺席）。
-from finance_agent.orchestrator.intent import _INTENT_TO_DOMAIN
+from finance_agent.orchestrator.routing.intent import _INTENT_TO_DOMAIN
 # 节点函数统一收敛在 nodes 包；根图模块只负责装配节点与边。
 from finance_agent.orchestrator.nodes.supervisor import (
     classification_error_handler,
@@ -44,7 +44,7 @@ from finance_agent.orchestrator.nodes.supervisor import (
 )
 # 停止原因码在 plan_node 中判定运行状态，必须模块级可见：若只在某个分支内
 # 导入，外部注入 plan_runner 时该名字不存在，plan_node 会 NameError。
-from finance_agent.orchestrator.plan_execute import PLAN_CANCELLED_WARNING
+from finance_agent.orchestrator.graphs.plan_execute_graph import PLAN_CANCELLED_WARNING
 
 # casual_chat 在注册表中映射为 None，不属于任何业务领域。
 
@@ -202,7 +202,7 @@ def _single_task_id(run_id: str, domain: BusinessDomain) -> str:
 
 def _default_param_extractor() -> Callable[..., Any]:
     """惰性取默认抽取器，避免根图模块在导入期拖入 requests/主题注册表。"""
-    from finance_agent.orchestrator.params import extract_params
+    from finance_agent.orchestrator.routing.params import extract_params
 
     return extract_params
 
@@ -233,7 +233,7 @@ def build_supervisor_graph(dependencies: SupervisorDependencies, *, checkpointer
     if plan_runner is None and dependencies.domain_runner is not None:
         # 未显式提供计划执行器时，直接运行编译后的 Plan-and-Execute 子图。
         # 未提供 Planner 时回退确定性的每领域一任务计划。
-        from finance_agent.orchestrator.plan_execute import (
+        from finance_agent.orchestrator.graphs.plan_execute_graph import (
             build_plan_execute_graph,
             deterministic_planner,
         )

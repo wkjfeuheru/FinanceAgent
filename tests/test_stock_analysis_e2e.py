@@ -20,8 +20,8 @@ import pytest
 from finance_agent.orchestrator.domains.market import build_market_domain_graph
 from finance_agent.orchestrator.domains.product import build_product_domain_graph
 from finance_agent.orchestrator.domains.stock import StockDeps, build_stock_domain_graph
-from finance_agent.orchestrator.intent import IntentClassifier
-from finance_agent.orchestrator.supervisor_graph import SupervisorDependencies, build_supervisor_graph
+from finance_agent.orchestrator.routing.intent import IntentClassifier
+from finance_agent.orchestrator.graphs.supervisor_graph import SupervisorDependencies, build_supervisor_graph
 from finance_agent.research.screener import ThemeScreener
 from finance_agent.research.theme_models import ThemeLead
 from finance_agent.research.theme_repository import InMemoryThemeRepository
@@ -192,7 +192,7 @@ def test_market_insight_modes_render_real_data(question, mode, needle):
 ])
 def test_live_classification_splits_knowledge_from_specific_product(question, expected, forbidden):
     """真实分类器：通用规则/概念问答不得被判为产品分析，反之具体产品不得判为闲聊。"""
-    from finance_agent.orchestrator.intent import IntentClassifier
+    from finance_agent.orchestrator.routing.intent import IntentClassifier
 
     out = IntentClassifier().classify_intents(question)
     intents = [item["intent"] for item in out["intents"]]

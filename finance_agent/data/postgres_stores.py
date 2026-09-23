@@ -326,7 +326,7 @@ def load_checkpoint_with_legacy_fallback(
 
     委托给 ``RunStateStore``（设计 §6.9）；保留该模块级函数以兼容既有调用。
     """
-    from finance_agent.orchestrator.run_state import RunStateStore
+    from finance_agent.orchestrator.persistence.run_state import RunStateStore
 
     return RunStateStore(
         checkpointer=checkpointer,

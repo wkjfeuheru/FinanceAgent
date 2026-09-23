@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from finance_agent.data.postgres_stores import load_checkpoint_with_legacy_fallback
-from finance_agent.orchestrator.run_state import RunStateStore
-from finance_agent.orchestrator.thread_key import build_thread_id
+from finance_agent.orchestrator.persistence.run_state import RunStateStore
+from finance_agent.orchestrator.persistence.thread_key import build_thread_id
 
 
 class _FakeCheckpointSaver:

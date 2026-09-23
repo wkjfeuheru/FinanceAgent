@@ -420,7 +420,7 @@ def build_account_domain_graph(operations=None, *, deps: AccountDomainDeps | Non
 
     ``operations=[]`` 是合法输入（白名单为空），用 ``is None`` 判缺省。
     """
-    from finance_agent.orchestrator.operations import default_operation_registry
+    from finance_agent.orchestrator.runtime.operations import default_operation_registry
 
     registry = default_operation_registry()
     return build_domain_graph(

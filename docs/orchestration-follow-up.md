@@ -20,7 +20,7 @@
 - 股票领域已注入 `CeleryQuantGateway`；CPU 密集技术指标具备投递至 `finance.quant` 队列的入口。
 - **统一 `RunBudgets`（config.ORCHESTRATION_* 的唯一投影）**：会话 ReAct 步数、计划任务数、重规划次数、
   合规改写次数与图递归上限都从它取值；`ExecutionProfile` 提供受校验的图配置契约。
-- **领域 operation 注册表 `orchestrator/operations.py`**：四个领域的 operation 白名单、默认模式与
+- **领域 operation 注册表 `orchestrator/runtime/operations.py`**：四个领域的 operation 白名单、默认模式与
   mode 解析器集中登记；各领域 `build_X_domain_graph` 与 `AdvisorSystem._domain_runner` 复用同一份数据。
 - **P0 异步量化任务闭环已打通**（见下）。
 - Supervisor Graph 使用 PostgreSQL Checkpointer，并以 `user_id:session_id` 语义的 `thread_id` 隔离会话。
@@ -35,7 +35,7 @@
 不传 config，编译时也未传 checkpointer。因此校验节点放根图；下沉到子图需改 4 张图，且与 `Send`
 扇出的恢复语义冲突。
 
-### 参数模型（唯一事实源 `orchestrator/params.py`）
+### 参数模型（唯一事实源 `orchestrator/routing/params.py`）
 
 `PARAM_SPECS: dict[BusinessDomain, tuple[ParamSpec, ...]]` 登记每个领域的参数（必填/可选、控件类型、
 可选项、是否可写长期画像）：
@@ -111,7 +111,7 @@ START → classify → extract → validate → route ─┬─ conversation / c
 
 `root` 系列已统一更名为 `supervisor`，语义与"Supervisor 多领域路由"一致：
 
-- 模块：`orchestrator/root_graph.py` → `orchestrator/supervisor_graph.py`；
+- 模块：`orchestrator/`（旧 root_graph）→ `orchestrator/graphs/supervisor_graph.py`；
   `orchestrator/nodes/root.py` → `orchestrator/nodes/supervisor.py`；
   测试 `tests/test_root_graph_routing.py` → `tests/test_supervisor_graph_routing.py`。
 - 符号：`build_root_graph` → `build_supervisor_graph`；`RootGraphDependencies` → `SupervisorDependencies`；
@@ -280,7 +280,7 @@ Stock Domain
 
 ### 本次实现
 
-- 新增 `orchestrator/operations.py`：`OperationRegistry` 集中登记四个领域的 operation 工厂、
+- 新增 `orchestrator/runtime/operations.py`：`OperationRegistry` 集中登记四个领域的 operation 工厂、
   默认模式与 mode 解析器；各领域 `build_X_domain_graph` 与 `AdvisorSystem._domain_runner`
   复用同一份数据，不再各自硬编码。
 - operation 白名单是显式枚举（`operation_names`/`modes`），模型不能自由调用领域工具。

@@ -7,8 +7,8 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 from finance_agent.orchestrator.contracts import BusinessDomain, DomainOutcome
-from finance_agent.orchestrator.params import ExtractedParams
-from finance_agent.orchestrator.supervisor_graph import (
+from finance_agent.orchestrator.routing.params import ExtractedParams
+from finance_agent.orchestrator.graphs.supervisor_graph import (
     SupervisorDependencies,
     build_supervisor_graph,
     project_interrupt_state,

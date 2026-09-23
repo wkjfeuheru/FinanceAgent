@@ -15,7 +15,7 @@ from finance_agent.orchestrator.domains.market import (
     build_market_domain_graph,
     run_market_mode,
 )
-from finance_agent.orchestrator.supervisor_graph import SupervisorDependencies, build_supervisor_graph
+from finance_agent.orchestrator.graphs.supervisor_graph import SupervisorDependencies, build_supervisor_graph
 
 
 def _render(mode: str, *, interpreter=None):

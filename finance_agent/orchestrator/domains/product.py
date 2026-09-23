@@ -25,7 +25,7 @@ from finance_agent.orchestrator.domains.base import (
     context_text,
     merge_facts,
 )
-from finance_agent.orchestrator.params import intent_slots_for
+from finance_agent.orchestrator.routing.params import intent_slots_for
 
 _PRODUCT_CODE = re.compile(r"[A-Z]{0,2}\d{4,6}")
 _MESSAGE_CODE = re.compile(r"(?<!\d)\d{6}(?!\d)")
@@ -297,7 +297,7 @@ def build_product_domain_graph(operations=None, *, deps: ProductDomainDeps | Non
 
     ``operations=[]`` 是合法输入（白名单为空），用 ``is None`` 判缺省。
     """
-    from finance_agent.orchestrator.operations import default_operation_registry
+    from finance_agent.orchestrator.runtime.operations import default_operation_registry
 
     registry = default_operation_registry()
     return build_domain_graph(

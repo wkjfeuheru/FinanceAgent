@@ -15,7 +15,7 @@ from finance_agent.orchestrator.domains.account import (
     build_account_domain_graph,
     resolve_account_mode,
 )
-from finance_agent.orchestrator.supervisor_graph import _DOMAIN_ORDER, classify_domains
+from finance_agent.orchestrator.graphs.supervisor_graph import _DOMAIN_ORDER, classify_domains
 
 from tests.test_portfolio_service import (  # noqa: E402 - 复用服务层内存假件
     PRODUCTS,

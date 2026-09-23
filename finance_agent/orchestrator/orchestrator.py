@@ -35,23 +35,23 @@ from finance_agent.orchestrator.contracts import (
     DomainTaskContext,
     RunBudgets,
 )
-from finance_agent.orchestrator.database import get_database
-from finance_agent.orchestrator.intent import IntentClassifier
+from finance_agent.orchestrator.persistence.database import get_database
+from finance_agent.orchestrator.routing.intent import IntentClassifier
 from finance_agent.orchestrator.memory import AgentMemoryContext, RedisMemoryStore
-from finance_agent.orchestrator.params import (
+from finance_agent.orchestrator.routing.params import (
     CANCEL_SENTINEL,
     profile_updates_from_answers,
 )
-from finance_agent.orchestrator.plan_execute import deterministic_planner
-from finance_agent.orchestrator.resume import ResumeCoordinator
-from finance_agent.orchestrator.supervisor_graph import (
+from finance_agent.orchestrator.graphs.plan_execute_graph import deterministic_planner
+from finance_agent.orchestrator.runtime.resume import ResumeCoordinator
+from finance_agent.orchestrator.graphs.supervisor_graph import (
     SupervisorDependencies,
     build_supervisor_graph,
     project_interrupt_state,
     project_supervisor_state,
 )
-from finance_agent.orchestrator.run_state import RunStateStore
-from finance_agent.orchestrator.thread_key import build_thread_id
+from finance_agent.orchestrator.persistence.run_state import RunStateStore
+from finance_agent.orchestrator.persistence.thread_key import build_thread_id
 from finance_agent.research.contracts import AnalysisRequest, AnalysisResult
 from finance_agent.middleware import BLOCKED_RESPONSE, should_block_input
 
@@ -187,7 +187,7 @@ class AdvisorSystem:
 
     def _get_quant_gateway(self):
         if self._quant_gateway is None:
-            from finance_agent.orchestrator.quant import CeleryQuantGateway
+            from finance_agent.orchestrator.runtime.quant import CeleryQuantGateway
 
             self._quant_gateway = CeleryQuantGateway(
                 async_repository=self._get_async_run_repository()
@@ -196,8 +196,8 @@ class AdvisorSystem:
 
     # 会话 ReAct 执行器：FAQ 检索 + 受约束补充叙述。
     def _conversation_runner(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        from finance_agent.orchestrator.conversation_graph import run_conversation
-        from finance_agent.orchestrator.react import build_chat_model_callable
+        from finance_agent.orchestrator.graphs.conversation_graph import run_conversation
+        from finance_agent.orchestrator.runtime.react import build_chat_model_callable
 
         return run_conversation(
             self._get_faq_retriever(),
@@ -210,7 +210,7 @@ class AdvisorSystem:
     # 单领域 Domain ReAct 执行器：按注册表的元数据分发到对应子图。
     def _domain_runner(self, context: DomainTaskContext) -> DomainOutcome:
         from finance_agent.orchestrator.contracts import BusinessDomain
-        from finance_agent.orchestrator.operations import default_operation_registry
+        from finance_agent.orchestrator.runtime.operations import default_operation_registry
 
         domain = context.task.domain
         registry = default_operation_registry()
@@ -244,7 +244,7 @@ class AdvisorSystem:
     # 复用 INTENT_MODEL 的跨领域 Planner；未配置时回退确定性计划。
     def _planner(self):
         from finance_agent.config import get_intent_model
-        from finance_agent.orchestrator.plan_execute import build_llm_planner
+        from finance_agent.orchestrator.graphs.plan_execute_graph import build_llm_planner
 
         model = get_intent_model()
         return build_llm_planner(model) if model is not None else deterministic_planner
@@ -360,7 +360,7 @@ class AdvisorSystem:
         if not customer_id or not conversation_id:
             return []
         try:
-            from finance_agent.orchestrator.resume import (
+            from finance_agent.orchestrator.runtime.resume import (
                 RepositoryQuantRuntime,
                 ResumeCoordinator,
             )
@@ -908,7 +908,7 @@ class AdvisorSystem:
 
     def _quant_runtime(self):
         """构造恢复运行时：仓储读 job、网关查状态、runner 执行恢复。"""
-        from finance_agent.orchestrator.resume import RepositoryQuantRuntime
+        from finance_agent.orchestrator.runtime.resume import RepositoryQuantRuntime
 
         return RepositoryQuantRuntime(
             self._get_quant_gateway(),

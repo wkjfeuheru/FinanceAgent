@@ -379,7 +379,7 @@ def build_market_domain_graph(operations=None, *, interpreter: PolicyImpactInter
     ``operations=[]`` 是合法输入（白名单为空，任何模式都安全失败），
     因此必须用 ``is None`` 判缺省，不能 truthy 判断。
     """
-    from finance_agent.orchestrator.operations import default_operation_registry
+    from finance_agent.orchestrator.runtime.operations import default_operation_registry
 
     registry = default_operation_registry()
     return build_domain_graph(

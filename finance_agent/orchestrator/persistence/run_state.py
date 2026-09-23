@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from finance_agent.orchestrator.thread_key import build_thread_id, parse_thread_id
+from finance_agent.orchestrator.persistence.thread_key import build_thread_id, parse_thread_id
 
 
 class RunStateStore:

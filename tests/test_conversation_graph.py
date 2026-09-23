@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Sequence
 
 from finance_agent.faq.contracts import FaqSearchMatch, FaqSearchResult
-from finance_agent.orchestrator.conversation_graph import build_conversation_graph
+from finance_agent.orchestrator.graphs.conversation_graph import build_conversation_graph
 
 
 class _FakeRetriever:
@@ -172,7 +172,7 @@ def test_conversation_without_faq_hit_is_not_trusted():
 
 def test_rendered_observation_uses_explicit_answer_without_splitting():
     """答案内部可以有空行；渲染必须完整使用 answer，不能再按字符串格式猜测。"""
-    from finance_agent.orchestrator.conversation_graph import _render_faq
+    from finance_agent.orchestrator.graphs.conversation_graph import _render_faq
 
     result = _found_retriever()._result
     result.matches[0].answer = "任何声称保证收益的宣传都涉嫌违规。\n\n投资者应核实产品材料。"

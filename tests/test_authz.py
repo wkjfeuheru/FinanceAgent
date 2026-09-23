@@ -71,7 +71,7 @@ def test_chat_stop_rejects_conversation_not_owned_by_caller(auth_store, monkeypa
             return None  # 该会话不属于当前用户
 
     monkeypatch.setattr(
-        "finance_agent.orchestrator.database.get_database", lambda: _DB(),
+        "finance_agent.orchestrator.persistence.database.get_database", lambda: _DB(),
     )
 
     with pytest.raises(HTTPException) as exc:
@@ -98,7 +98,7 @@ def test_chat_stop_allows_owned_conversation(auth_store, monkeypatch):
             return True
 
     monkeypatch.setattr(
-        "finance_agent.orchestrator.database.get_database", lambda: _DB(),
+        "finance_agent.orchestrator.persistence.database.get_database", lambda: _DB(),
     )
     monkeypatch.setattr(r, "get_system", lambda: _System())
 

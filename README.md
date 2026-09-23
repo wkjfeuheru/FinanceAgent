@@ -86,8 +86,14 @@ FinanceAgent/
 │   ├── contracts/           # 请求、响应和运行审计契约
 │   ├── data/                # 认证、业务存储、PostgreSQL 和数据源
 │   ├── middleware/          # 内容过滤和模型重试
-│   ├── orchestrator/        # 工作流编排、记忆、状态和业务工具
-│   │   └── params.py        # 各领域关键参数登记、抽取与入参校验（缺参触发弹窗追问）
+│   ├── orchestrator/        # 工作流编排（LangGraph Supervisor Graph）、记忆与业务工具
+│   │   ├── graphs/          # 宿主图组装：supervisor_graph / plan_execute_graph / conversation_graph
+│   │   ├── routing/         # 意图分类（intent）与参数补全（params，缺参触发弹窗追问）
+│   │   ├── runtime/         # 有界 ReAct 内核、操作注册表、量化网关、断点恢复与共享 reducer
+│   │   ├── persistence/     # 业务库单例接缝（database）、检查点状态（run_state）与线程键（thread_key）
+│   │   ├── nodes/           # LangGraph 节点函数（make_* 工厂）
+│   │   ├── domains/         # 四个业务领域子图（stock / market / product / account）
+│   │   └── tools/           # LangChain 工具（行情、技术指标、组合分析等）
 │   ├── portfolio/           # 模拟交易：费率、净值来源与账户/持仓服务
 │   ├── research/            # 确定性股票研究引擎
 │   ├── product_research/    # 产品研究与适配度评估

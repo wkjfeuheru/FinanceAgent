@@ -166,7 +166,7 @@ def _authorize_conversation(customer_id: str, conversation_id: str) -> None:
     """
     if not conversation_id:
         return
-    from finance_agent.orchestrator.database import get_database
+    from finance_agent.orchestrator.persistence.database import get_database
 
     if get_database().get_conversation(conversation_id, customer_id) is None:
         raise HTTPException(status_code=404, detail="对话不存在")
@@ -264,7 +264,7 @@ async def chat_stop(
     if conversation_id:
         # 会话归属校验：stop 按 conversation_id 索引停止标记，若不校验归属，
         # 任何登录用户只要知道 id 就能停掉他人的运行。
-        from finance_agent.orchestrator.database import get_database
+        from finance_agent.orchestrator.persistence.database import get_database
 
         if get_database().get_conversation(conversation_id, customer_id) is None:
             raise HTTPException(status_code=404, detail="会话不存在或无权操作")
@@ -447,7 +447,7 @@ async def get_profile(http_request: Request, customer_id: str) -> ProfileRespons
 async def get_history(http_request: Request, customer_id: str, limit: int = 100) -> HistoryResponse:
     """获取用户对话历史（跨会话，最近 limit 条，按时间正序）。"""
     _authorize_customer(http_request, customer_id)
-    from finance_agent.orchestrator.database import get_database
+    from finance_agent.orchestrator.persistence.database import get_database
     messages = get_database().get_customer_messages(customer_id, limit)
     return HistoryResponse(customer_id=customer_id.upper(), messages=messages)
 
@@ -458,7 +458,7 @@ async def get_history(http_request: Request, customer_id: str, limit: int = 100)
 async def create_conversation(http_request: Request, customer_id: str) -> dict[str, Any]:
     """创建一个新对话。"""
     _authorize_customer(http_request, customer_id)
-    from finance_agent.orchestrator.database import get_database
+    from finance_agent.orchestrator.persistence.database import get_database
     return get_database().create_conversation(customer_id)
 
 
@@ -477,7 +477,7 @@ async def get_conversation_messages(
 ) -> dict[str, Any]:
     """读取指定对话的消息（从 finance_agent.db 查询）。"""
     _authorize_customer(http_request, customer_id)
-    from finance_agent.orchestrator.database import get_database
+    from finance_agent.orchestrator.persistence.database import get_database
     # 确认对话属于该 customer
     conv = get_database().get_conversation(conversation_id, customer_id)
     if not conv:
@@ -546,7 +546,7 @@ async def clear_records(
             for suffix in ("messages", "recent_summary", "window"):
                 cleared += client.delete(f"finance_cs:{cid_upper}:{suffix}")
             # 当前格式：按会话清除窗口/摘要
-            from finance_agent.orchestrator.database import get_database
+            from finance_agent.orchestrator.persistence.database import get_database
             for conv in get_database().list_conversations(customer_id):
                 cleared += int(
                     system.memory.store.clear_conversation(customer_id, conv["conversation_id"])
@@ -587,7 +587,7 @@ async def delete_account(request: Request) -> dict[str, Any]:
 
     try:
         system = get_system()
-        from finance_agent.orchestrator.database import get_database
+        from finance_agent.orchestrator.persistence.database import get_database
         client = system.memory.store._get_client()
         cleared = 0
         # 旧格式残留键

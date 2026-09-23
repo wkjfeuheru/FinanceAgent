@@ -32,7 +32,7 @@ os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/15")
 
 from finance_agent.orchestrator.contracts import BusinessDomain  # noqa: E402
-from finance_agent.orchestrator.intent import (  # noqa: E402
+from finance_agent.orchestrator.routing.intent import (  # noqa: E402
     _EXECUTION_MODES,
     _INTENTS,
     _INTENT_CONFIDENCE_THRESHOLD,
@@ -40,7 +40,7 @@ from finance_agent.orchestrator.intent import (  # noqa: E402
     DeepSeekIntentClassifier,
     IntentClassifier,
 )
-from finance_agent.orchestrator.supervisor_graph import classify_domains  # noqa: E402
+from finance_agent.orchestrator.graphs.supervisor_graph import classify_domains  # noqa: E402
 
 _DOMAIN_ORDER = (
     BusinessDomain.STOCK_RESEARCH.value,
@@ -372,7 +372,7 @@ def live_route(message: str) -> tuple[tuple[str, ...], str]:
         INTENT_MODEL_MAX_TOKENS,
         INTENT_MODEL_TIMEOUT,
     )
-    from finance_agent.orchestrator.intent import DeepSeekIntentClassifier
+    from finance_agent.orchestrator.routing.intent import DeepSeekIntentClassifier
 
     model = DeepSeekIntentClassifier(
         api_key=INTENT_MODEL_API_KEY,

@@ -1,6 +1,6 @@
 """业务数据库只读 LangChain 工具。
 
-涵盖用户画像/会话记录（orchestrator.database）与产品库查询（data.product_library），
+涵盖用户画像/会话记录（orchestrator.persistence.database）与产品库查询（data.product_library），
 合并原 database.py 与 product.py 的所有业务库查询工具。
 """
 
@@ -12,7 +12,7 @@ from typing import Any
 from langchain_core.tools import tool
 
 from finance_agent.data.product_library import get_product_library
-from finance_agent.orchestrator.database import get_database
+from finance_agent.orchestrator.persistence.database import get_database
 
 
 def _json(data: Any) -> str:

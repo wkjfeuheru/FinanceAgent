@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from finance_agent.orchestrator.contracts import AsyncJobRef, BusinessDomain, DomainOutcome
-from finance_agent.orchestrator.supervisor_graph import SupervisorDependencies, build_supervisor_graph, project_supervisor_state
+from finance_agent.orchestrator.graphs.supervisor_graph import SupervisorDependencies, build_supervisor_graph, project_supervisor_state
 
 # 现有前端与 /api/chat 依赖的字段，V2 不得删除。
 _LEGACY_KEYS = {

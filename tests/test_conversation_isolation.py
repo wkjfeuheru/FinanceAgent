@@ -42,7 +42,7 @@ def _patch_db(monkeypatch, *, owned: bool):
                 return None
             return {"conversation_id": conversation_id, "customer_id": customer_id}
 
-    monkeypatch.setattr("finance_agent.orchestrator.database.get_database", lambda: _DB())
+    monkeypatch.setattr("finance_agent.orchestrator.persistence.database.get_database", lambda: _DB())
 
 
 # ── DELETE 路由 ──────────────────────────────────────────────────────────────
@@ -132,7 +132,7 @@ def test_chat_with_empty_conversation_id_skips_ownership_check(auth_store, monke
             checked["n"] += 1
             return None
 
-    monkeypatch.setattr("finance_agent.orchestrator.database.get_database", lambda: _DB())
+    monkeypatch.setattr("finance_agent.orchestrator.persistence.database.get_database", lambda: _DB())
 
     class _System:
         def handle_message(self, **kwargs):
