@@ -9,6 +9,7 @@ import type {
   HealthResponse,
   SSEEvent,
   SSEStageEvent,
+  SSEDeltaEvent,
   SSEResponseEvent,
   StreamCallbacks,
   LoginRequest,
@@ -144,6 +145,7 @@ export async function chatStream(req: ChatRequest, callbacks: StreamCallbacks): 
 
   const guardedCallbacks: StreamCallbacks = {
     onStage: callbacks.onStage,
+    onDelta: callbacks.onDelta,
     onResponse(event) {
       terminalEventReceived = true
       callbacks.onResponse(event)
@@ -249,6 +251,9 @@ function dispatchEvent(event: SSEEvent, callbacks: StreamCallbacks): void {
   switch (event.type) {
     case 'stage':
       callbacks.onStage(event as SSEStageEvent)
+      break
+    case 'delta':
+      callbacks.onDelta?.(event as SSEDeltaEvent)
       break
     case 'response':
       callbacks.onResponse(event as SSEResponseEvent)

@@ -27,7 +27,7 @@ from tests.test_portfolio_service import (  # noqa: E402 - 复用服务层内存
 CUSTOMER = "CUST000001"
 
 
-def _context(message: str) -> DomainTaskContext:
+def _context(message: str, profile: dict | None = None) -> DomainTaskContext:
     return DomainTaskContext(
         task=PlanTask(
             task_id="t-1", domain=BusinessDomain.ACCOUNT_PORTFOLIO,
@@ -37,6 +37,7 @@ def _context(message: str) -> DomainTaskContext:
         customer_id=CUSTOMER,
         conversation_id="conv",
         user_message=message,
+        user_profile=profile or {},
     )
 
 
@@ -51,9 +52,9 @@ def service():
     ))
 
 
-def _run(service, message: str):
+def _run(service, message: str, profile: dict | None = None):
     graph = build_account_domain_graph(deps=AccountDomainDeps(service=service))
-    return graph.invoke({"context": _context(message)})["domain_outcome"]
+    return graph.invoke({"context": _context(message, profile)})["domain_outcome"]
 
 
 # ── 模式解析 ──────────────────────────────────────────────────────
@@ -65,6 +66,10 @@ def _run(service, message: str):
     ("我的账户里还有多少钱", "account_overview"),
     ("我的总资产是多少", "account_overview"),
     ("我亏了多少", "account_overview"),
+    ("我的持仓怎么优化", "allocation_review"),
+    ("资产配置合理吗", "allocation_review"),
+    ("帮我看看持仓的集中度", "allocation_review"),
+    ("风险敞口大不大", "allocation_review"),
     ("帮我买 1000 块 110011", "trade_guidance"),
     ("我要清仓", "trade_guidance"),
     ("帮我充值 5000", "trade_guidance"),
@@ -77,6 +82,11 @@ def test_mode_resolution_is_deterministic(message, expected):
 def test_trade_keywords_win_over_query_keywords():
     """"清仓我的持仓"里同时有查询词，必须按交易引导处理（更安全）。"""
     assert resolve_account_mode(_context("帮我清仓我的持仓")) == "trade_guidance"
+
+
+def test_allocation_review_wins_over_plain_position_query():
+    """"我的持仓怎么优化"含"持仓"，必须先命中配置诊断而不是只回一份明细。"""
+    assert resolve_account_mode(_context("我的持仓怎么优化")) == "allocation_review"
 
 
 def test_account_domain_is_registered_in_domain_order():
@@ -145,6 +155,68 @@ def test_unpriced_position_marks_partial_and_warns(service):
     assert outcome.status == "partial"
     assert any(item.startswith("pricing_issue:") for item in outcome.limitations)
     assert "缺少可用净值" in outcome.summary
+
+
+# ── 配置诊断（allocation_review）──────────────────────────────────
+
+def test_allocation_review_reports_concentration_and_metrics(service):
+    service.deposit(CUSTOMER, 100000.0)
+    service.buy(CUSTOMER, "110011", amount=60000.0)
+    service.buy(CUSTOMER, "003003", amount=40000.0)
+    outcome = _run(service, "我的持仓怎么优化", {"risk_preference": "稳健"})
+
+    assert outcome.status == "success"
+    assert outcome.structured_data["mode"] == "allocation_review"
+    review = outcome.structured_data["allocation_review"]
+    assert review["profile_used"] is True
+    assert review["risk_preference"] == "R2"
+    assert review["concentration"]["effective_n"] is not None
+    assert "集中度" in outcome.summary
+    assert "参考区间" in outcome.summary
+    assert "不构成投资建议" in outcome.summary
+
+
+def test_allocation_review_without_profile_skips_band_comparison(service):
+    service.deposit(CUSTOMER, 100000.0)
+    service.buy(CUSTOMER, "110011", amount=10000.0)
+    outcome = _run(service, "资产配置合理吗")
+
+    review = outcome.structured_data["allocation_review"]
+    assert review["profile_used"] is False
+    assert review["deviations"] == []
+    assert "补充风险偏好" in outcome.summary
+
+
+def test_allocation_review_without_holdings_guides_to_product_page(service):
+    outcome = _run(service, "我的持仓怎么优化")
+    assert outcome.status == "success"
+    assert "没有持仓" in outcome.summary
+    assert outcome.structured_data["allocation_review"] == {}
+
+
+def test_allocation_review_never_emits_buy_sell_instructions(service):
+    """措辞必须不含敏感词：合规出口会对命中词删词，改写失败即拦截。"""
+    from finance_agent.middleware.content_filter import check_sensitive_words
+
+    service.deposit(CUSTOMER, 100000.0)
+    service.buy(CUSTOMER, "110011", amount=60000.0)
+    service.buy(CUSTOMER, "003003", amount=40000.0)
+    outcome = _run(service, "我的持仓怎么优化", {"risk_preference": "稳健"})
+
+    assert check_sensitive_words(outcome.summary) == []
+
+
+def test_allocation_review_is_read_only(service):
+    """配置诊断同样不得写库。"""
+    service.deposit(CUSTOMER, 100000.0)
+    service.buy(CUSTOMER, "110011", amount=10000.0)
+    orders_before = len(service.store.orders)
+    txns_before = len(service.store.transactions)
+
+    _run(service, "我的持仓怎么优化", {"risk_preference": "平衡"})
+
+    assert len(service.store.orders) == orders_before
+    assert len(service.store.transactions) == txns_before
 
 
 def test_service_failure_returns_safe_text_not_exception(service):

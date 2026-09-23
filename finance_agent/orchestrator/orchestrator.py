@@ -12,10 +12,16 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+from dataclasses import asdict
 from typing import Any, Callable, Dict, List
+
+from langgraph.types import Command
 
 from finance_agent.config import (
     ORCHESTRATION_PLAN_DEADLINE,
+    ORCHESTRATION_STREAM_CHUNK_DELAY_MS,
+    ORCHESTRATION_STREAM_CHUNK_SIZE,
+    ORCHESTRATION_STREAM_MAX_SECONDS,
     ORCHESTRATION_TURN_TIMEOUT,
     get_checkpoint_saver,
     get_supervisor_model,
@@ -32,11 +38,16 @@ from finance_agent.orchestrator.contracts import (
 from finance_agent.orchestrator.database import get_database
 from finance_agent.orchestrator.intent import IntentClassifier
 from finance_agent.orchestrator.memory import AgentMemoryContext, RedisMemoryStore
+from finance_agent.orchestrator.params import (
+    CANCEL_SENTINEL,
+    profile_updates_from_answers,
+)
 from finance_agent.orchestrator.plan_execute import deterministic_planner
 from finance_agent.orchestrator.resume import ResumeCoordinator
 from finance_agent.orchestrator.supervisor_graph import (
     SupervisorDependencies,
     build_supervisor_graph,
+    project_interrupt_state,
     project_supervisor_state,
 )
 from finance_agent.orchestrator.run_state import RunStateStore
@@ -54,6 +65,33 @@ def _stable_user_id(customer_id: str) -> uuid.UUID:
     若每轮随机生成，审计表按 user_id 做用户维度关联将永远无法命中同一客户。
     """
     return uuid.uuid5(uuid.NAMESPACE_URL, f"finance-agent:customer:{customer_id}")
+
+
+def _iter_stream_chunks(text: str, chunk_size: int) -> List[str]:
+    """把定稿答复切成 SSE 下发用的文本块。
+
+    按 Python 码点切分（而非字节），不会拆坏多字节字符。流式只改变**呈现节奏**：
+    内容、顺序与最终 ``response`` 事件完全一致，前端据此累积渲染。
+    """
+    if not text:
+        return []
+    size = max(1, chunk_size)
+    return [text[index:index + size] for index in range(0, len(text), size)]
+
+
+def _stream_chunk_delay(total_chunks: int) -> float:
+    """按总块数收敛每块停顿，使分块下发的额外耗时不超过配置上限。
+
+    长报告若按固定停顿逐块下发会叠出数秒等待；这里把每块停顿压到
+    ``ORCHESTRATION_STREAM_MAX_SECONDS / 总块数`` 以内，流式只为观感服务，
+    不让整体时延被"打字机"拖长。
+    """
+    if total_chunks <= 0:
+        return 0.0
+    base = max(0.0, ORCHESTRATION_STREAM_CHUNK_DELAY_MS / 1000.0)
+    if base == 0.0 or ORCHESTRATION_STREAM_MAX_SECONDS <= 0:
+        return 0.0
+    return min(base, ORCHESTRATION_STREAM_MAX_SECONDS / total_chunks)
 
 
 # 会话级互斥锁：同一会话的轮次必须串行——进度回调、记忆窗口和 checkpoint
@@ -463,8 +501,15 @@ class AdvisorSystem:
         customer_id: str = "CUST001",
         progress_callback: Callable[[str, str], None] | None = None,
         conversation_id: str = "",
+        resume: bool = False,
+        answers: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
-        """处理一轮同步消息；根图为唯一执行路径，异常显式失败不回退。"""
+        """处理一轮同步消息；根图为唯一执行路径，异常显式失败不回退。
+
+        ``resume=True`` 表示这轮消息是对上一轮"缺参追问"（LangGraph interrupt）
+        的回答，``answers`` 是弹窗提交的结构化参数；此时在同一 thread 上
+        ``Command(resume=answers)`` 续跑，而不是开启新轮。
+        """
         conversation_id = conversation_id or uuid.uuid4().hex
         if should_block_input(message):
             return {
@@ -521,8 +566,22 @@ class AdvisorSystem:
                 root = getattr(self, "supervisor", None) or self._build_supervisor()
                 self._trace_agent("RootGraph", conversation_id)
                 thread_id = build_thread_id(customer_id, conversation_id)
-                result = root.invoke(
-                    {
+                # 画像卡注入：此前只把画像拼进 memory_context 却无人消费，导致
+                # profile_complete 恒假、个性化结论不可达。这里把真实卡片随输入
+                # 注入根图，再由 DomainTaskContext 透传给领域 handler。
+                profile_card = self._best_effort_value(
+                    "load_profile", lambda: self.memory.get_profile(customer_id),
+                )
+                profile_payload = asdict(profile_card) if profile_card is not None else {}
+                # 弹窗补填的偏好先落长期画像：写入后本轮注入的就是最新卡片。
+                self._persist_param_profile(customer_id, answers, profile_payload)
+                config = {
+                    "configurable": {"thread_id": thread_id},
+                    "recursion_limit": getattr(self, "budgets", RunBudgets.from_config()).graph_steps,
+                }
+                result = self._invoke_with_resume(
+                    root, config, resume=resume, answers=answers,
+                    base_input={
                         "user_message": message,
                         "history": "\n".join(
                             str(item.get("content", "")) for item in history
@@ -533,31 +592,28 @@ class AdvisorSystem:
                         "thread_id": thread_id,
                         "run_id": run_id,
                         "memory_context": memory_data.get("context_text", ""),
+                        "user_profile": profile_payload,
                         "warnings": [],
                         "task_results": {},
                         "domain_outcomes": {},
-                    },
-                    # thread_id 只在 config 里生效（state 里的同名字段对 checkpoint
-                    # 无效）；带上它才能让运行状态落库、崩溃后可续。未编译 checkpointer
-                    # 的图忽略该配置，测试与单次调用不受影响。
-                    # recursion_limit 从 RunBudgets 取值（config.ORCHESTRATION_GRAPH_STEPS
-                    # 的受校验投影）：缺省时 LangGraph 用 25，与配置声明的预算不一致。
-                    {
-                        "configurable": {"thread_id": thread_id},
-                        "recursion_limit": getattr(self, "budgets", RunBudgets.from_config()).graph_steps,
                     },
                 )
             except Exception:
                 logger.exception("orchestration_failed conversation_id=%s", conversation_id)
                 output = self._failed_output(conversation_id)
             else:
-                output = project_supervisor_state(result, conversation_id=conversation_id)
-                output["customer_id"] = customer_id
-                # 领域因异步量化任务中断（processing）时落库结论快照，使状态
-                # 端点能在任务完成后按真实 job_id 恢复原会话。
-                self._persist_pending_outcomes(
-                    result, customer_id=customer_id, conversation_id=conversation_id,
-                )
+                if result.get("__interrupt__"):
+                    output = project_interrupt_state(
+                        result, conversation_id=conversation_id, customer_id=customer_id,
+                    )
+                else:
+                    output = project_supervisor_state(result, conversation_id=conversation_id)
+                    output["customer_id"] = customer_id
+                    # 领域因异步量化任务中断（processing）时落库结论快照，使状态
+                    # 端点能在任务完成后按真实 job_id 恢复原会话。
+                    self._persist_pending_outcomes(
+                        result, customer_id=customer_id, conversation_id=conversation_id,
+                    )
             finally:
                 self._progress_context.callback = None
                 self._stop_context_ref.conversation_id = ""
@@ -669,6 +725,84 @@ class AdvisorSystem:
         except Exception:  # noqa: BLE001 - 副作用失败不得改变响应结果
             self._bump_degradation(category)
             logger.warning("best_effort_failed category=%s", category, exc_info=True)
+
+    def _best_effort_value(self, category: str, action: Callable[[], Any]) -> Any:
+        """``_best_effort`` 的取值版本：失败降级为 ``None`` 并留降级计数。"""
+        try:
+            return action()
+        except Exception:  # noqa: BLE001 - 读取失败回退空值，不影响本轮
+            self._bump_degradation(category)
+            logger.warning("best_effort_value_failed category=%s", category, exc_info=True)
+            return None
+
+    def _persist_param_profile(
+        self, customer_id: str, answers: Dict[str, Any] | None, profile_payload: Dict[str, Any],
+    ) -> None:
+        """把弹窗补填的偏好（风险偏好/投资期限）写入长期画像，并同步本轮注入值。
+
+        画像卡读取失败时 ``profile_payload`` 为空；此时仍尝试写入（``save_profile``
+        内部按字段合并语义由调用方保证），因此先用空卡片兜底再补字段。写入失败只
+        降级记录，绝不影响本轮回答。
+        """
+        updates = profile_updates_from_answers(answers)
+        if not updates:
+            return
+        from finance_agent.orchestrator.memory import UserProfileCard
+
+        def _save() -> None:
+            existing = self.memory.get_profile(customer_id)
+            card = UserProfileCard.from_dict(asdict(existing)) if existing is not None \
+                else UserProfileCard(customer_id=customer_id.upper())
+            for key, value in updates.items():
+                setattr(card, key, value)
+            if self.memory.save_profile(card):
+                profile_payload.update(asdict(card))
+
+        self._best_effort("persist_param_profile", _save)
+
+    def _has_pending_interrupt(self, root: Any, config: Dict[str, Any]) -> bool:
+        """探测该 thread 上是否有挂起的 interrupt（无 checkpointer 时恒为 False）。"""
+        get_state = getattr(root, "get_state", None)
+        if get_state is None:
+            return False
+        try:
+            snapshot = get_state(config)
+        except Exception:  # noqa: BLE001 - 探测失败按"无挂起"处理，回退普通轮次
+            return False
+        tasks = getattr(snapshot, "tasks", ()) or ()
+        if any(getattr(task, "interrupts", ()) for task in tasks):
+            return True
+        # 兼容不同实现的快照形状：values 上残留的挂起载荷。
+        if getattr(snapshot, "next", ()) and getattr(snapshot, "interrupts", ()):
+            return True
+        return False
+
+    def _invoke_with_resume(
+        self,
+        root: Any,
+        config: Dict[str, Any],
+        *,
+        resume: bool,
+        answers: Dict[str, Any] | None,
+        base_input: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """按是否存在挂起 interrupt 决定 invoke 方式。
+
+        - 有挂起 + ``resume=True`` + ``answers``：``Command(resume=answers)`` 续跑。
+        - 有挂起但本轮是自由文本新消息：先用取消哨兵关掉挂起 run（否则新问题会被
+          误当成对追问的回答），再以普通轮次重新开始。
+        - 无挂起或图不支持 resume：普通轮次。
+        """
+        if not self._has_pending_interrupt(root, config):
+            return root.invoke(base_input, config)
+        if resume and answers:
+            return root.invoke(Command(resume=answers), config)
+        # 用户没在回答追问（或前端没带结构化答案）：放弃挂起 run 并开新轮。
+        self._best_effort(
+            "cancel_pending_interrupt",
+            lambda: root.invoke(Command(resume={CANCEL_SENTINEL: True}), config),
+        )
+        return root.invoke(base_input, config)
 
     def _persist_pending_outcomes(
         self, state: Dict[str, Any], *, customer_id: str, conversation_id: str,
@@ -909,6 +1043,8 @@ class AdvisorSystem:
         customer_id: str = "CUST001",
         conversation_id: str = "",
         turn_timeout: float | None = None,
+        resume: bool = False,
+        answers: Dict[str, Any] | None = None,
     ):
         """流式处理一轮消息。
 
@@ -931,7 +1067,10 @@ class AdvisorSystem:
             )
 
         task = asyncio.create_task(
-            asyncio.to_thread(self.handle_message, message, chat_history, customer_id, report, conversation_id)
+            asyncio.to_thread(
+                self.handle_message, message, chat_history, customer_id, report,
+                conversation_id, resume, answers,
+            )
         )
         # 整轮墙钟上限：分项超时（LLM/意图/数据源）各自有界，但没有一层约束
         # "整轮最多多久"。缺了它，串起来的多个可选超时叠加起来仍可能让 SSE
@@ -955,7 +1094,17 @@ class AdvisorSystem:
             except asyncio.TimeoutError:
                 yield {"type": "heartbeat"}
         result = await task
-        yield {"type": "response", "content": result["response"], "data": result}
+        # 合规出口已对完整草稿校验完毕，此刻才把定稿文本分块下发：先把答复切成
+        # delta 事件渐进呈现（前端累积渲染），最后再送一次完整 response 事件，
+        # 携带权威内容与结构化数据，兼容只消费 response 的旧客户端。
+        response_text = str(result.get("response") or "")
+        chunks = _iter_stream_chunks(response_text, ORCHESTRATION_STREAM_CHUNK_SIZE)
+        delay = _stream_chunk_delay(len(chunks))
+        for chunk in chunks:
+            yield {"type": "delta", "content": chunk}
+            if delay:
+                await asyncio.sleep(delay)
+        yield {"type": "response", "content": response_text, "data": result}
 
     # ── 会话/画像管理 ─────────────────────────────────────────────
 

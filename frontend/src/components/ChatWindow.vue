@@ -3,8 +3,9 @@ import { ref, reactive, nextTick } from 'vue'
 import { ChatDotRound } from '@element-plus/icons-vue'
 import MessageList from './MessageList.vue'
 import MessageInput from './MessageInput.vue'
+import ParamDialog from './ParamDialog.vue'
 import { chatStream } from '@/api/chat'
-import type { ChatMessage, ChatRequest, HistoryMessage } from '@/types'
+import type { ChatMessage, ChatRequest, HistoryMessage, PendingInput } from '@/types'
 
 const props = defineProps<{
   customerId: string
@@ -18,6 +19,8 @@ const emit = defineEmits<{
 
 const messages = ref<ChatMessage[]>([])
 const loading = ref(false)
+// 缺参追问弹窗的当前载荷；非空即显示弹窗。
+const pendingInput = ref<PendingInput | null>(null)
 
 function now(): string {
   return new Date().toISOString()
@@ -44,16 +47,15 @@ function buildHistory(): Array<{ role: string; content: string }> {
     .map((m) => ({ role: m.role, content: m.content }))
 }
 
-/** 处理发送 */
-async function handleSend(text: string) {
-  // 追加用户消息
-  messages.value.push({
-    role: 'user',
-    content: text,
-    timestamp: now(),
-  })
+/** 把弹窗答案渲染成用户气泡文本（后端只收到结构化 answers，此处仅为可读）。 */
+function renderAnswers(pending: PendingInput, answers: Record<string, any>): string {
+  const labels = new Map(pending.fields.map((f) => [f.name, f.label]))
+  const parts = Object.entries(answers).map(([name, value]) => `${labels.get(name) || name}：${value}`)
+  return parts.length ? parts.join('，') : '（已跳过）'
+}
 
-  // 追加占位助手消息
+/** 发起一轮对话（新建消息气泡 + 流式接收 + 追问处理）。 */
+async function runTurn(req: ChatRequest) {
   const placeholder = reactive<ChatMessage>({
     role: 'assistant',
     content: '',
@@ -63,15 +65,7 @@ async function handleSend(text: string) {
     progressSteps: [],
   })
   messages.value.push(placeholder)
-
   loading.value = true
-
-  const req: ChatRequest = {
-    message: text,
-    customer_id: props.customerId,
-    chat_history: buildHistory().filter((h) => h.content !== text),
-    conversation_id: props.conversationId,
-  }
 
   try {
     await chatStream(req, {
@@ -92,7 +86,15 @@ async function handleSend(text: string) {
           })
         }
       },
+      onDelta(event) {
+        // 定稿答复的分块下发：按序累积渲染，形成逐字输出现象。
+        placeholder.content = (placeholder.content || '') + (event.content || '')
+        placeholder.stage = ''
+        const steps = placeholder.progressSteps || []
+        if (steps.length) steps[steps.length - 1].status = 'completed'
+      },
       onResponse(event) {
+        // response 携带权威全文，覆盖累积结果以防分块与最终内容有偏差。
         placeholder.content = event.content
         placeholder.data = event.data
         placeholder.loading = false
@@ -103,6 +105,8 @@ async function handleSend(text: string) {
         if (event.data?.user_profile && Object.keys(event.data.user_profile).length) {
           emit('profile-updated')
         }
+        // 缺参追问：以弹窗收集必填/可选参数，用户提交后在挂起线程上 resume。
+        pendingInput.value = event.data?.pending_input || null
       },
       onError(errMsg) {
         placeholder.content = `抱歉，处理过程中出现错误：${errMsg}`
@@ -118,13 +122,71 @@ async function handleSend(text: string) {
   }
 }
 
+/** 处理发送 */
+async function handleSend(text: string) {
+  messages.value.push({
+    role: 'user',
+    content: text,
+    timestamp: now(),
+  })
+  pendingInput.value = null
+  await runTurn({
+    message: text,
+    customer_id: props.customerId,
+    chat_history: buildHistory().filter((h) => h.content !== text),
+    conversation_id: props.conversationId,
+  })
+}
+
+/** 弹窗提交：把答案作为对缺参追问的恢复值续跑同一轮。 */
+async function handleParamSubmit(answers: Record<string, any>) {
+  const pending = pendingInput.value
+  if (!pending) return
+  messages.value.push({
+    role: 'user',
+    content: renderAnswers(pending, answers),
+    timestamp: now(),
+  })
+  pendingInput.value = null
+  await runTurn({
+    message: pending.question,
+    customer_id: props.customerId,
+    chat_history: buildHistory(),
+    conversation_id: props.conversationId,
+    resume: true,
+    answers,
+  })
+}
+
+/** 弹窗取消：通知后端放弃挂起 run，避免下一轮被误当作回答。 */
+async function handleParamCancel() {
+  const pending = pendingInput.value
+  if (!pending) return
+  pendingInput.value = null
+  messages.value.push({
+    role: 'user',
+    content: '（已取消本次补充）',
+    timestamp: now(),
+  })
+  await runTurn({
+    message: pending.question,
+    customer_id: props.customerId,
+    chat_history: buildHistory(),
+    conversation_id: props.conversationId,
+    resume: true,
+    answers: { __cancel__: true },
+  })
+}
+
 /** 清空对话 */
 function handleClear() {
   messages.value = []
+  pendingInput.value = null
 }
 
 function startNewConversation() {
   messages.value = []
+  pendingInput.value = null
 }
 
 defineExpose({ loadHistoryMessages, startNewConversation })
@@ -147,6 +209,12 @@ defineExpose({ loadHistoryMessages, startNewConversation })
     <MessageList :messages="messages" :loading="loading" />
 
     <MessageInput :loading="loading" @send="handleSend" @clear="handleClear" />
+
+    <ParamDialog
+      :pending="pendingInput"
+      @submit="handleParamSubmit"
+      @cancel="handleParamCancel"
+    />
   </div>
 </template>
 

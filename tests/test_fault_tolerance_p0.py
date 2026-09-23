@@ -418,7 +418,7 @@ def test_stream_timeout_emits_error_and_stops_heartbeating():
 
     release = threading.Event()
 
-    def slow_handler(message, chat_history, customer_id, report, conversation_id):
+    def slow_handler(message, chat_history, customer_id, report, conversation_id, resume=False, answers=None):
         release.wait(timeout=5)
         return {"response": "太晚了"}
 
@@ -451,7 +451,7 @@ def test_stream_completed_result_is_not_discarded_as_timeout():
 
     否则"算好了但被当成超时丢掉"会让用户白等一轮。
     """
-    def fast_handler(message, chat_history, customer_id, report, conversation_id):
+    def fast_handler(message, chat_history, customer_id, report, conversation_id, resume=False, answers=None):
         return {"response": "答案"}
 
     # turn_timeout 设为极小值：任务会在 deadline 之前就已完成。

@@ -25,6 +25,7 @@ from finance_agent.orchestrator.domains.base import (
     context_text,
     merge_facts,
 )
+from finance_agent.orchestrator.params import intent_slots_for
 
 _PRODUCT_CODE = re.compile(r"[A-Z]{0,2}\d{4,6}")
 _MESSAGE_CODE = re.compile(r"(?<!\d)\d{6}(?!\d)")
@@ -244,11 +245,13 @@ def invoke_product(deps: ProductDomainDeps, state: dict[str, Any]) -> dict[str, 
 
 
 def _product_lookup(context: DomainTaskContext, pipeline: Any) -> OperationResult:
+    params = dict(getattr(context, "params", {}) or {})
     state = {
         "requirement": context.task.goal,
         "user_message": context.user_message,
-        "intent_slots": {},
-        "user_profile": {},
+        # 根图抽取到的产品代码/名称与用户画像卡（此前硬编码为空）。
+        "intent_slots": intent_slots_for(BusinessDomain.PRODUCT_RESEARCH, params),
+        "user_profile": dict(getattr(context, "user_profile", {}) or {}),
         "facts": [],
     }
     result_state = invoke_product(ProductDomainDeps(pipeline=pipeline), state)

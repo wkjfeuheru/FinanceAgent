@@ -182,6 +182,7 @@ class _FakeLibrary:
             "performance": {"nav": raw.get("nav"), "as_of": raw.get("as_of", ""),
                             "source": "postgresql", "return_1y": raw.get("return_1y"),
                             "max_drawdown": raw.get("max_drawdown"),
+                            "volatility": raw.get("volatility"),
                             "sharpe_ratio": raw.get("sharpe_ratio")},
             "fee": {
                 "subscription_fee": raw.get("subscription_fee"),
@@ -217,9 +218,11 @@ class _FakeNavSource:
 
 PRODUCTS = {
     "110011": {"name": "易方达中小盘混合", "nav": 3.85, "subscription_fee": 1.5,
-               "redemption_fee": "0.5%", "risk_level": "R3 中风险"},
+               "redemption_fee": "0.5%", "risk_level": "R3 中风险",
+               "volatility": 0.162, "return_1y": 0.126, "max_drawdown": 0.187},
     "003003": {"name": "华夏现金增利货币A", "nav": 1.0, "subscription_fee": 0.0,
-               "redemption_fee": "0", "risk_level": "R1 低风险"},
+               "redemption_fee": "0", "risk_level": "R1 低风险",
+               "volatility": 0.002, "return_1y": 0.0195, "max_drawdown": 0.0},
     # 费率未披露且没有净值：不可成交，用于验证显式失败。
     "999999": {"name": "数据缺失示例基金", "nav": None, "subscription_fee": None,
                "redemption_fee": "", "risk_level": "未披露"},

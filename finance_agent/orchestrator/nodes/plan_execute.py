@@ -76,6 +76,8 @@ def make_domain_worker(
             conversation_id=payload["conversation_id"],
             user_message=payload["user_message"],
             run_id=str(payload.get("run_id", "")),
+            params=dict(payload.get("params", {}) or {}),
+            user_profile=dict(payload.get("user_profile", {}) or {}),
             upstream_results={
                 dep: DomainOutcome.model_validate(value)
                 for dep, value in (payload.get("upstream_results") or {}).items()

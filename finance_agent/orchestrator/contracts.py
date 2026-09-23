@@ -140,6 +140,11 @@ class DomainTaskContext(BaseModel):
     # 本轮 run_id：异步量化任务提交时需要，用于持久化 job 引用并支持恢复。
     # 默认空串保持既有构造点兼容（旧调用方不传也不报错）。
     run_id: str = ""
+    # 本轮抽取到的领域参数（含弹窗补填）：领域 handler 映射为 ``intent_slots``。
+    params: dict[str, Any] = Field(default_factory=dict)
+    # 用户画像卡快照。此前领域 handler 硬编码 ``{}``，导致 profile_complete 恒假、
+    # personalization_status 恒为 research_candidate；此处打通注入。
+    user_profile: dict[str, Any] = Field(default_factory=dict)
 
 
 class ExecutionPlan(BaseModel):

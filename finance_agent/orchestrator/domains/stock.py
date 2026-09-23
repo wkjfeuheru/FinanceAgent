@@ -27,6 +27,7 @@ from finance_agent.orchestrator.domains.base import (
     keyword_mode,
     merge_facts,
 )
+from finance_agent.orchestrator.params import intent_slots_for
 from finance_agent.research.contracts import (
     Action,
     AnalysisKind,
@@ -676,12 +677,16 @@ def _stock_research(deps: StockDeps, context: DomainTaskContext) -> OperationRes
     # 否则候选发现（代表股优先、其次关键词搜索）不会触发，只会报"请求无法识别"。
     mode = _resolve_stock_mode(context)
     intent = "stock_recommendation" if mode in {"candidate_search", "theme_screening"} else "stock_analysis"
+    params = dict(getattr(context, "params", {}) or {})
     state: dict[str, Any] = {
         "requirement": context.task.goal,
         "user_message": context.user_message,
         "current_task_intent": intent,
         "intent_results": {},
-        "user_profile": {},
+        # 根图抽取到的参数（分析维度/代码/主题）与用户画像卡：此前硬编码为空，
+        # 使 profile_complete 恒假、个性化结论不可达。
+        "intent_slots": intent_slots_for(BusinessDomain.STOCK_RESEARCH, params),
+        "user_profile": dict(getattr(context, "user_profile", {}) or {}),
         "facts": [],
     }
     result_state = invoke_stock(deps, state)

@@ -48,6 +48,11 @@ class AdminProductUpsertRequest(BaseModel):
 
     上下架不在此处表达：``is_active`` 只能经 publish/offline 两个动作改变，
     避免"编辑商品"这类无关操作顺手把下架商品重新上架。
+
+    ``nav`` 及 ``return_*`` / ``max_drawdown`` / ``volatility`` / ``sharpe_ratio``
+    属于业绩区块（``finance.product_performance``），与商品静态字段一起提交；
+    全部为 ``None`` 时不触碰业绩表，避免编辑商品顺手写进一条空净值。
+    收益率一律是**小数**（``0.126`` 表示 12.6%），与产品库存储口径一致。
     """
 
     code: str = Field(..., min_length=1, max_length=32, description="商品代码")
@@ -65,6 +70,20 @@ class AdminProductUpsertRequest(BaseModel):
     recommended_holding_period: str = Field(default="", max_length=32, description="建议持有期")
     investment_target: str = Field(default="", description="投资目标")
     investment_strategy: str = Field(default="", description="投资策略")
+
+    # ── 业绩区块（可选）─────────────────────────────────────────
+    #: 最新净值；必须为正 —— 非正净值会被取价逻辑判为不可用（无法成交）。
+    nav: float | None = Field(default=None, gt=0, description="最新净值")
+    #: 净值截止日期；写入 ``product_performance.update_date``。
+    nav_date: str = Field(default="", max_length=32, description="净值日期")
+    return_1m: float | None = Field(default=None, description="近一月收益（小数）")
+    return_3m: float | None = Field(default=None, description="近三月收益（小数）")
+    return_6m: float | None = Field(default=None, description="近六月收益（小数）")
+    return_1y: float | None = Field(default=None, description="近一年收益（小数）")
+    return_3y: float | None = Field(default=None, description="近三年收益（小数）")
+    max_drawdown: float | None = Field(default=None, description="最大回撤（小数）")
+    volatility: float | None = Field(default=None, description="波动率（小数）")
+    sharpe_ratio: float | None = Field(default=None, description="夏普比率")
 
 
 __all__ = [

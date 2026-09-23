@@ -27,8 +27,7 @@ from finance_agent.orchestrator.contracts import (
 )
 from finance_agent.orchestrator.nodes.plan_execute import (
     after_plan,
-    make_domain_worker,
-    make_evaluate_node,
+    make_domain_worker,    make_evaluate_node,
     make_replan_node,
     route_after_evaluate,
 )
@@ -74,6 +73,9 @@ class PlanExecuteState(TypedDict, total=False):
     routing: dict[str, Any]
     deadline_monotonic: float
     halted: bool
+    # 根图抽取到的参数（含弹窗补填）与用户画像卡：随 Send payload 传给各领域任务。
+    extracted_params: dict[str, Any]
+    user_profile: dict[str, Any]
 
 
 class PlanValidationResult(BaseModel):
@@ -205,6 +207,18 @@ def _plan_of(state: dict[str, Any]) -> ExecutionPlan | None:
     return _as_plan(state.get("plan"))
 
 
+def _domain_params(state: dict[str, Any], domain: BusinessDomain) -> dict[str, Any]:
+    """取该领域抽取到的参数（``extracted_params.values[domain]``）。
+
+    本模块不能导入 supervisor_graph（后者反向依赖本模块的 PLAN_CANCELLED_WARNING），
+    因此这里就地解析同一份状态结构。
+    """
+    extracted = state.get("extracted_params", {}) or {}
+    values = extracted.get("values") if isinstance(extracted, dict) else {}
+    scoped = (values or {}).get(domain.value) if isinstance(values, dict) else {}
+    return dict(scoped) if isinstance(scoped, dict) else {}
+
+
 def dispatch_ready_tasks(state: dict[str, Any]) -> list[Send]:
     """返回全部就绪任务的 Send；这是唯一构造 Send 的位置。
 
@@ -243,6 +257,10 @@ def dispatch_ready_tasks(state: dict[str, Any]) -> list[Send]:
                     "customer_id": str(state.get("customer_id", "")),
                     "conversation_id": str(state.get("conversation_id", "")),
                     "user_message": str(state.get("user_message", "")),
+                    # 该领域抽取到的参数与用户画像卡：随 Send payload 下发给
+                    # domain_worker，使复合请求与单领域请求获得同样的参数。
+                    "params": _domain_params(state, task.domain),
+                    "user_profile": dict(state.get("user_profile", {}) or {}),
                 },
             )
         )

@@ -156,23 +156,52 @@ class PortfolioService:
     def nav_source(self) -> NavSource:
         return self._deps.build_nav_source()
 
-    def _names_for(self, codes: Iterable[str]) -> dict[str, str]:
-        """批量取商品名；取不到时用空串，不影响数字口径。"""
+    def _product_facts_for(self, codes: Iterable[str]) -> dict[str, dict[str, Any]]:
+        """批量取商品事实（名称/类型/风险等级/业绩标量）。
+
+        此前只取名称、丢掉 ``type``、``risk_level`` 与业绩，导致持仓侧无法做任何
+        风险维度的分析；配置诊断既要按风险等级分档，也要组合波动率/收益/回撤，
+        因此这里一次取全。取不到时缺省为空，不影响数字口径。
+        """
         wanted = list(dict.fromkeys(str(code) for code in codes if str(code)))
         if not wanted:
             return {}
         try:
             products = self.library.query_by_codes(wanted)
-        except Exception:  # noqa: BLE001 - 名称缺失不应让整个面板失败
-            logger.warning("product_name_lookup_failed codes=%s", wanted)
+        except Exception:  # noqa: BLE001 - 元数据缺失不应让整个面板失败
+            logger.warning("product_facts_lookup_failed codes=%s", wanted)
             return {}
-        names: dict[str, str] = {}
+        facts: dict[str, dict[str, Any]] = {}
         for item in products:
             basic = item.get("basic_info") or {}
+            performance = item.get("performance") or {}
             code = str(basic.get("code") or "")
-            if code:
-                names[code] = str(basic.get("name") or "")
-        return names
+            if not code:
+                continue
+            facts[code] = {
+                "name": str(basic.get("name") or ""),
+                "type": str(basic.get("type") or ""),
+                "risk_level": str(basic.get("risk_level") or ""),
+                "volatility": performance.get("volatility"),
+                "return_1y": performance.get("return_1y"),
+                "max_drawdown": performance.get("max_drawdown"),
+            }
+        return facts
+
+    def _names_for(self, codes: Iterable[str]) -> dict[str, str]:
+        """批量取商品名；取不到时用空串，不影响数字口径。"""
+        return {
+            code: str(entry.get("name") or "")
+            for code, entry in self._product_facts_for(codes).items()
+        }
+
+    def position_risk_facts(self, customer_id: str) -> dict[str, dict[str, Any]]:
+        """该用户每个持仓代码对应的产品风险事实（按代码索引）。
+
+        只读，供账户领域的配置诊断与账户面板共用同一份产品口径；不参与任何下单路径。
+        """
+        rows = self.store.list_positions(customer_id)
+        return self._product_facts_for(str(row.get("product_code")) for row in rows)
 
     def _product_or_raise(self, product_code: str) -> dict[str, Any]:
         code = str(product_code).strip()
@@ -285,7 +314,7 @@ class PortfolioService:
         rows = self.store.list_positions(customer_id)
         if not rows:
             return []
-        names = self._names_for(str(row.get("product_code")) for row in rows)
+        meta = self._product_facts_for(str(row.get("product_code")) for row in rows)
         priced: list[PositionView] = []
         for row in rows:
             code = str(row.get("product_code"))
@@ -302,7 +331,9 @@ class PortfolioService:
             )
             priced.append(PositionView(
                 product_code=code,
-                product_name=names.get(code, ""),
+                product_name=meta.get(code, {}).get("name", ""),
+                product_type=meta.get(code, {}).get("type", ""),
+                risk_level=meta.get(code, {}).get("risk_level", ""),
                 shares=shares,
                 cost_amount=cost_amount,
                 avg_cost=float(row.get("avg_cost") or 0),

@@ -46,7 +46,7 @@ _INTENT_CLASSIFIER_PROMPT = f"""你是金融工作流的多意图分类器，只
 - stock_analysis: stock_analysis
 - stock_recommendation: candidate_search | stock_comparison
 - product_analysis: product_analysis
-- account_query: account_overview | position_query | trade_guidance
+- account_query: account_overview | position_query | allocation_review | trade_guidance
 - casual_chat: conversation
 
 `intent` 字段只能填冒号**前**的六个值之一（market_insight / stock_analysis /
@@ -56,6 +56,7 @@ stock_recommendation / product_analysis / account_query / casual_chat）；
 account_query 只处理**用户自己的账户与持仓**，判断依据是句中出现了第一人称归属
 （“我的/我买的/我持有的/账户/持仓/仓位/总资产/可用资金/盈亏/赚了多少/亏了多少/充值”）：
 “我的持仓怎么样”用 position_query；“我账户里还有多少钱”用 account_overview；
+“我的持仓怎么优化”“资产配置合理吗”“要不要调整配置”“风险敞口大不大”用 allocation_review；
 “帮我买 1000 块 110011”“我要清仓”“帮我充值” 用 trade_guidance。
 
 区分方法与 product_analysis / stock_analysis 完全不同：
@@ -248,7 +249,8 @@ _EXECUTION_MODES = {
     "product_analysis": {"product_analysis": True},
     # 账户问答不需要槽位抽取：客户身份来自会话，不由消息文本解析。
     "account_query": {
-        "account_overview": False, "position_query": False, "trade_guidance": False,
+        "account_overview": False, "position_query": False,
+        "allocation_review": False, "trade_guidance": False,
     },
     "casual_chat": {"conversation": False},
 }

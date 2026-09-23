@@ -53,6 +53,16 @@ ORCHESTRATION_GRAPH_STEPS = int(os.getenv("ORCHESTRATION_GRAPH_STEPS", "32"))
 ORCHESTRATION_TURN_TIMEOUT = float(os.getenv("ORCHESTRATION_TURN_TIMEOUT", "180"))
 ORCHESTRATION_PLAN_DEADLINE = float(os.getenv("ORCHESTRATION_PLAN_DEADLINE", "120"))
 
+# 最终答复的分块下发（SSE delta）。答案必须先经合规出口定稿，因此这里流的是
+# **已通过校验**的文本，不是模型原始 token：合规校验的是完整草稿，边生成边推送
+# 会让未校验内容直接落到用户界面。分块本身只影响呈现节奏，不改变内容与顺序。
+ORCHESTRATION_STREAM_CHUNK_SIZE = int(os.getenv("ORCHESTRATION_STREAM_CHUNK_SIZE", "12"))
+# 每块之间的停顿（毫秒）制造"逐字输出"的观感；为 0 时退化为一次推完。
+ORCHESTRATION_STREAM_CHUNK_DELAY_MS = int(os.getenv("ORCHESTRATION_STREAM_CHUNK_DELAY_MS", "18"))
+# 分块下发的总时长上限（秒）：长报告按固定停顿会叠出数秒的额外等待，超出该
+# 上限时自动压缩每块停顿，保证流式呈现只为观感、不为整体时延设障。
+ORCHESTRATION_STREAM_MAX_SECONDS = float(os.getenv("ORCHESTRATION_STREAM_MAX_SECONDS", "3"))
+
 CELERY_REDIS_DB = int(os.getenv("CELERY_REDIS_DB", "1"))
 CELERY_QUANT_QUEUE = os.getenv("CELERY_QUANT_QUEUE", "finance.quant").strip()
 # 量化任务的软/硬超时与结果 TTL（秒）：CPU 计算不得无限占用 worker。
@@ -206,6 +216,13 @@ PRODUCT_HOLDINGS_FRESHNESS_DAYS = int(os.getenv("PRODUCT_HOLDINGS_FRESHNESS_DAYS
 # 模拟交易限额：充值有单笔上限，避免"账户收益"被随意注资稀释成无意义数字。
 PORTFOLIO_MAX_DEPOSIT_AMOUNT = float(os.getenv("PORTFOLIO_MAX_DEPOSIT_AMOUNT", "10000000"))
 PORTFOLIO_MIN_ORDER_AMOUNT = float(os.getenv("PORTFOLIO_MIN_ORDER_AMOUNT", "100"))
+
+# 资产配置测算假设（账户领域的"配置诊断/优化参考"）。
+# 仓库无产品净值时序，无法求真实协方差，因此组合波动率采用对角（零相关）近似；
+# 该假设会在响应里明示，不当作已校准的市场事实。
+ALLOCATION_RISK_FREE_RATE = float(os.getenv("ALLOCATION_RISK_FREE_RATE", "0.02"))
+ALLOCATION_WEIGHT_MIN = float(os.getenv("ALLOCATION_WEIGHT_MIN", "0.05"))
+ALLOCATION_WEIGHT_MAX = float(os.getenv("ALLOCATION_WEIGHT_MAX", "0.60"))
 
 if not DEEPSEEK_API_KEY or DEEPSEEK_API_KEY == "sk-your-api-key-here":
     raise ValueError("请在操作系统环境变量中设置真实的 DEEPSEEK_API_KEY")

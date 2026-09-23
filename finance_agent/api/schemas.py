@@ -17,6 +17,10 @@ class ChatRequest(BaseModel):
     customer_id: str = Field(default="CUST001", description="客户ID")
     chat_history: list[dict[str, Any]] = Field(default_factory=list, description="对话历史")
     conversation_id: str = Field(default="", description="当前会话ID")
+    # 缺参追问的答复：resume=True 时服务端在挂起的 thread 上续跑而非开新轮，
+    # answers 为弹窗提交的结构化参数（键与 pending_input.fields[].name 对应）。
+    resume: bool = Field(default=False, description="本轮是否为对上一轮追问的答复")
+    answers: dict[str, Any] = Field(default_factory=dict, description="弹窗提交的参数")
 
 
 class ChatResponse(BaseModel):
@@ -46,6 +50,10 @@ class ChatResponse(BaseModel):
     # V2 追加字段：异步任务标识与安全进度信息（不删除既有字段）。
     task_id: str = ""
     pending_task_ids: list[str] = Field(default_factory=list)
+    # 缺参追问：run_status=awaiting_input 时，pending_input 携带弹窗表单
+    # （question / missing / fields），interrupt_id 供前端显式回传 resume。
+    pending_input: dict[str, Any] | None = Field(default=None, description="缺参追问表单")
+    interrupt_id: str = Field(default="", description="挂起的追问标识")
 
 
 def to_chat_response(result: ResponseEnvelope | Mapping[str, Any] | ChatResponse) -> ChatResponse:

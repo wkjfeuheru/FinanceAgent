@@ -9,10 +9,12 @@ class RunStatus(str, Enum):
     """Agent 运行状态。
 
     终态（COMPLETED / FAILED / CANCELLED / PARTIAL）一旦进入，
-    不得被覆盖为其它非终态。
+    不得被覆盖为其它非终态。AWAITING_INPUT 是非终态：缺参追问已挂起，
+    等待用户补充参数后在同一线程 resume。
     """
 
     RUNNING = "running"
+    AWAITING_INPUT = "awaiting_input"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"

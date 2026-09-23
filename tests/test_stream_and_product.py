@@ -71,11 +71,41 @@ def test_final_sse_event_keeps_legacy_response_shape():
     assert event["data"]["product_analysis"] == {"report": "产品报告"}
 
 
+def test_stream_emits_delta_chunks_before_final_response(monkeypatch):
+    """定稿答复应先分块下发 delta，再以完整 response 收尾；拼接可还原全文。"""
+    system = object.__new__(AdvisorSystem)
+
+    def fake_handle(message, chat_history=None, customer_id="CUST001", progress_callback=None, conversation_id="", resume=False, answers=None):
+        return {
+            "response": "贵州茅台基本面稳健，估值处于合理区间。",
+            "task_plan": ["stock_analysis"],
+            "conversation_id": conversation_id or "generated",
+        }
+
+    monkeypatch.setattr(system, "handle_message", fake_handle)
+
+    async def collect():
+        return [
+            item async for item in system.handle_message_stream(
+                "分析贵州茅台", conversation_id="conversation-test",
+            )
+        ]
+
+    events = asyncio.run(collect())
+    deltas = [item for item in events if item.get("type") == "delta"]
+    response_index = next(i for i, item in enumerate(events) if item.get("type") == "response")
+
+    assert len(deltas) > 1, "长答复应被切成多块下发"
+    assert "".join(item["content"] for item in deltas) == "贵州茅台基本面稳健，估值处于合理区间。"
+    # 所有 delta 必须早于最终 response，前端才能先累积后定稿。
+    assert all(i < response_index for i, item in enumerate(events) if item.get("type") == "delta")
+
+
 def test_stream_emits_stages_and_final_response(monkeypatch):
     """SSE 包装层应输出阶段事件、最终响应及完整数据。"""
     system = object.__new__(AdvisorSystem)
 
-    def fake_handle(message, chat_history=None, customer_id="CUST001", progress_callback=None, conversation_id=""):
+    def fake_handle(message, chat_history=None, customer_id="CUST001", progress_callback=None, conversation_id="", resume=False, answers=None):
         if progress_callback:
             progress_callback("manager", "完成分派")
         return {

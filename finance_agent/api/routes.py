@@ -200,6 +200,8 @@ async def chat(
             chat_history=request.chat_history,
             customer_id=customer_id,
             conversation_id=request.conversation_id,
+            resume=request.resume,
+            answers=request.answers,
         )
         if ORCHESTRATION_TURN_TIMEOUT > 0:
             result = await asyncio.wait_for(await_handle, timeout=ORCHESTRATION_TURN_TIMEOUT)
@@ -231,6 +233,8 @@ async def chat_stream(
                 chat_history=request.chat_history,
                 customer_id=customer_id,
                 conversation_id=request.conversation_id,
+                resume=request.resume,
+                answers=request.answers,
             ):
                 yield event
         except Exception as exc:

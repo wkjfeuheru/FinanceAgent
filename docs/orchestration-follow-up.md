@@ -8,6 +8,12 @@
 - Supervisor Graph（原 Root Graph，已改名）统一执行分类、路由、领域执行与最终合规出口。
 - **所有 LangGraph 节点函数收敛到 `orchestrator/nodes/`**：`supervisor.py`、`plan_execute.py`、
   `domain.py`、`conversation.py`、`compliance.py`；依赖经 `make_*` 工厂显式注入，宿主图模块只装配节点与边。
+- **缺参追问（human-in-the-loop）已落地**：根图在 `classify` 与分发之间新增 `extract`、`validate`
+  两个节点，缺必填参数时用 LangGraph `interrupt` 挂起，前端弹窗收集后在同一 `thread_id` 上
+  `Command(resume=...)` 续跑。详见下节「缺参追问」。
+- **用户画像已接入分析链路**：此前画像卡只被拼进 `memory_context` 却无人消费，`state["user_profile"]`
+  恒为 `{}`、`profile_complete` 恒假、`personalization_status` 恒为 `research_candidate`。现在由
+  `AdvisorSystem` 读取画像卡随输入注入根图，再经 `DomainTaskContext.user_profile` 透传到领域 handler。
 - casual chat 与 FAQ 使用受限 ReAct，FAQ 工具白名单仅包含 `faq_search`，步数由 `RunBudgets.react_steps` 驱动。
 - FAQ 以“问题 + 答案”为单个 embedding 单元存入 pgvector。
 - 复合领域请求已实际调用编译后的 `Plan-and-Execute` LangGraph 子图，通过 `Send` 分发就绪任务。
@@ -19,6 +25,87 @@
 - **P0 异步量化任务闭环已打通**（见下）。
 - Supervisor Graph 使用 PostgreSQL Checkpointer，并以 `user_id:session_id` 语义的 `thread_id` 隔离会话。
 - 所有根图终态都经过合规节点；FAQ 命中内容目前是“审计但不改写”的受信内容例外。
+
+## 缺参追问：参数抽取、入参校验与 human-in-the-loop（已完成）
+
+### 为什么挂在根图
+
+`interrupt` 需要 checkpointer，且恢复时**节点从函数开头重跑**（`rules/langgraph-guides/interrupts.md`）。
+本仓库只有根 Supervisor 图挂了 `PostgresSaver`；领域子图以 `graph.invoke({"context": context})` 调用、
+不传 config，编译时也未传 checkpointer。因此校验节点放根图；下沉到子图需改 4 张图，且与 `Send`
+扇出的恢复语义冲突。
+
+### 参数模型（唯一事实源 `orchestrator/params.py`）
+
+`PARAM_SPECS: dict[BusinessDomain, tuple[ParamSpec, ...]]` 登记每个领域的参数（必填/可选、控件类型、
+可选项、是否可写长期画像）：
+
+| 领域 | 必填 | 可选 |
+|---|---|---|
+| `stock_research` | `stock_target`（6 位代码，或可唯一确定的名称/主题） | `analysis_type`、`risk_preference`*、`holding_period`* |
+| `product_research` | `product_reference`（产品代码或名称） | `risk_preference`*、`holding_period`* |
+| `market_insight` | 无 | 无 |
+| `account_portfolio` | 无 | 无 |
+
+\* 标注为 `scope="profile"`：可随弹窗一并写入长期用户画像。
+
+**只有股票与产品会触发追问**：市场洞察的数据采集器零入参（时间窗口读配置），账户问答只需会话里的
+`customer_id`，二者都不消费用户偏好。「四类领域都接入」体现在统一的 `PARAM_SPECS` 登记表与统一的
+`extract`/`validate` 节点，而非四套各自实现。
+
+### 抽取策略
+
+确定性优先：复用股票 6 位代码正则、主题注册表名称匹配、产品代码/名称抽取。**仅当必填项仍缺**时才调用
+一次低温模型兜底（模型用 `config.get_intent_model()`，温度复用 `AGENT_TEMPERATURES["slot_extraction"]`）。
+
+抽取失败或模型未配置时置 `extraction_available=False`，校验节点据此**放行**：不得把「没抽到」当作
+「用户没说」，否则只给名称（由领域自行做名称→代码解析）的请求会被误拦。
+
+抽取结果经既有的 `intent_slots` 通道流向领域（该通道此前有消费者、无生产者）：下游解析器按**意图名**
+取嵌套槽位，因此 `intent_slots_for` 产出 `{"stock_analysis": {...}}` / `{"product_analysis": {...}}`
+形状；必填的标的/产品则并入该领域子请求文本，由领域既有的确定性解析器处理。
+
+### 图与节点
+
+```text
+START → classify → extract → validate → route ─┬─ conversation / clarify / single_domain / plan → compliance → END
+                                               └─ validate_stop（追问/取消文案）──────────────────→ compliance → END
+```
+
+- `extract`：写 `extracted_params`。**与 `validate` 拆两个节点是硬要求**——`interrupt` 恢复会重跑整个
+  节点，若把（可能含模型调用的）抽取与 `interrupt` 放同一节点，每次恢复都会重复付费调用模型。
+- `validate`：算缺参；缺则 `interrupt({question, missing, fields})`。节点内不得用 `try/except` 包住
+  `interrupt`（重跑语义要求异常不被吞掉）。恢复值经 `apply_answers` 合并后再校验一次；仍缺则显式
+  收尾为 `partial`（单次询问，不重问）；取消哨兵 `__cancel__` 收尾为 `completed`。
+- 是否启用 `interrupt` 由图是否有 checkpointer 决定：无 checkpointer 时 `validate` 退化为澄清式收尾，
+  与本仓库 interrupt 之前的既有行为一致。
+
+### 恢复、取消与响应
+
+- `ChatRequest` 新增 `resume: bool`、`answers: dict`；`ChatResponse` 新增 `pending_input`、`interrupt_id`；
+  `RunStatus` 新增非终态 `awaiting_input`。
+- 服务端以隐式检测为主：调用前 `root.get_state(config)` 探测是否有挂起 `interrupt`。有挂起且
+  `resume=True` + `answers` 非空 → `Command(resume=answers)`；有挂起但本轮是自由文本新消息 → 先用
+  `Command(resume={"__cancel__": True})` 关掉挂起 run 再开新轮（避免新问题被误当成回答）。
+- SSE **不新增事件类型**：追问随最终 `response` 事件的 `data` 下发，前端零改动即可消费。
+- 前端 `ParamDialog.vue`（`el-dialog` + `el-form`）按 `pending_input.fields` 动态渲染：必填字段挂
+  `el-rule` 必填校验，可选字段标注「可选」；提交 → `resume=true` + `answers`；取消 → `answers={__cancel__: true}`。
+- 弹窗填写的 `risk_preference` / `holding_period` 经 `AgentMemoryContext.save_profile` 写入长期画像
+  （`finance.user_profiles`），同时本轮立即生效。
+
+### 合规口径（豁免登记）
+
+追问是**服务端确定性模板**（`build_question` 只拼装登记字段的标签），不含任何分析结论，且挂在合规
+出口之前的图内 `interrupt` 上。按照既有先例（middleware 的 `BLOCKED_RESPONSE` 在 `orchestrator.py`
+提前返回、不过合规），此处登记为**合规豁免项**：追问文案不经过 `run_compliance`。真实分析结论仍然
+全部经过合规出口。
+
+### 验收标准（已满足）
+
+- 缺必填标的的股票请求产生 `__interrupt__` 且携带表单字段；市场/账户永不挂起。
+- `Command(resume={"stock_target": "600519"})` 后完成执行，领域 handler 收到该参数；`extract` 不重复调用。
+- 取消哨兵收尾为 `completed` 且不执行领域；无 checkpointer 时退化为澄清式而非 interrupt。
+- `handle_message` 返回 `awaiting_input` + `interrupt_id`；画像偏好写入且非法取值被丢弃。
 
 ## 命名迁移（本次）
 
@@ -272,6 +359,11 @@ FAQ 命中内容进入合规节点，但以 `audit_only` 方式通过，不会�
 2. 正式将账户作为第四个顶层领域，并同步更新路由、文档和测试。
 
 在未决定前，不应继续宣传 Supervisor 只有三个业务领域。
+
+**已采取的路径**：按选项 2 落地——账户作为第四个顶层领域（`account_portfolio`），并在该领域内
+新增 `allocation_review` 模式提供配置诊断与优化参考。该模式只读、确定性、不调 LLM，输出限于
+"测算/参考/区间"口径，不输出买卖或调仓指令；组合波动率因无产品净值时序而采用对角（零相关）
+近似，计算工具的 `correlations` 参数已预留，待净值时序就位即可切到完整口径。
 
 ## 测试与运维待办
 

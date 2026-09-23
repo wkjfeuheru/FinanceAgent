@@ -105,12 +105,36 @@ export interface ChatResponse {
   personalization_status?: string
   product_analysis?: ProductAnalysisPayload
   market_insight?: Record<string, any>
+  /** 账户领域载荷：资金/持仓查询与配置诊断共用。 */
+  account?: AccountPayload
   compliance_result: Record<string, any>
   run_status?: string
   warnings?: string[]
   tasks?: Record<string, any>[]
   task_results?: Record<string, any>
   conversation_id: string
+  /** 缺参追问：run_status=awaiting_input 时携带弹窗表单。 */
+  pending_input?: PendingInput | null
+  interrupt_id?: string
+}
+
+/** 缺参追问的表单字段规格（与后端 ParamSpec.to_field() 对齐）。 */
+export interface ParamField {
+  name: string
+  label: string
+  required: boolean
+  kind: 'text' | 'code' | 'choice' | 'number'
+  options: string[]
+  default: string
+  scope: 'turn' | 'profile'
+  placeholder?: string
+}
+
+/** 缺参追问载荷：问题文案 + 待填字段。 */
+export interface PendingInput {
+  question: string
+  missing: string[]
+  fields: ParamField[]
 }
 
 /** 产品专家确定性研究结果；保留索引签名以兼容历史字典响应。 */
@@ -252,6 +276,15 @@ export interface AdminProductUpsertRequest {
   recommended_holding_period?: string
   investment_target?: string
   investment_strategy?: string
+  /** 最新净值；必须为正，缺失则不写业绩区块。 */
+  nav?: number | null
+  /** 净值日期，对应后端 product_performance.update_date。 */
+  nav_date?: string
+  /** 收益率/回撤是小数（0.126 表示 12.6%），与产品库存储口径一致。 */
+  return_1y?: number | null
+  max_drawdown?: number | null
+  volatility?: number | null
+  sharpe_ratio?: number | null
 }
 
 /** 对话请求体 */
@@ -260,6 +293,10 @@ export interface ChatRequest {
   customer_id: string
   chat_history: Array<{ role: string; content: string }>
   conversation_id?: string
+  /** 本轮是否为对上一轮缺参追问的答复；true 时后端在挂起线程上续跑。 */
+  resume?: boolean
+  /** 弹窗提交的结构化参数，键与 pending_input.fields[].name 对应。 */
+  answers?: Record<string, any>
 }
 
 /** 历史消息 */
@@ -303,6 +340,12 @@ export interface SSEStageEvent {
   message: string
 }
 
+/** SSE 流式增量事件：定稿答复的分块下发，前端按序累积渲染。 */
+export interface SSEDeltaEvent {
+  type: 'delta'
+  content: string
+}
+
 /** SSE 响应事件 */
 export interface SSEResponseEvent {
   type: 'response'
@@ -316,11 +359,13 @@ export interface SSEErrorEvent {
   message: string
 }
 
-export type SSEEvent = SSEStageEvent | SSEResponseEvent | SSEErrorEvent
+export type SSEEvent = SSEStageEvent | SSEDeltaEvent | SSEResponseEvent | SSEErrorEvent
 
 /** SSE 事件回调 */
 export interface StreamCallbacks {
   onStage: (event: SSEStageEvent) => void
+  /** 增量文本回调；服务端未分块下发（旧版本）时不会触发，可选。 */
+  onDelta?: (event: SSEDeltaEvent) => void
   onResponse: (event: SSEResponseEvent) => void
   onError: (error: string) => void
 }
@@ -412,6 +457,9 @@ export interface ProductView {
 export interface PositionView {
   product_code: string
   product_name: string
+  /** 产品类型与风险等级（透传自产品库），供配置诊断分档。 */
+  product_type?: string
+  risk_level?: string
   shares: number
   cost_amount: number
   avg_cost: number
@@ -425,6 +473,68 @@ export interface PositionView {
   updated_at: string | null
   pricing_status: 'priced' | 'unavailable'
   limitations: string[]
+}
+
+/** 三档占比与参考区间的偏离（配置诊断）。 */
+export interface AllocationDeviation {
+  tier: string
+  weight: number
+  reference_low: number
+  reference_high: number
+  status: 'below' | 'within' | 'above'
+  distance: number
+}
+
+/** 单只持仓的配置诊断条目。 */
+export interface AllocationHolding {
+  product_code: string
+  product_name: string
+  weight: number
+  risk_level: string
+  tier: string
+  volatility: number | null
+  return_1y: number | null
+}
+
+/** 配置诊断与优化参考载荷（与后端 allocation.review_portfolio 输出对齐）。 */
+export interface AllocationReview {
+  profile_used: boolean
+  risk_preference: string | null
+  reference_basis: string
+  position_count: number
+  total_market_value?: number
+  holdings: AllocationHolding[]
+  /** 三档占比（小数点，非百分数）。 */
+  tiers: Record<string, number>
+  concentration: {
+    position_count: number
+    hhi: number | null
+    effective_n: number | null
+    top1_weight: number | null
+    top3_weight: number | null
+  }
+  portfolio: {
+    expected_return: number | null
+    volatility: number | null
+    sharpe: number | null
+    max_drawdown: number | null
+    diversification_ratio: number | null
+  }
+  deviations: AllocationDeviation[]
+  cash_ratio: number | null
+  notes: string[]
+  limitations: string[]
+  approximation: string
+  unpriced?: string[]
+}
+
+/** 账户领域载荷。 */
+export interface AccountPayload {
+  account: Record<string, any>
+  positions: PositionView[]
+  mode: string
+  /** 仅 allocation_review 模式携带；其它模式为空对象。 */
+  allocation_review?: AllocationReview
 }
 
 /** 一条已成交委托 */

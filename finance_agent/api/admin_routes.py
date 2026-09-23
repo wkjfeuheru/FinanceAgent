@@ -28,7 +28,7 @@ from finance_agent.api.admin_schemas import (
     AdminUserPortfolioResponse,
 )
 from finance_agent.api.routes import _require_admin
-from finance_agent.portfolio.errors import ProductNotFoundError
+from finance_agent.portfolio.errors import PortfolioError, ProductNotFoundError
 from finance_agent.portfolio.service import SIMULATED_DISCLAIMER
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -98,6 +98,9 @@ async def upsert_product(
     try:
         product = get_admin_service().upsert_product(payload.model_dump())
     except ProductNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=exc.message) from exc
+    except PortfolioError as exc:
+        # 净值非正一类的入参问题属于调用方错误，不该报 500。
         raise HTTPException(status_code=400, detail=exc.message) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"保存商品失败：{exc}") from exc

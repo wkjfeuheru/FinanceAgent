@@ -58,6 +58,10 @@ class PositionView(BaseModel):
 
     product_code: str
     product_name: str = ""
+    #: 产品库的商品类型与风险等级（透传自 ``basic_info``）；取不到时为空串。
+    #: 配置诊断按 ``risk_level`` 归并到低/中/高三档，因此这两个字段必须随持仓下发。
+    product_type: str = ""
+    risk_level: str = ""
     shares: float = 0.0
     cost_amount: float = 0.0
     avg_cost: float = 0.0

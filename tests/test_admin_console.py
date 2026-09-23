@@ -17,6 +17,7 @@ from finance_agent.admin.service import AdminService
 from finance_agent.api import routes as r
 from finance_agent.api import admin_routes
 from finance_agent.portfolio.errors import (
+    InvalidAmountError,
     NoPositionError,
     ProductNotFoundError,
     ProductOfflineError,
@@ -65,7 +66,11 @@ class _FakeAuthStore:
 
 
 class _FakeLibrary:
-    """内存产品库：上下架状态真正改变，供断言读取。"""
+    """内存产品库：上下架状态真正改变，供断言读取。
+
+    也实现 ``upsert_product`` / ``upsert_performance``，让"发行商品 + 写入净值"
+    这条管理链路可以在不接数据库的情况下端到端验证。
+    """
 
     def __init__(self, products):
         self._products = {code: dict(data) for code, data in products.items()}
@@ -78,11 +83,14 @@ class _FakeLibrary:
             "basic_info": {
                 "code": str(code).strip(), "name": raw["name"],
                 "type": raw.get("type", "fund"), "is_active": raw.get("is_active", True),
-                "risk_level": raw.get("risk_level", ""), "company": "", "manager": "",
-                "scale": None, "recommended_holding_period": "", "investment_target": "",
+                "risk_level": raw.get("risk_level", ""), "company": raw.get("company", ""),
+                "manager": raw.get("manager", ""),
+                "scale": raw.get("scale"), "recommended_holding_period": "", "investment_target": "",
             },
-            "performance": {"nav": raw.get("nav"), "as_of": raw.get("as_of", "2026-09-08"),
-                            "return_1y": None, "max_drawdown": None, "sharpe_ratio": None},
+            "performance": {"nav": raw.get("nav"), "as_of": raw.get("as_of", ""),
+                            "return_1y": raw.get("return_1y"),
+                            "max_drawdown": raw.get("max_drawdown"),
+                            "sharpe_ratio": raw.get("sharpe_ratio")},
             "fee": {"subscription_fee": raw.get("subscription_fee"),
                     "redemption_fee": raw.get("redemption_fee", "")},
         }
@@ -105,6 +113,28 @@ class _FakeLibrary:
         if raw is None:
             return False
         raw["is_active"] = bool(active)
+        return True
+
+    def upsert_product(self, data):
+        code = str(data.get("code", "")).strip()
+        if not code or not str(data.get("name", "")).strip():
+            return False
+        raw = self._products.setdefault(code, {})
+        # 与真实存储一致：只覆盖传入的非 None 列，未传的保持原值。
+        for field in ("name", "type", "risk_level", "company", "manager", "scale",
+                      "subscription_fee", "redemption_fee"):
+            if data.get(field) is not None:
+                raw[field] = data[field]
+        return True
+
+    def upsert_performance(self, code, perf):
+        raw = self._products.get(str(code).strip())
+        if raw is None:
+            return False
+        raw["nav"] = perf.get("nav")
+        raw["as_of"] = perf.get("update_date", "")
+        for field in ("return_1y", "max_drawdown", "sharpe_ratio"):
+            raw[field] = perf.get(field)
         return True
 
 
@@ -176,6 +206,21 @@ def _portfolio(library=None):
         store=_FakePortfolioStore(),
         library=library or _FakeLibrary(PRODUCTS),
         nav_source=_FakeNavSource({"110011": 3.85, "003003": 1.0}),
+    ))
+
+
+def _portfolio_on_library(library):
+    """用真实 ``ProductLibraryNavSource`` 的装配：净值从产品库读。
+
+    "管理端写入净值 → 货架可展示、可申购"这条链路只有在取价也走产品库时才成
+    立，因此这组测试不能用固定净值的 ``_FakeNavSource``。
+    """
+    from finance_agent.portfolio.pricing import ProductLibraryNavSource
+
+    return PortfolioService(PortfolioDeps(
+        store=_FakePortfolioStore(),
+        library=library,
+        nav_source=ProductLibraryNavSource(library),
     ))
 
 
@@ -329,3 +374,103 @@ def test_active_product_view_exposes_is_active():
     shelf = {item.code: item for item in service.list_products()}
     assert shelf["110011"].is_active is True
     assert shelf["110011"].tradable is True
+
+
+# ── 商品发行/编辑时的业绩数据 ─────────────────────────────────────
+
+def test_new_product_without_performance_is_not_tradable():
+    """只填商品静态字段的新品：没有净值，照常上架但不可申购。"""
+    library = _FakeLibrary({})
+    service = AdminService(auth_store=_FakeAuthStore(), portfolio=_portfolio_on_library(library))
+
+    product = service.upsert_product({"code": "012345", "name": "科技创新混合C", "risk_level": "R4 中高风险"})
+
+    assert product.code == "012345"
+    assert product.nav.value is None
+    assert product.return_1y is None
+    assert product.tradable is False
+    assert "pricing_unavailable" in product.limitations
+
+
+def test_issue_product_with_nav_makes_it_displayable_and_tradable():
+    """提交净值后，货架立即有净值和近一年收益，且变为可申购。
+
+    这是这次改动的核心：管理端写入的业绩要落到 ``product_performance``，
+    取价链路才能读到，否则新发的商品永远显示"—"且买不了。
+    """
+    library = _FakeLibrary({})
+    service = AdminService(auth_store=_FakeAuthStore(), portfolio=_portfolio_on_library(library))
+
+    product = service.upsert_product({
+        "code": "012345", "name": "科技创新混合C", "risk_level": "R4 中高风险",
+        "nav": 1.2345, "nav_date": "2026-09-08",
+        "return_1y": 0.126, "max_drawdown": 0.187, "sharpe_ratio": 0.78,
+    })
+
+    assert product.nav.value == pytest.approx(1.2345)
+    assert product.nav.as_of == "2026-09-08"
+    assert product.return_1y == pytest.approx(0.126)
+    assert product.max_drawdown == pytest.approx(0.187)
+    assert product.tradable is True
+
+    # 用户侧货架同样可见，不只是管理端回读。
+    shelf = {item.code: item for item in service.portfolio.list_products()}
+    assert shelf["012345"].nav.value == pytest.approx(1.2345)
+
+
+def test_editing_product_without_performance_does_not_write_empty_nav():
+    """编辑商品名时不传业绩字段：不得写进一条空净值把商品"假装"标成有数据。"""
+    library = _FakeLibrary({})
+    service = AdminService(auth_store=_FakeAuthStore(), portfolio=_portfolio_on_library(library))
+
+    service.upsert_product({"code": "012345", "name": "科技创新混合C", "nav": 1.2})
+    service.upsert_product({"code": "012345", "name": "科技创新混合C（改名）"})
+
+    product = service.portfolio.get_product("012345")
+    assert product.name == "科技创新混合C（改名）"
+    # 上一次写入的净值保留（业绩表按追加行取最新一条），没有被空值覆盖。
+    assert product.nav.value == pytest.approx(1.2)
+    assert product.tradable is True
+
+
+def test_editing_only_return_keeps_existing_nav():
+    """只改近一年收益、不重填净值：必须沿用上一条净值。
+
+    业绩表只追加不更新且按最新行取净值，若新行写成 ``nav=NULL``，一个本来可
+    申购的商品会静默变成"缺净值"。
+    """
+    library = _FakeLibrary({})
+    service = AdminService(auth_store=_FakeAuthStore(), portfolio=_portfolio_on_library(library))
+
+    service.upsert_product({"code": "012345", "name": "科技创新混合C", "nav": 1.2, "nav_date": "2026-09-01"})
+    product = service.upsert_product({"code": "012345", "name": "科技创新混合C", "return_1y": 0.2})
+
+    assert product.nav.value == pytest.approx(1.2)
+    assert product.return_1y == pytest.approx(0.2)
+    assert product.tradable is True
+
+
+def test_non_positive_nav_is_rejected():
+    """非正净值存进去会被取价逻辑判为不可用，因此必须当场拒绝而非静默落库。"""
+    library = _FakeLibrary({})
+    service = AdminService(auth_store=_FakeAuthStore(), portfolio=_portfolio_on_library(library))
+
+    with pytest.raises(InvalidAmountError):
+        service.upsert_product({"code": "012345", "name": "科技创新混合C", "nav": 0.0})
+
+
+def test_upsert_request_rejects_non_positive_nav_at_schema_level():
+    """净值必须为正：在请求模型这一层就挡住，不依赖业务层兜底。"""
+    from pydantic import ValidationError
+
+    from finance_agent.api.admin_schemas import AdminProductUpsertRequest
+
+    with pytest.raises(ValidationError):
+        AdminProductUpsertRequest(code="012345", name="科技创新混合C", nav=-1.0)
+
+    payload = AdminProductUpsertRequest(
+        code="012345", name="科技创新混合C", nav=1.2345, return_1y=0.126, nav_date="2026-09-08",
+    )
+    assert payload.nav == pytest.approx(1.2345)
+    assert payload.return_1y == pytest.approx(0.126)
+    assert payload.nav_date == "2026-09-08"

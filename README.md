@@ -87,6 +87,7 @@ FinanceAgent/
 │   ├── data/                # 认证、业务存储、PostgreSQL 和数据源
 │   ├── middleware/          # 内容过滤和模型重试
 │   ├── orchestrator/        # 工作流编排、记忆、状态和业务工具
+│   │   └── params.py        # 各领域关键参数登记、抽取与入参校验（缺参触发弹窗追问）
 │   ├── portfolio/           # 模拟交易：费率、净值来源与账户/持仓服务
 │   ├── research/            # 确定性股票研究引擎
 │   ├── product_research/    # 产品研究与适配度评估
@@ -378,10 +379,7 @@ npm run dev
 `scripts/start-all.ps1` 把整套环境按依赖顺序拉起，**每一步都等真正就绪才继续**：
 
 ```powershell
-# 直接双击此文件即可（内部会以 Bypass 执行策略调用脚本）
-scripts\start-all.bat
-
-# 或显式调用
+# 显式调用
 powershell -ExecutionPolicy Bypass -File scripts\start-all.ps1
 ```
 

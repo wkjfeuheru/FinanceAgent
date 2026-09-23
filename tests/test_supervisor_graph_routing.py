@@ -102,6 +102,51 @@ def test_root_graph_creates_deterministic_single_domain_task_id():
     assert result["run_status"] == "completed"
 
 
+def test_validate_node_passes_through_when_params_complete():
+    """参数齐备（消息中含 6 位代码）时校验节点直通，路由结果不变。"""
+    from finance_agent.orchestrator.params import extract_params
+
+    captured = {}
+
+    def domain_runner(context):
+        captured["params"] = context.params
+        from finance_agent.orchestrator.contracts import DomainOutcome
+
+        return DomainOutcome(
+            task_id=context.task.task_id, domain=context.task.domain,
+            status="success", summary="完成。",
+        )
+
+    graph = build_supervisor_graph(
+        SupervisorDependencies(
+            classifier=_FakeClassifier(_payload(["stock_analysis"])),
+            domain_runner=domain_runner,
+            # 无 checkpointer 时不可能 interrupt；这里用真实抽取器验证直通。
+            param_extractor=extract_params,
+        )
+    )
+    result = graph.invoke({"user_message": "分析600519", "run_id": "run-1", "customer_id": "CUST1"})
+
+    assert result["run_status"] == "completed"
+    assert "__interrupt__" not in result
+    assert captured["params"]["stock_codes"] == ["600519"]
+
+
+def test_conversation_branch_never_enters_param_validation():
+    """闲聊不抽取参数、不校验，直接由会话节点回复。"""
+    graph = build_supervisor_graph(
+        SupervisorDependencies(
+            classifier=_FakeClassifier(_payload(["casual_chat"])),
+            conversation_runner=lambda state: {"final_response": "你好呀", "status": "success"},
+        )
+    )
+    result = graph.invoke({"user_message": "你好", "run_id": "run-1"})
+
+    assert result["final_response"] == "你好呀"
+    assert result["run_status"] == "completed"
+    assert result.get("param_blocked") in (None, False)
+
+
 def test_root_graph_classification_failure_is_not_silently_treated_as_chat():
     graph = build_supervisor_graph(
         SupervisorDependencies(

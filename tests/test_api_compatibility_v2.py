@@ -29,6 +29,7 @@ _LEGACY_KEYS = {
     "conversation_id",
     "run_status",
     "warnings",
+    "pending_input",
 }
 
 
@@ -157,3 +158,59 @@ class _FakeClassifierWithDomains:
             "intent_source": "deepseek",
             "classification_error": {},
         }
+
+
+# ── 缺参追问：新增字段必须保持向后兼容 ───────────────────────────
+
+
+def test_projection_defaults_pending_input_to_none():
+    """非追问响应不得携带 pending_input（旧客户端忽略它即可）。"""
+    state = {
+        "routing": {"domains": [], "execution_mode": "conversation"},
+        "final_response": "你好",
+        "run_status": "completed",
+    }
+
+    projected = project_supervisor_state(state)
+
+    assert projected["pending_input"] is None
+
+
+def test_chat_request_accepts_resume_and_answers():
+    from finance_agent.api.schemas import ChatRequest
+
+    req = ChatRequest(message="600519", resume=True, answers={"stock_target": "600519"})
+
+    assert req.resume is True
+    assert req.answers == {"stock_target": "600519"}
+    # 缺省值保证旧客户端不带这两个字段也能正常构造。
+    legacy = ChatRequest(message="你好")
+    assert legacy.resume is False and legacy.answers == {}
+
+
+def test_chat_response_accepts_awaiting_input_and_interrupt_fields():
+    from finance_agent.api.schemas import ChatResponse
+
+    response = ChatResponse(
+        response="请补充股票标的。",
+        run_status="awaiting_input",
+        interrupt_id="abc",
+        pending_input={"question": "请补充股票标的。", "missing": ["stock_research:stock_target"], "fields": []},
+    )
+
+    assert response.run_status == "awaiting_input"
+    assert response.interrupt_id == "abc"
+    assert response.pending_input["missing"] == ["stock_research:stock_target"]
+    # 向后兼容：不带新字段时缺省为空。
+    legacy = ChatResponse(response="ok")
+    assert legacy.pending_input is None and legacy.interrupt_id == ""
+
+
+def test_run_status_enum_includes_awaiting_input():
+    from finance_agent.contracts import RunStatus
+
+    assert RunStatus.AWAITING_INPUT.value == "awaiting_input"
+    # 既有终态不得被移除。
+    assert {status.value for status in RunStatus} >= {
+        "running", "completed", "failed", "cancelled", "partial",
+    }

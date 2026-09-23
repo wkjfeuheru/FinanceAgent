@@ -36,8 +36,10 @@ from finance_agent.orchestrator.nodes.supervisor import (
     degradation_error_handler,
     make_classify_node,
     make_conversation_node,
+    make_extract_node,
     make_plan_node,
     make_single_domain_node,
+    make_validate_node,
     route,
 )
 # 停止原因码在 plan_node 中判定运行状态，必须模块级可见：若只在某个分支内
@@ -55,9 +57,11 @@ _DOMAIN_ORDER = (
     BusinessDomain.ACCOUNT_PORTFOLIO,
 )
 
-CLASSIFICATION_FAILED_RESPONSE = "暂时无法识别该请求的业务领域，请稍后重试或换一种说法。"
+CLASSIFICATION_FAILED_RESPONSE = "暂时无法理解您的请求，请转接人工或尝试换一种说法。"
 CLARIFICATION_FALLBACK = "请补充更具体的信息，例如要分析的标的、市场范围或产品类型。"
 CANCELLED_RESPONSE = "已停止本次生成。"
+#: 用户在缺参追问弹窗上选择"取消"时的收尾文案（与停止生成区分）。
+PARAM_CANCELLED_RESPONSE = "已取消本次请求。您可以随时重新提问。"
 
 
 class SupervisorState(TypedDict, total=False):
@@ -77,6 +81,13 @@ class SupervisorState(TypedDict, total=False):
     single_task_id: str
     # 该轮回答是否来自受信来源（FAQ 原文）；为真时合规只审计、不改写。
     trusted_content: bool
+    # 参数抽取结果（形如 {"values": {domain: {字段: 值}}}）与校验结论。缺参追问
+    # 挂起时 param_blocked=True、param_missing 携带表单，经投影下发给前端弹窗。
+    extracted_params: dict[str, Any]
+    param_blocked: bool
+    param_missing: dict[str, Any]
+    # 用户画像卡快照（由 AdvisorSystem 在调用前注入），透传给领域 handler。
+    user_profile: dict[str, Any]
 
 
 def classify_domains(
@@ -165,6 +176,9 @@ class SupervisorDependencies:
     # 受校验运行预算（config.ORCHESTRATION_* 的唯一投影）。None 时各节点回退
     # config 默认；显式传入时计划任务上限与重规划次数从这里取。
     budgets: Any = None
+    # 参数抽取器注入点（签名 ``(message, history, *, domains) -> ExtractedParams``）。
+    # None 时使用 ``params.extract_params``；测试可注入确定性假对象以避免真实模型调用。
+    param_extractor: Any = None
 
 
 @dataclass
@@ -184,6 +198,13 @@ class PlanRunResult:
 
 def _single_task_id(run_id: str, domain: BusinessDomain) -> str:
     return f"single:{run_id}:{domain.value}"
+
+
+def _default_param_extractor() -> Callable[..., Any]:
+    """惰性取默认抽取器，避免根图模块在导入期拖入 requests/主题注册表。"""
+    from finance_agent.orchestrator.params import extract_params
+
+    return extract_params
 
 
 def _single_task(goal: str, instruction: str, domain: BusinessDomain, task_id: str) -> PlanTask:
@@ -238,6 +259,10 @@ def build_supervisor_graph(dependencies: SupervisorDependencies, *, checkpointer
                     "conversation_id": str(state.get("conversation_id", "")),
                     "user_message": str(state.get("user_message", "")),
                     "replan_limit": replan_limit,
+                    # 参数与画像必须随子图下发：否则复合请求里各领域拿不到
+                    # 根图抽取/弹窗补填的参数（单领域分支不受影响）。
+                    "extracted_params": dict(state.get("extracted_params", {}) or {}),
+                    "user_profile": dict(state.get("user_profile", {}) or {}),
                 }
             )
             return PlanRunResult(
@@ -255,6 +280,11 @@ def build_supervisor_graph(dependencies: SupervisorDependencies, *, checkpointer
         dependencies.domain_runner, dependencies.should_stop,
     )
     assembled_plan_node = make_plan_node(plan_runner)
+    # 参数抽取注入点：默认调 params.extract_params（确定性优先 + 模型兜底）。
+    extract_node = make_extract_node(dependencies.param_extractor or _default_param_extractor())
+    # 没有 checkpointer 就无法 suspend/resume：此时校验节点退化为"澄清式收尾"，
+    # 与本仓库 interrupt 之前的既有行为一致，测试与单次调用不受影响。
+    validate_node = make_validate_node(allow_interrupt=checkpointer is not None)
 
     graph = StateGraph(SupervisorState)
     # 图级默认重试：瞬时的模型/网络故障应当自动重试一次，而不是立刻降级。
@@ -262,6 +292,10 @@ def build_supervisor_graph(dependencies: SupervisorDependencies, *, checkpointer
     # idempotency_key 保证幂等，因此重试不会重复下单。
     graph.set_node_defaults(retry_policy=RetryPolicy(max_attempts=2, initial_interval=0.5))
     graph.add_node("classify", classify_node, error_handler=classification_error_handler)
+    graph.add_node("extract", extract_node, error_handler=degradation_error_handler)
+    # validate 不设 error_handler：interrupt 节点重跑语义要求异常不被吞掉，
+    # 且校验本身是纯确定性计算，不存在需要降级的模型/网络失败。
+    graph.add_node("validate", validate_node)
     graph.add_node("conversation", conversation_node, error_handler=degradation_error_handler)
     graph.add_node("clarify", clarify_node)
     graph.add_node("single_domain", single_domain_node, error_handler=degradation_error_handler)
@@ -269,14 +303,18 @@ def build_supervisor_graph(dependencies: SupervisorDependencies, *, checkpointer
     # 合规出口失败必须 fail-closed：绝不把未经校验的草稿当作结果返回。
     graph.add_node("compliance", compliance_node, error_handler=compliance_error_handler)
     graph.add_edge(START, "classify")
+    graph.add_edge("classify", "extract")
+    graph.add_edge("extract", "validate")
     graph.add_conditional_edges(
-        "classify",
+        "validate",
         route,
         {
             "conversation": "conversation",
             "clarify": "clarify",
             "single_domain": "single_domain",
             "plan": "plan",
+            # 校验已给出追问/取消文案：直达合规出口，不再执行领域。
+            "validate_stop": "compliance",
         },
     )
     for node in ("conversation", "clarify", "single_domain", "plan"):
@@ -378,6 +416,8 @@ _V2_RESPONSE_KEYS = (
     "run_status",
     "warnings",
     "account",
+    # 缺参追问的表单载荷；非追问响应为空。
+    "pending_input",
 )
 
 
@@ -416,6 +456,8 @@ def project_supervisor_state(state: dict[str, Any], *, conversation_id: str = ""
             "run_status": str(state.get("run_status", "completed")),
             "warnings": list(state.get("warnings", []) or []),
             "account": {},
+            # 缺参追问的表单载荷（非追问响应为空 dict）；响应契约里是可选字段。
+            "pending_input": dict(state.get("param_missing", {}) or {}) or None,
             # 待处理异步任务的标识必须是**真实 Celery job_id**：状态端点
             # GET /api/runs/{task_id} 按 job_id（即仓储主键）查询。此前返回领域
             # 任务 id（single:{run_id}:{domain}），端点永远查不到，前端只能轮询到
@@ -452,14 +494,60 @@ def project_supervisor_state(state: dict[str, Any], *, conversation_id: str = ""
             nested = data.get("product_analysis")
             output["product_analysis"] = nested if isinstance(nested, dict) else data
         elif domain == BusinessDomain.ACCOUNT_PORTFOLIO.value:
-            # 账户领域投影为 {account, positions}；两者都只读。
+            # 账户领域投影为 {account, positions}；两者都只读。allocation_review 为
+            # 配置诊断与优化参考（测算口径），随账户一起下发供前端渲染。
             output["account"] = {
                 "account": data.get("account", {}) or {},
                 "positions": data.get("positions", []) or [],
                 "mode": data.get("mode", ""),
+                "allocation_review": data.get("allocation_review", {}) or {},
             }
 
     # 复合请求的每领域 summary 组成 response（Root 已拼接则保持原值）。
+    return output
+
+
+def project_interrupt_state(
+    state: dict[str, Any], *, conversation_id: str = "", customer_id: str = "",
+) -> dict[str, Any]:
+    """把"缺参追问挂起"的图状态投影为兼容 /api/chat 的响应。
+
+    追问以 LangGraph ``interrupt`` 挂起，``invoke`` 返回体里带 ``__interrupt__``；
+    此时没有领域结论，只把追问表单与文案下发给前端弹窗。``run_status`` 置为
+    ``awaiting_input``（非终态），提示调用方这是一次需要用户补充参数的交互。
+    """
+    pending: dict[str, Any] = {}
+    interrupt_id = ""
+    for item in state.get("__interrupt__") or ():
+        value = getattr(item, "value", item)
+        if isinstance(value, dict):
+            pending = dict(value)
+        interrupt_id = str(getattr(item, "id", "") or "")
+        break
+    if not pending:
+        # 兼容快照形状：挂起载荷可能挂在 state 的 param_missing 上。
+        pending = dict(state.get("param_missing", {}) or {})
+
+    output: dict[str, Any] = {key: None for key in _V2_RESPONSE_KEYS}
+    output.update(
+        {
+            "response": str(pending.get("question", "") or ""),
+            "task_plan": [],
+            "tasks": [],
+            "task_results": {},
+            "analysis_results": [],
+            "theme_candidates": [],
+            "pending_leads": [],
+            "pending_task_ids": [],
+            "conversation_id": conversation_id,
+            "run_status": "awaiting_input",
+            "warnings": ["awaiting_user_input"],
+            "pending_input": pending or None,
+            "interrupt_id": interrupt_id,
+        }
+    )
+    if customer_id:
+        output["customer_id"] = customer_id
     return output
 
 
@@ -467,11 +555,13 @@ __all__ = [
     "CANCELLED_RESPONSE",
     "CLASSIFICATION_FAILED_RESPONSE",
     "CLARIFICATION_FALLBACK",
+    "PARAM_CANCELLED_RESPONSE",
     "PlanRunResult",
     "SupervisorDependencies",
     "SupervisorState",
     "build_supervisor_graph",
     "classify_domains",
+    "project_interrupt_state",
     "project_supervisor_state",
     "reduce_run_status",
     "single_domain_task_id",

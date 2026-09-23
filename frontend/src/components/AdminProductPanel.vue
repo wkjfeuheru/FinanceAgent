@@ -22,6 +22,8 @@ const blankForm = () => ({
   // 费率/规模在表单里是字符串（el-input 的取值形态），提交时再转数字。
   scale: '', subscription_fee: '', redemption_fee: '',
   recommended_holding_period: '', investment_target: '', investment_strategy: '',
+  // 业绩区块：净值是绝对值，收益率/回撤在表单里按百分比填写，提交时转成小数。
+  nav: '', nav_date: '', return_1y: '', max_drawdown: '', sharpe_ratio: '',
 })
 const form = ref(blankForm())
 const isEditing = ref(false)
@@ -32,6 +34,17 @@ function toNumber(value: string): number | null {
   if (!text) return null
   const parsed = Number(text)
   return Number.isFinite(parsed) ? parsed : null
+}
+
+/** 表单按百分比填写（12.6 表示 12.6%），产品库存的是小数，这里统一换算。 */
+function toRatio(value: string): number | null {
+  const parsed = toNumber(value)
+  return parsed === null ? null : parsed / 100
+}
+
+/** 小数转回表单里的百分比文本；null 显示为空串（未披露）。 */
+function toPercentText(value: number | null): string {
+  return value != null ? String(Number((value * 100).toFixed(6))) : ''
 }
 
 const filtered = computed(() => {
@@ -79,6 +92,11 @@ function openEdit(item: ProductView) {
     recommended_holding_period: item.recommended_holding_period,
     investment_target: item.investment_target,
     investment_strategy: '',
+    nav: item.nav.value != null ? String(item.nav.value) : '',
+    nav_date: item.nav.as_of || '',
+    return_1y: toPercentText(item.return_1y),
+    max_drawdown: toPercentText(item.max_drawdown),
+    sharpe_ratio: item.sharpe_ratio != null ? String(item.sharpe_ratio) : '',
   }
   isEditing.value = true
   showForm.value = true
@@ -117,6 +135,11 @@ async function save() {
       recommended_holding_period: form.value.recommended_holding_period,
       investment_target: form.value.investment_target,
       investment_strategy: form.value.investment_strategy,
+      nav: toNumber(form.value.nav),
+      nav_date: form.value.nav_date.trim(),
+      return_1y: toRatio(form.value.return_1y),
+      max_drawdown: toRatio(form.value.max_drawdown),
+      sharpe_ratio: toNumber(form.value.sharpe_ratio),
     })
     const index = products.value.findIndex(item => item.code === saved.product.code)
     if (index >= 0) products.value[index] = saved.product
@@ -228,6 +251,15 @@ onMounted(load)
           placeholder="投资目标"
           aria-label="投资目标"
         />
+
+        <p class="form-section">业绩数据（留空则不写入；填了净值商品才能申购）</p>
+        <div class="form-grid">
+          <el-input v-model="form.nav" placeholder="最新净值（如 1.2345）" aria-label="最新净值" />
+          <el-input v-model="form.nav_date" placeholder="净值日期（如 2026-09-08）" aria-label="净值日期" />
+          <el-input v-model="form.return_1y" placeholder="近一年收益（%，如 12.6）" aria-label="近一年收益" />
+          <el-input v-model="form.max_drawdown" placeholder="最大回撤（%，如 18.7）" aria-label="最大回撤" />
+          <el-input v-model="form.sharpe_ratio" placeholder="夏普比率（如 0.78）" aria-label="夏普比率" />
+        </div>
       </div>
       <template #footer>
         <el-button plain @click="showForm = false">取消</el-button>
@@ -254,4 +286,6 @@ h2 { margin: 0; color: var(--color-text); font-size: 15px; }
 .product-meta { margin: 5px 0 0; color: var(--color-text-secondary); font-size: 12px; }
 .product-actions { display: flex; gap: 8px; flex-shrink: 0; }
 .product-form { display: grid; gap: 8px; }
+.form-section { margin: 6px 0 0; color: var(--color-text-secondary); font-size: 12px; }
+.form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px; }
 </style>

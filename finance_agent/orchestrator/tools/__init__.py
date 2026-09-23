@@ -32,6 +32,17 @@ from finance_agent.orchestrator.tools.technical import (
     compute_all_indicators,
 )
 
+# 资产配置测算工具（纯函数：组合收益/波动率/集中度/参考权重）
+from finance_agent.orchestrator.tools.allocation import (
+    concentration_metrics,
+    portfolio_return,
+    portfolio_sharpe,
+    portfolio_volatility,
+    reference_bands,
+    review_portfolio,
+    risk_contribution,
+)
+
 __all__ = [
     "get_stock_basic_info",
     "get_stock_quote",
@@ -53,4 +64,11 @@ __all__ = [
     "calc_boll",
     "calc_ma",
     "calc_wr",
+    "concentration_metrics",
+    "portfolio_return",
+    "portfolio_sharpe",
+    "portfolio_volatility",
+    "reference_bands",
+    "review_portfolio",
+    "risk_contribution",
 ]

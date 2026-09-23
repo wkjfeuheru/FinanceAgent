@@ -22,6 +22,8 @@ class _ChatRequest:
         self.conversation_id = conversation_id
         self.chat_history = []
         self.customer_id = ""
+        self.resume = False
+        self.answers = {}
 
 
 @pytest.fixture()

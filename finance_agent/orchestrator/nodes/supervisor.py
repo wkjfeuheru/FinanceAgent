@@ -12,9 +12,20 @@ from typing import Any, Callable
 
 from langgraph.errors import NodeError
 from langgraph.graph import END
-from langgraph.types import Command
+from langgraph.types import Command, interrupt
 
 from finance_agent.orchestrator.contracts import BusinessDomain, DomainTaskContext
+
+#: 合法的领域枚举值集合；用于把路由结果里的字符串安全还原为枚举（未知值丢弃）。
+_DOMAIN_VALUES = frozenset(item.value for item in BusinessDomain)
+
+
+def _domain_params(state: dict[str, Any], domain: BusinessDomain) -> dict[str, Any]:
+    """从根图状态取出**该领域**的参数（``extracted_params.values[domain]``）。"""
+    extracted = state.get("extracted_params", {}) or {}
+    values = extracted.get("values") if isinstance(extracted, dict) else {}
+    scoped = (values or {}).get(domain.value) if isinstance(values, dict) else {}
+    return dict(scoped) if isinstance(scoped, dict) else {}
 
 
 def make_classify_node(classifier: Any) -> Callable[[dict[str, Any]], dict[str, Any]]:
@@ -44,9 +55,125 @@ def make_classify_node(classifier: Any) -> Callable[[dict[str, Any]], dict[str, 
             "compliance": {},
             "single_task_id": "",
             "trusted_content": False,
+            # 每轮的参数抽取结果与校验结论：不清空会让上一轮的缺参状态泄漏到本轮
+            # （param_blocked 残留会把本轮直接短路到合规出口）。
+            "extracted_params": {},
+            "param_blocked": False,
+            "param_missing": {},
         }
 
     return classify_node
+
+
+def make_extract_node(
+    extract_fn: Callable[..., Any],
+) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    """参数抽取节点工厂：只读消息与路由，写入 ``extracted_params``。
+
+    与 ``validate`` 分成两个节点是**硬要求**：``interrupt`` 恢复时会从节点开头
+    重跑，若把（可能含模型调用的）抽取与 ``interrupt`` 放在同一节点，每次恢复都
+    会重复付费调用模型。拆开后抽取产物已随 checkpoint 落库，恢复只重跑确定性校验。
+
+    会话/澄清分支不需要参数，直接短路，避免闲聊也触发一次抽取。
+    """
+
+    def extract_node(state: dict[str, Any]) -> dict[str, Any]:
+        routing = state.get("routing", {}) or {}
+        if routing.get("error_code") or routing.get("execution_mode") in ("conversation", "clarify"):
+            return {}
+        domains = [
+            BusinessDomain(value)
+            for value in routing.get("domains", []) or []
+            if value in _DOMAIN_VALUES
+        ]
+        params = extract_fn(
+            str(state.get("user_message", "")),
+            str(state.get("history", "") or ""),
+            domains=domains,
+        )
+        return {"extracted_params": params.model_dump(mode="json")}
+
+    return extract_node
+
+
+def make_validate_node(
+    *,
+    allow_interrupt: bool,
+) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    """入参校验节点工厂：缺必填项时用 LangGraph ``interrupt`` 追问。
+
+    ``allow_interrupt`` 由图是否挂了 checkpointer 决定：没有 checkpointer 无法
+    suspend/resume，此时退化为"澄清式收尾"（把问题作为回复返回），与本仓库
+    interrupt 之前的既有行为一致，测试与单次调用不受影响。
+    """
+
+    def validate_node(state: dict[str, Any]) -> dict[str, Any]:
+        from finance_agent.orchestrator.params import (
+            ExtractedParams,
+            apply_answers,
+            build_form,
+            find_missing,
+            is_cancel,
+            merge_target_queries,
+        )
+        from finance_agent.orchestrator.supervisor_graph import PARAM_CANCELLED_RESPONSE
+
+        routing = state.get("routing", {}) or {}
+        if routing.get("error_code") or routing.get("execution_mode") in ("conversation", "clarify"):
+            return {}
+        domains = [
+            BusinessDomain(value)
+            for value in routing.get("domains", []) or []
+            if value in _DOMAIN_VALUES
+        ]
+        params = ExtractedParams.model_validate(state.get("extracted_params") or {})
+        missing = find_missing(domains, params)
+        if not missing or not params.extraction_available:
+            # 抽取不可用（模型未配置/失败）时不得把"没抽到"当成"用户没说"：
+            # 否则只能给名称的请求会被误拦，放行让领域自行解析/降级。
+            return {}
+        if not allow_interrupt:
+            form = build_form(domains, missing)
+            return {
+                "final_response": form["question"],
+                "run_status": "partial",
+                "param_blocked": True,
+                "param_missing": form,
+                "warnings": [f"param_missing:{name}" for name in form["missing"]],
+            }
+
+        # 追问必须是服务端确定性模板：只含登记字段与提示，不含分析结论。
+        # 注意：interrupt 不得包在 try/except 里（重跑语义要求异常不被吞掉）。
+        form = build_form(domains, missing)
+        answer = interrupt(form)
+        if is_cancel(answer):
+            return {
+                "final_response": PARAM_CANCELLED_RESPONSE,
+                "run_status": "completed",
+                "param_blocked": True,
+                "param_missing": {},
+                "warnings": ["param_cancelled_by_user"],
+            }
+        params = apply_answers(params, answer, domains)
+        remaining = find_missing(domains, params)
+        if remaining:
+            # 单次询问不重问：仍缺则显式收尾（携带已填部分继续执行风险更高）。
+            form = build_form(domains, remaining)
+            return {
+                "final_response": form["question"],
+                "run_status": "partial",
+                "param_blocked": True,
+                "param_missing": form,
+                "warnings": [f"param_missing:{name}" for name in form["missing"]],
+            }
+        return {
+            "extracted_params": params.model_dump(mode="json"),
+            "param_missing": {},
+            # 缺参补齐后把标的并入该领域子请求，保持分类器子请求的上下文。
+            "routing": merge_target_queries(routing, params, domains),
+        }
+
+    return validate_node
 
 
 def make_conversation_node(
@@ -150,6 +277,8 @@ def make_single_domain_node(
                 conversation_id=str(state.get("conversation_id", "")),
                 user_message=str(state.get("user_message", "")),
                 run_id=run_id,
+                params=_domain_params(state, domain),
+                user_profile=dict(state.get("user_profile", {}) or {}),
             )
         )
         return {
@@ -203,8 +332,12 @@ def make_plan_node(
 
 
 def route(state: dict[str, Any]) -> str:
-    """classify 之后的条件路由：按执行模式选择分支。"""
+    """classify/validate 之后的条件路由：按执行模式选择分支。"""
     routing = state.get("routing", {}) or {}
+    # 校验已收尾（缺参追问挂起、用户取消、或补齐失败）：直接去合规出口，
+    # 不得再进入领域执行——此时 final_response 已经是给用户的追问/取消文案。
+    if state.get("param_blocked"):
+        return "validate_stop"
     mode = routing.get("execution_mode", "conversation")
     if routing.get("error_code"):
         return "clarify"
@@ -326,7 +459,9 @@ __all__ = [
     "degradation_error_handler",
     "make_classify_node",
     "make_conversation_node",
+    "make_extract_node",
     "make_plan_node",
     "make_single_domain_node",
+    "make_validate_node",
     "route",
 ]

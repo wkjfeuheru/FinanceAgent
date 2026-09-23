@@ -7,6 +7,7 @@ import type {
   ResearchAnalysisResult,
   TechnicalIndicatorSet,
 } from '@/types'
+import AllocationCard from '@/components/AllocationCard.vue'
 
 const props = defineProps<{
   messages: ChatMessage[]
@@ -248,6 +249,10 @@ const isEmpty = computed(
               {{ lead.stock_code }} · {{ lead.industry || '行业待核验' }} · {{ lead.source_name }}
             </p>
           </section>
+          <AllocationCard
+            v-if="msg.data?.account?.allocation_review?.position_count"
+            :review="msg.data.account.allocation_review"
+          />
         </div>
       </div>
 

@@ -13,8 +13,16 @@ from __future__ import annotations
 from typing import Any
 
 from finance_agent.portfolio.contracts import AccountSnapshot, ProductView
-from finance_agent.portfolio.errors import ProductNotFoundError
+from finance_agent.portfolio.errors import InvalidAmountError, ProductNotFoundError
 from finance_agent.portfolio.service import PortfolioService, get_portfolio_service
+
+#: 商品业绩字段（``finance.product_performance``）在请求里的键名。
+#: 净值和收益率是"每天在变"的数据，与商品静态字段分开存表，这里负责在
+#: 保存商品之后把它们一并落库 —— 否则管理端新发的商品永远没有净值可展示。
+_PERFORMANCE_FIELDS = (
+    "nav", "return_1m", "return_3m", "return_6m", "return_1y", "return_3y",
+    "max_drawdown", "volatility", "sharpe_ratio",
+)
 
 
 class AdminService:
@@ -113,13 +121,44 @@ class AdminService:
 
         ``upsert_product`` 只覆盖传入的列，未传的列保持原值；新建时用列默认值。
         保存后回读货架视图，让调用方拿到与用户端一致的字段口径。
+
+        随请求一起提交的净值/收益率写入业绩区块。业绩字段全空时不触碰
+        ``product_performance`` —— 编辑商品名顺手写进一条空净值，会让货架上
+        出现一个"有净值但值为空"的假象。
         """
         code = str(data.get("code", "")).strip()
         if not code or not str(data.get("name", "")).strip():
             raise ProductNotFoundError("商品代码与名称不能为空")
         if not self.portfolio.library.upsert_product(data):
             raise ProductNotFoundError("商品保存失败：代码与名称不能为空")
+        self._write_performance(code, data)
         return self.portfolio.get_product(code)
+
+    def _write_performance(self, code: str, data: dict[str, Any]) -> None:
+        """把请求里的业绩字段写成一条 ``product_performance`` 记录。
+
+        语义与商品表一致：**只覆盖传入的字段，未传的沿用上一条**。业绩表按
+        ``(product_code, id DESC)`` 取最新一条且只追加不更新，所以如果编辑商品
+        时只改近一年收益、没重填净值，新行必须继承旧净值 —— 否则最新行变成
+        ``nav=NULL``，会把一个本来可申购的商品默默变成"缺净值"。
+        """
+        performance = {field: data.get(field) for field in _PERFORMANCE_FIELDS}
+        nav_date = str(data.get("nav_date") or "").strip()
+        if all(value is None for value in performance.values()) and not nav_date:
+            return
+        nav = performance.get("nav")
+        if nav is not None and float(nav) <= 0:
+            # 非正净值会被取价逻辑判为不可用，与其存进去当"有数据"，不如当场拒绝。
+            raise InvalidAmountError("最新净值必须大于 0")
+
+        current = (self.portfolio.library.query_by_code(code) or {}).get("performance") or {}
+        merged = {
+            field: (performance[field] if performance[field] is not None else current.get(field))
+            for field in _PERFORMANCE_FIELDS
+        }
+        merged["update_date"] = nav_date or str(current.get("as_of") or "")
+        if not self.portfolio.library.upsert_performance(code, merged):
+            raise ProductNotFoundError(f"商品 {code} 的业绩数据保存失败")
 
 
 _admin_service: AdminService | None = None
