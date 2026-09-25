@@ -20,37 +20,20 @@ from pathlib import Path
 import psycopg
 
 from finance_agent.config import _postgres_dsn
-from finance_agent.data.postgres_schema import BUSINESS_SCHEMA
+from finance_agent.data.postgres_schema import (
+    BUSINESS_SCHEMA,
+    FAQ_SCHEMA_APPLY_ORDER,
+    SCHEMA_APPLY_ORDER,
+)
 
 PROBE_DB = "advisor_schema_probe"
 SQL_DIR = Path(__file__).resolve().parents[1] / "sql"
-# 建表脚本按编号顺序应用；007 是种子数据，不含结构声明，故跳过。
-# 012（FAQ 问答对显式字段）同样不在列表中 —— 它由 FAQ 仓储在首次访问时惰性应用
-# （见 faq/repository.py 的 _ensure_schema），线上库在 FAQ 路径被触碰前本就不该有
-# 那几列。纳入探测会让 CI 长期误报，直到有人跑过一次 FAQ 索引。
-SCHEMA_FILES = [
-    "001_base_schema.sql",
-    "002_agent_runtime_schema.sql",
-    "003_identity_migration.sql",
-    "004_research_governance.sql",
-    "005_theme_registry.sql",
-    "006_products_columns.sql",
-    "008_hybrid_orchestration.sql",
-    "009_faq_vector.sql",
-    "010_faq_bigram_search.sql",
-    "011_portfolio.sql",
-    "013_admin_console.sql",
-]
+# 与 migrate CLI 同一份结构清单。007 是种子数据，不含结构声明，故跳过。
+# 012 已纳入 FAQ 部署路径（python -m finance_agent.migrate 默认应用），因此计入期望。
+SCHEMA_FILES = list(SCHEMA_APPLY_ORDER) + list(FAQ_SCHEMA_APPLY_ORDER)
 
-# 预期由「惰性路径」补齐的列：线上库可能还没有，但这**不是缺陷**，因此不计入失败判定。
-# 009 用 CREATE TABLE 声明了这几列（只对新库生效），012 用 ALTER 为旧库补齐，而 012 由
-# FAQ 仓储在首次访问 FAQ 时应用。把它们与其原因显式登记在这里，好过让上面 SCHEMA_FILES
-# 的注释与实际输出互相矛盾：工具如实报告"当前确实没有"，但不据此让 CI 失败。
-EXPECTED_LAZY_COLUMNS: dict[tuple[str, str], str] = {
-    ("faq_chunks", "question"): "012_faq_qa_pair_columns.sql，由 FAQ 仓储惰性应用",
-    ("faq_chunks", "answer"): "012_faq_qa_pair_columns.sql，由 FAQ 仓储惰性应用",
-    ("faq_chunks", "embedding_text"): "012_faq_qa_pair_columns.sql，由 FAQ 仓储惰性应用",
-}
+# 此前 FAQ 问答列由惰性路径补齐；统一 migrate 之后它们属于期望结构。
+EXPECTED_LAZY_COLUMNS: dict[tuple[str, str], str] = {}
 
 
 def _columns(conn, schema: str) -> dict[tuple[str, str], tuple[str, str, str, str]]:

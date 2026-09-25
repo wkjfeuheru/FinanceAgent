@@ -36,6 +36,9 @@ def safe_parse_json(text: str, default: Any = None) -> Any:
 load_dotenv()
 
 DEEPSEEK_API_KEY = _SYSTEM_DEEPSEEK_API_KEY
+# 本地默认只绑回环；容器内必须 UVICORN_HOST=0.0.0.0 才能被 Nginx 反代到。
+UVICORN_HOST = os.getenv("UVICORN_HOST", "127.0.0.1").strip() or "127.0.0.1"
+UVICORN_PORT = int(os.getenv("UVICORN_PORT", "8000"))
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 REDIS_MEMORY_TTL_SECONDS = int(os.getenv("REDIS_MEMORY_TTL_SECONDS", "3600"))
 # 已关闭匿名模式，所有业务请求必须携带有效 Bearer token。

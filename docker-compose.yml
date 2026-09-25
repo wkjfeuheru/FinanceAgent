@@ -1,0 +1,138 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-advisor}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        INSTALL_PROVIDERS: "1"
+    image: finance-agent-api:local
+    command: ["python", "-m", "finance_agent.migrate", "--seed"]
+    env_file:
+      - .env
+    environment: &app-environment
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-advisor}
+      REDIS_URL: redis://redis:6379/0
+      UVICORN_HOST: "0.0.0.0"
+      UVICORN_PORT: "8000"
+      APP_ENV: ${APP_ENV:-production}
+      TRUST_PROXY: ${TRUST_PROXY:-true}
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-}
+      FAQ_EMBEDDING_DEVICE: cpu
+      FAQ_EMBEDDING_MODEL_CACHE_DIR: /app/.cache/models
+      FINANCE_SQL_DIR: /app/sql
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?set DEEPSEEK_API_KEY in .env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    image: finance-agent-api:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        INSTALL_PROVIDERS: "1"
+    command:
+      [
+        "python",
+        "-m",
+        "uvicorn",
+        "finance_agent.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+      ]
+    env_file:
+      - .env
+    environment:
+      <<: *app-environment
+    volumes:
+      - ./.cache/models:/app/.cache/models
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5).read()",
+        ]
+      interval: 10s
+      timeout: 8s
+      retries: 12
+      start_period: 60s
+    restart: unless-stopped
+
+  celery:
+    image: finance-agent-api:local
+    command:
+      [
+        "celery",
+        "-A",
+        "finance_agent.celery_app:celery_app",
+        "worker",
+        "-Q",
+        "finance.quant",
+        "-l",
+        "info",
+      ]
+    env_file:
+      - .env
+    environment:
+      <<: *app-environment
+    volumes:
+      - ./.cache/models:/app/.cache/models
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    ports:
+      - "80:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

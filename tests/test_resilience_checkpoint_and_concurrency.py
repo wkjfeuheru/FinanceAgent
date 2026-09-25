@@ -370,8 +370,12 @@ def test_business_store_applies_schema_only_once_under_concurrency():
     for thread in threads:
         thread.join(timeout=5)
 
-    # 5 条 DDL（BASE/PRODUCTS/AGENT_RUNTIME/PORTFOLIO/ADMIN_CONSOLE）只应执行一轮。
-    assert calls["n"] == 5, f"建表被执行了 {calls['n']} 次，说明锁未生效"
+    # SCHEMA_APPLY_ORDER 里每条 DDL 只应执行一轮。
+    from finance_agent.data.postgres_schema import SCHEMA_APPLY_ORDER
+
+    assert calls["n"] == len(SCHEMA_APPLY_ORDER), (
+        f"建表被执行了 {calls['n']} 次（期望 {len(SCHEMA_APPLY_ORDER)}），说明锁未生效"
+    )
 
 
 def test_audit_store_setup_schema_only_once_under_concurrency():

@@ -113,6 +113,15 @@ async def root():
 
 if __name__ == "__main__":
     import uvicorn
+
+    from finance_agent.config import UVICORN_HOST, UVICORN_PORT
+
     # 默认使用单进程运行。自动重载会创建父子进程；当分析线程仍在执行时，
     # reloader 关闭可能等待 executor 数分钟，并留下占用端口的子进程。
-    uvicorn.run("finance_agent.main:app", host="127.0.0.1", port=8000, reload=False)
+    # 本地默认 127.0.0.1；容器内通过 UVICORN_HOST=0.0.0.0 对外服务。
+    uvicorn.run(
+        "finance_agent.main:app",
+        host=UVICORN_HOST,
+        port=UVICORN_PORT,
+        reload=False,
+    )

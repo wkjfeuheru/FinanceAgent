@@ -7,9 +7,12 @@ import pytest
 from finance_agent.data.postgres_schema import (
     AGENT_RUNTIME_SCHEMA_SQL,
     BASE_SCHEMA_SQL,
+    FAQ_SCHEMA_APPLY_ORDER,
     IDENTITY_MIGRATION_SQL,
     PORTFOLIO_SCHEMA_SQL,
     PRODUCTS_SCHEMA_SQL,
+    SCHEMA_APPLY_ORDER,
+    SEED_SCHEMA_FILES,
     runtime_schema_jsonb_fields,
 )
 
@@ -123,6 +126,35 @@ def test_schema_files_are_numbered_without_gaps():
     assert numbers == list(range(numbers[0], numbers[-1] + 1)), (
         f"sql/ 脚本编号存在缺号：{numbers}"
     )
+
+
+def test_schema_apply_order_covers_sql_except_seed():
+    """统一清单覆盖 001–013 除 007，且与 sql/ 文件一致。"""
+    sql_files = {path.name for path in SQL_DIR.glob("0*.sql")}
+    applied = set(SCHEMA_APPLY_ORDER) | set(FAQ_SCHEMA_APPLY_ORDER) | set(SEED_SCHEMA_FILES)
+    assert applied == sql_files
+    assert "007_product_seed.sql" not in SCHEMA_APPLY_ORDER
+    assert "007_product_seed.sql" not in FAQ_SCHEMA_APPLY_ORDER
+    numbers = sorted(
+        int(name[:3]) for name in (*SCHEMA_APPLY_ORDER, *FAQ_SCHEMA_APPLY_ORDER)
+    )
+    assert numbers == [1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13]
+    assert list(SCHEMA_APPLY_ORDER) == [
+        "001_base_schema.sql",
+        "002_agent_runtime_schema.sql",
+        "003_identity_migration.sql",
+        "004_research_governance.sql",
+        "005_theme_registry.sql",
+        "006_products_columns.sql",
+        "008_hybrid_orchestration.sql",
+        "011_portfolio.sql",
+        "013_admin_console.sql",
+    ]
+    assert list(FAQ_SCHEMA_APPLY_ORDER) == [
+        "009_faq_vector.sql",
+        "010_faq_bigram_search.sql",
+        "012_faq_qa_pair_columns.sql",
+    ]
 
 
 def test_seed_columns_exist_in_schema():

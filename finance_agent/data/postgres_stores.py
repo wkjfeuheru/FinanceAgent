@@ -110,25 +110,12 @@ class _PostgresBaseStore:
             self._apply_schema()
 
     def _apply_schema(self) -> None:
-        from finance_agent.data.postgres_schema import (
-            ADMIN_CONSOLE_SCHEMA_SQL,
-            AGENT_RUNTIME_SCHEMA_SQL,
-            BASE_SCHEMA_SQL,
-            PORTFOLIO_SCHEMA_SQL,
-            PRODUCTS_SCHEMA_SQL,
-        )
+        from finance_agent.data.postgres_schema import apply_postgres_schema
 
+        # 懒建表是安全网；部署以 python -m finance_agent.migrate 为准。
+        # 业务路径不强制 pgvector，避免无扩展的库连登录都起不来。
         with self._transaction() as connection:
-            cursor = connection.cursor()
-            try:
-                cursor.execute(BASE_SCHEMA_SQL)
-                # 旧库缺列的补齐必须紧跟建表之后（幂等）。
-                cursor.execute(PRODUCTS_SCHEMA_SQL)
-                cursor.execute(AGENT_RUNTIME_SCHEMA_SQL)
-                cursor.execute(PORTFOLIO_SCHEMA_SQL)
-                cursor.execute(ADMIN_CONSOLE_SCHEMA_SQL)
-            finally:
-                cursor.close()
+            apply_postgres_schema(connection, include_faq=False, include_seed=False)
         self._schema_ready = True
 
 
