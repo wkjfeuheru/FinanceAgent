@@ -27,6 +27,7 @@ from finance_agent.api.admin_schemas import (
     AdminUserListResponse,
     AdminUserPortfolioResponse,
 )
+from finance_agent.api.errors import http_500
 from finance_agent.api.routes import _require_admin
 from finance_agent.portfolio.errors import PortfolioError, ProductNotFoundError
 from finance_agent.portfolio.service import SIMULATED_DISCLAIMER
@@ -54,7 +55,7 @@ async def list_users(http_request: Request) -> AdminUserListResponse:
     try:
         users = get_admin_service().list_users()
     except Exception as exc:  # noqa: BLE001 - 未预期失败显式暴露而非静默空列表
-        raise HTTPException(status_code=500, detail=f"读取用户列表失败：{exc}") from exc
+        raise http_500("读取用户列表", exc) from exc
     return AdminUserListResponse(users=[_entry(row) for row in users])
 
 
@@ -65,7 +66,7 @@ async def get_user_portfolio(http_request: Request, customer_id: str) -> AdminUs
     try:
         payload = get_admin_service().get_user_portfolio(customer_id)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"读取用户持仓失败：{exc}") from exc
+        raise http_500("读取用户持仓", exc) from exc
     if not payload.get("exists"):
         raise HTTPException(status_code=404, detail=f"用户 {customer_id} 不存在")
     return AdminUserPortfolioResponse(
@@ -85,7 +86,7 @@ async def list_products(http_request: Request, product_type: str = "fund") -> Ad
     try:
         products = get_admin_service().list_products(product_type)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"读取商品列表失败：{exc}") from exc
+        raise http_500("读取商品列表", exc) from exc
     return AdminProductListResponse(products=products)
 
 
@@ -103,7 +104,7 @@ async def upsert_product(
         # 净值非正一类的入参问题属于调用方错误，不该报 500。
         raise HTTPException(status_code=400, detail=exc.message) from exc
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"保存商品失败：{exc}") from exc
+        raise http_500("保存商品", exc) from exc
     return {"product": product.model_dump(mode="json"), "disclaimer": SIMULATED_DISCLAIMER}
 
 
@@ -119,7 +120,7 @@ async def offline_product(http_request: Request, code: str) -> dict[str, Any]:
     except ProductNotFoundError as exc:
         raise HTTPException(status_code=404, detail=exc.message) from exc
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"下架失败：{exc}") from exc
+        raise http_500("下架", exc) from exc
     return {"product": product.model_dump(mode="json"), "message": f"商品 {code} 已下架"}
 
 
@@ -132,7 +133,7 @@ async def publish_product(http_request: Request, code: str) -> dict[str, Any]:
     except ProductNotFoundError as exc:
         raise HTTPException(status_code=404, detail=exc.message) from exc
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"上架失败：{exc}") from exc
+        raise http_500("上架", exc) from exc
     return {"product": product.model_dump(mode="json"), "message": f"商品 {code} 已上架"}
 
 

@@ -113,6 +113,9 @@ export interface ChatResponse {
   tasks?: Record<string, any>[]
   task_results?: Record<string, any>
   conversation_id: string
+  /** 异步量化任务 id，需轮询 GET /api/runs/{id}。 */
+  task_id?: string
+  pending_task_ids?: string[]
   /** 缺参追问：run_status=awaiting_input 时携带弹窗表单。 */
   pending_input?: PendingInput | null
   interrupt_id?: string
@@ -330,6 +333,7 @@ export interface ConversationListResponse {
 export interface HealthResponse {
   status: string
   redis_available: boolean
+  postgres_available?: boolean
   agents_initialized: boolean
 }
 
@@ -357,6 +361,15 @@ export interface SSEResponseEvent {
 export interface SSEErrorEvent {
   type: 'error'
   message: string
+}
+
+/** 异步量化任务状态（GET /api/runs/{task_id}） */
+export interface RunStatusPayload {
+  run_status: string
+  task_id?: string
+  response?: string
+  conversation_id?: string
+  warnings?: string[]
 }
 
 export type SSEEvent = SSEStageEvent | SSEDeltaEvent | SSEResponseEvent | SSEErrorEvent

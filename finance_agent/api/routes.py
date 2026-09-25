@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Header, Request
+from fastapi import APIRouter, HTTPException, Header, Request, Response
 from fastapi.responses import StreamingResponse
 
 from finance_agent.api.schemas import (
@@ -27,6 +27,7 @@ from finance_agent.api.schemas import (
     ThemeRegistryUpsertRequest,
 )
 from finance_agent.api.sse import sse_stream
+from finance_agent.api.errors import http_500, sse_error_message
 from finance_agent.config import ADMIN_CUSTOMER_IDS, ORCHESTRATION_TURN_TIMEOUT, get_postgres_connection_factory
 from finance_agent.data.auth import get_user_store
 from finance_agent.orchestrator.orchestrator import AdvisorSystem
@@ -81,7 +82,7 @@ async def register(request: RegisterRequest) -> RegisterResponse:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"注册失败：{exc}")
+        raise http_500("注册", exc) from exc
 
 
 @router.post("/api/login", response_model=LoginResponse)
@@ -99,7 +100,7 @@ async def login(request: LoginRequest) -> LoginResponse:
     except ValueError as exc:
         raise HTTPException(status_code=401, detail=str(exc))
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"登录失败：{exc}")
+        raise http_500("登录", exc) from exc
 
 
 @router.post("/api/logout")
@@ -128,32 +129,57 @@ async def get_current_user(request: Request) -> dict[str, Any]:
     return {**user, "is_admin": _is_admin(customer_id)}
 
 
+def _postgres_ready() -> bool:
+    """探针级探测：业务库可连接且能执行 SELECT 1。"""
+    try:
+        connection = get_postgres_connection_factory()()
+        try:
+            cursor = connection.cursor()
+            try:
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+            finally:
+                cursor.close()
+        finally:
+            connection.close()
+        return True
+    except Exception:
+        return False
+
+
 @router.get("/api/health", response_model=HealthResponse)
-async def health() -> HealthResponse:
-    """健康检查。"""
+async def health(response: Response) -> HealthResponse:
+    """健康检查。PostgreSQL 不可用或编排无法初始化时返回 503。"""
+    postgres_ok = _postgres_ready()
+    redis_ok = False
+    agents_ok = False
     try:
         system = get_system()
         redis_ok = system.memory.store.is_available()
-        return HealthResponse(
-            status="ok",
-            redis_available=redis_ok,
-            agents_initialized=True,
-        )
-    except Exception as exc:
-        return HealthResponse(
-            status="error",
-            redis_available=False,
-            agents_initialized=False,
-        )
+        agents_ok = True
+    except Exception:
+        agents_ok = False
+    status = "ok" if postgres_ok and agents_ok else "error"
+    payload = HealthResponse(
+        status=status,
+        redis_available=redis_ok,
+        postgres_available=postgres_ok,
+        agents_initialized=agents_ok,
+    )
+    if status != "ok":
+        response.status_code = 503
+    return payload
 
 
 @router.get("/api/health/degradation")
-async def degradation_health() -> dict[str, Any]:
+async def degradation_health(http_request: Request) -> dict[str, Any]:
     """暴露各类降级的累计计数，供运维发现"静默失败"。
 
     落库/记忆/审计都是尽力而为、失败不阻断回复，因此这些故障不会出现在任何
     响应里；没有这个出口就只能等用户投诉才知道审计长期写不进去。
+    该接口仅管理员可访问，避免把内部故障分类暴露给未授权调用方。
     """
+    _require_admin(http_request)
     system = get_system()
     counts = getattr(system, "degradation_counts", None)
     return {"degradation_counts": counts() if callable(counts) else {}}
@@ -178,12 +204,8 @@ async def chat(
     http_request: Request,
     x_customer_id: str | None = Header(default=None, alias="X-Customer-ID"),
 ) -> ChatResponse:
-    """同步对话接口。
-
-    customer_id 解析优先级：
-    1. Authorization: Bearer <token> 中的 customer_id
-    2. X-Customer-ID 请求头
-    3. ChatRequest.customer_id 字段（兼容旧客户端）
+    """同步对话接口。身份只从 Authorization: Bearer 解析，忽略请求体与
+    ``X-Customer-ID`` 中的 customer_id，避免客户端伪造身份。
     """
     customer_id = _resolve_customer_id(http_request, request, x_customer_id)
     _authorize_conversation(customer_id, request.conversation_id)
@@ -212,7 +234,7 @@ async def chat(
         # 504 而非 500：这是"等超时"而非服务内部崩溃，调用方可据此重试。
         raise HTTPException(status_code=504, detail="处理超时，请稍后重试或缩小问题范围")
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"处理失败：{exc}")
+        raise http_500("处理", exc) from exc
 
 
 @router.post("/api/chat/stream")
@@ -238,7 +260,7 @@ async def chat_stream(
             ):
                 yield event
         except Exception as exc:
-            yield {"type": "error", "message": str(exc)}
+            yield {"type": "error", "message": sse_error_message(exc)}
 
     return StreamingResponse(
         sse_stream(event_generator()),
@@ -261,6 +283,18 @@ async def chat_stop(
     customer_id = _require_customer_id(http_request)
     if not conversation_id and not run_id:
         raise HTTPException(status_code=400, detail="需提供 conversation_id 或 run_id")
+    if run_id:
+        system = get_system()
+        owner = getattr(system, "lookup_active_run", None)
+        active = owner(run_id) if callable(owner) else None
+        if active is None:
+            raise HTTPException(status_code=404, detail="运行不存在或无权操作")
+        run_conversation_id, run_customer_id = active
+        if not run_customer_id or run_customer_id.upper() != customer_id.upper():
+            raise HTTPException(status_code=404, detail="运行不存在或无权操作")
+        if conversation_id and run_conversation_id and conversation_id != run_conversation_id:
+            raise HTTPException(status_code=404, detail="运行不存在或无权操作")
+        conversation_id = conversation_id or run_conversation_id
     if conversation_id:
         # 会话归属校验：stop 按 conversation_id 索引停止标记，若不校验归属，
         # 任何登录用户只要知道 id 就能停掉他人的运行。
@@ -319,10 +353,10 @@ def _is_admin(customer_id: str) -> bool:
     """
     if str(customer_id).upper() in ADMIN_CUSTOMER_IDS:
         return True
-    checker = getattr(get_user_store(), "is_admin", None)
-    if checker is None:
-        return False
     try:
+        checker = getattr(get_user_store(), "is_admin", None)
+        if checker is None:
+            return False
         return bool(checker(customer_id))
     except Exception:  # noqa: BLE001 - 授权查询失败按"非管理员"处理
         return False
@@ -440,7 +474,7 @@ async def get_profile(http_request: Request, customer_id: str) -> ProfileRespons
             updated_at=profile.get("updated_at", ""),
         )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"获取画像失败：{exc}")
+        raise http_500("获取画像", exc) from exc
 
 
 @router.get("/api/history/{customer_id}", response_model=HistoryResponse)
@@ -510,7 +544,7 @@ async def reset_session(http_request: Request, customer_id: str) -> dict[str, An
         cleared = system.reset_session(customer_id)
         return {"status": "ok", "message": f"会话 {customer_id} 已重置", "cleared_conversations": cleared}
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"重置失败：{exc}")
+        raise http_500("重置", exc) from exc
 
 
 # ── 管理接口：清除旧记录 ─────────────────────────────────────────
@@ -573,7 +607,7 @@ async def clear_records(
         )
         return ClearRecordsResponse(status="ok", cleared_keys=int(cleared), message=msg)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"清除失败：{exc}")
+        raise http_500("清除", exc) from exc
 
 
 @router.delete("/api/account")
@@ -604,4 +638,4 @@ async def delete_account(request: Request) -> dict[str, Any]:
             cleared += 1
         return {"status": "ok", "message": f"账号已注销（{cleared} 个键已删除）"}
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"注销失败：{exc}")
+        raise http_500("注销", exc) from exc

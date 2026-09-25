@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from datetime import datetime
 
@@ -48,12 +49,27 @@ class _FakeConnection:
 
 
 class _FakeTransaction:
-    """假事务上下文：返回一个假连接，与真实存储的 yield 对象一致。"""
+    """假事务：异常时回滚内存快照，与 PostgreSQL 事务语义对齐。"""
+
+    def __init__(self, store: "_FakeStore"):
+        self._store = store
+        self._snapshot: dict | None = None
 
     def __enter__(self):
+        self._snapshot = {
+            "accounts": copy.deepcopy(self._store.accounts),
+            "positions": copy.deepcopy(self._store.positions),
+            "orders": copy.deepcopy(self._store.orders),
+            "transactions": copy.deepcopy(self._store.transactions),
+        }
         return _FakeConnection()
 
-    def __exit__(self, *exc):
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is not None and self._snapshot is not None:
+            self._store.accounts = self._snapshot["accounts"]
+            self._store.positions = self._snapshot["positions"]
+            self._store.orders = self._snapshot["orders"]
+            self._store.transactions = self._snapshot["transactions"]
         return False
 
 
@@ -80,7 +96,7 @@ class _FakeStore:
         return self.accounts.get(customer_id.upper())
 
     def transaction(self):
-        return _FakeTransaction()
+        return _FakeTransaction(self)
 
     def find_transaction_by_key(self, customer_id, idempotency_key):
         if not idempotency_key:
@@ -99,13 +115,29 @@ class _FakeStore:
         return None
 
     def insert_transaction(self, cursor, record):
+        cid = str(record["customer_id"]).upper()
+        key = record.get("idempotency_key") or ""
+        if key:
+            for row in self.transactions:
+                if row["customer_id"] == cid and row.get("idempotency_key") == key:
+                    from finance_agent.data.postgres_stores import UniqueConstraintError
+                    raise UniqueConstraintError()
         row = dict(record)
+        row["customer_id"] = cid
         row["created_at"] = datetime.now()
         self.transactions.append(row)
         return dict(row)
 
     def insert_order(self, cursor, record):
+        cid = str(record["customer_id"]).upper()
+        key = record.get("idempotency_key") or ""
+        if key:
+            for row in self.orders:
+                if row["customer_id"] == cid and row.get("idempotency_key") == key:
+                    from finance_agent.data.postgres_stores import UniqueConstraintError
+                    raise UniqueConstraintError()
         row = dict(record)
+        row["customer_id"] = cid
         row["created_at"] = datetime.now()
         row["fee_limitations"] = json.dumps(row.get("fee_limitations", []))
         self.orders.append(row)
@@ -426,6 +458,52 @@ def test_buy_with_same_idempotency_key_does_not_double_deduct(service):
     assert replay.order.order_id == first.order.order_id
     assert replay.account.cash_balance == cash_after_first
     assert len(service.list_orders(CUSTOMER)) == 1
+
+
+def test_buy_unique_violation_after_missed_lookup_replays(service):
+    """并发窗口：先查未命中、INSERT 撞唯一约束时必须回放，不得二次扣款。"""
+    service.deposit(CUSTOMER, 100000.0)
+    first = service.buy(CUSTOMER, "110011", amount=10000.0, idempotency_key="race-buy")
+    cash_after_first = first.account.cash_balance
+    original_find = service.store.find_order_by_key
+    calls = {"n": 0}
+
+    def find_miss_once(customer_id, idempotency_key):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None
+        return original_find(customer_id, idempotency_key)
+
+    service.store.find_order_by_key = find_miss_once
+    replay = service.buy(CUSTOMER, "110011", amount=10000.0, idempotency_key="race-buy")
+
+    assert replay.idempotent_replay is True
+    assert replay.order.order_id == first.order.order_id
+    assert replay.account.cash_balance == cash_after_first
+    assert len(service.list_orders(CUSTOMER)) == 1
+
+
+def test_deposit_unique_violation_after_missed_lookup_replays(service):
+    """并发充值撞唯一约束时返回首次流水，不得二次入账。"""
+    first_txn, account, _ = service.deposit(CUSTOMER, 50000.0, idempotency_key="race-dep")
+    original_find = service.store.find_transaction_by_key
+    calls = {"n": 0}
+
+    def find_miss_once(customer_id, idempotency_key):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None
+        return original_find(customer_id, idempotency_key)
+
+    service.store.find_transaction_by_key = find_miss_once
+    txn, replayed_account, replay = service.deposit(
+        CUSTOMER, 50000.0, idempotency_key="race-dep",
+    )
+
+    assert replay is True
+    assert txn.txn_id == first_txn.txn_id
+    assert replayed_account.cash_balance == account.cash_balance
+    assert replayed_account.total_deposit == 50000.0
 
 
 def test_buy_reports_undisclosed_fee_as_limitation(service, monkeypatch):

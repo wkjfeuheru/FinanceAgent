@@ -262,6 +262,36 @@ def test_resolve_run_status_processing_does_not_recover():
     assert result["response"] == ""
 
 
+def test_resolve_run_status_completed_job_waits_for_siblings():
+    """一个 job 完成但兄弟仍在排队时，端点必须继续报 processing，不能把空答复当终态。"""
+    repository = _FakeAsyncRepository()
+    gateway = _ControllableGateway()
+    system = _system(repository, gateway)
+    task_id = "single:run-1:stock_research"
+    for job_id in ("job-a", "job-b"):
+        repository.save_job_ref(
+            customer_id="CUST1", thread_id="v1:CUST1:conv-1", run_id="run-1",
+            job=AsyncJobRef(job_id=job_id, kind="technical_indicators",
+                            status="queued", task_id=task_id),
+            idempotency_key=f"technical_indicators:{job_id}",
+        )
+        repository.save_pending_outcome(
+            customer_id="CUST1", thread_id="v1:CUST1:conv-1", run_id="run-1",
+            conversation_id="conv-1", job_id=job_id,
+            outcome=_processing_outcome(task_id, job_ids=["job-a", "job-b"]).model_dump(mode="json"),
+            code="600519",
+        )
+    gateway.complete("job-a")
+
+    result = system.resolve_run_status("job-a", "CUST1")
+
+    assert result["run_status"] == "processing"
+    assert result["response"] == ""
+    assert result["conversation_id"] == "conv-1"
+    assert "job-a" in repository.pending
+    assert "job-b" in repository.pending
+
+
 def test_resolve_run_status_completed_recovers_and_persists(monkeypatch):
     repository = _FakeAsyncRepository()
     gateway = _ControllableGateway()

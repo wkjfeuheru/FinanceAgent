@@ -4,7 +4,7 @@ import { ChatDotRound } from '@element-plus/icons-vue'
 import MessageList from './MessageList.vue'
 import MessageInput from './MessageInput.vue'
 import ParamDialog from './ParamDialog.vue'
-import { chatStream } from '@/api/chat'
+import { chatStream, getRunStatus, stopChat } from '@/api/chat'
 import type { ChatMessage, ChatRequest, HistoryMessage, PendingInput } from '@/types'
 
 const props = defineProps<{
@@ -19,8 +19,49 @@ const emit = defineEmits<{
 
 const messages = ref<ChatMessage[]>([])
 const loading = ref(false)
-// 缺参追问弹窗的当前载荷；非空即显示弹窗。
 const pendingInput = ref<PendingInput | null>(null)
+const streamAbort = ref<AbortController | null>(null)
+const userStopped = ref(false)
+
+const PROCESSING_STATUSES = new Set(['processing', 'queued', 'running'])
+
+function sleep(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
+async function waitForQuantJobs(
+  ids: string[],
+  signal: AbortSignal,
+): Promise<{ response: string; conversation_id?: string; warnings?: string[] } | null> {
+  const unique = [...new Set(ids.filter(Boolean))]
+  if (!unique.length) return null
+  const deadline = Date.now() + 180000
+  while (Date.now() < deadline) {
+    if (signal.aborted) return null
+    let results: Awaited<ReturnType<typeof getRunStatus>>[]
+    try {
+      results = await Promise.all(unique.map((id) => getRunStatus(id)))
+    } catch {
+      await sleep(2000)
+      continue
+    }
+    const ready = results.find((item) => item.run_status === 'completed' && item.response)
+    if (ready) {
+      return {
+        response: ready.response || '',
+        conversation_id: ready.conversation_id,
+        warnings: ready.warnings || [],
+      }
+    }
+    const stillGoing = results.some(
+      (item) => PROCESSING_STATUSES.has(item.run_status)
+        || (item.run_status === 'completed' && !item.response),
+    )
+    if (!stillGoing) return null
+    await sleep(2000)
+  }
+  return null
+}
 
 function now(): string {
   return new Date().toISOString()
@@ -66,6 +107,10 @@ async function runTurn(req: ChatRequest) {
   })
   messages.value.push(placeholder)
   loading.value = true
+  userStopped.value = false
+  streamAbort.value = new AbortController()
+  const signal = streamAbort.value.signal
+  let streamFailed = false
 
   try {
     await chatStream(req, {
@@ -87,38 +132,71 @@ async function runTurn(req: ChatRequest) {
         }
       },
       onDelta(event) {
-        // 定稿答复的分块下发：按序累积渲染，形成逐字输出现象。
         placeholder.content = (placeholder.content || '') + (event.content || '')
         placeholder.stage = ''
         const steps = placeholder.progressSteps || []
         if (steps.length) steps[steps.length - 1].status = 'completed'
       },
       onResponse(event) {
-        // response 携带权威全文，覆盖累积结果以防分块与最终内容有偏差。
         placeholder.content = event.content
         placeholder.data = event.data
-        placeholder.loading = false
-        placeholder.progressSteps = []
         if (event.data?.conversation_id) {
           emit('conversation-updated', event.data.conversation_id)
         }
         if (event.data?.user_profile && Object.keys(event.data.user_profile).length) {
           emit('profile-updated')
         }
-        // 缺参追问：以弹窗收集必填/可选参数，用户提交后在挂起线程上 resume。
         pendingInput.value = event.data?.pending_input || null
       },
       onError(errMsg) {
+        streamFailed = true
         placeholder.content = `抱歉，处理过程中出现错误：${errMsg}`
         placeholder.loading = false
         placeholder.progressSteps = []
       },
-    })
+    }, { signal })
+
+    const pendingIds = placeholder.data?.pending_task_ids || []
+    const runStatus = placeholder.data?.run_status || ''
+    if (
+      !streamFailed
+      && !userStopped.value
+      && !signal.aborted
+      && (pendingIds.length > 0 || PROCESSING_STATUSES.has(runStatus))
+    ) {
+      placeholder.stage = '正在计算技术指标…'
+      placeholder.loading = true
+      const recovered = await waitForQuantJobs(
+        pendingIds.length ? pendingIds : [placeholder.data?.task_id || ''],
+        signal,
+      )
+      if (recovered?.response) {
+        placeholder.content = recovered.response
+        if (placeholder.data) {
+          placeholder.data = {
+            ...placeholder.data,
+            response: recovered.response,
+            run_status: 'completed',
+            pending_task_ids: [],
+            warnings: recovered.warnings || placeholder.data.warnings,
+            conversation_id: recovered.conversation_id || placeholder.data.conversation_id,
+          }
+        }
+        if (recovered.conversation_id) {
+          emit('conversation-updated', recovered.conversation_id)
+        }
+      } else if (!userStopped.value && pendingIds.length) {
+        placeholder.content = placeholder.content
+          || '技术指标仍在计算。请稍后刷新会话查看完整结论。'
+      }
+    }
   } catch (error: any) {
     placeholder.content = `抱歉，处理过程中出现错误：${error?.message || '未知错误'}`
   } finally {
     placeholder.loading = false
+    placeholder.progressSteps = []
     loading.value = false
+    streamAbort.value = null
   }
 }
 
@@ -136,6 +214,20 @@ async function handleSend(text: string) {
     chat_history: buildHistory().filter((h) => h.content !== text),
     conversation_id: props.conversationId,
   })
+}
+
+async function handleStop() {
+  userStopped.value = true
+  streamAbort.value?.abort('user-stop')
+  const conversationId = props.conversationId
+    || messages.value.find((item) => item.data?.conversation_id)?.data?.conversation_id
+    || ''
+  if (!conversationId) return
+  try {
+    await stopChat(conversationId)
+  } catch {
+    // 停止是尽力而为：本地已中断流，后端失败不阻断 UI。
+  }
 }
 
 /** 弹窗提交：把答案作为对缺参追问的恢复值续跑同一轮。 */
@@ -208,7 +300,7 @@ defineExpose({ loadHistoryMessages, startNewConversation })
 
     <MessageList :messages="messages" :loading="loading" />
 
-    <MessageInput :loading="loading" @send="handleSend" @clear="handleClear" />
+    <MessageInput :loading="loading" @send="handleSend" @clear="handleClear" @stop="handleStop" />
 
     <ParamDialog
       :pending="pendingInput"

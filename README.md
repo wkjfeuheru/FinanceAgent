@@ -213,6 +213,13 @@ POSTGRES_POOL_TIMEOUT=30
 # 日常授权请用 tools/bootstrap_admin.py，这里留空即可。
 # ADMIN_CUSTOMER_IDS=CUST000001,CUST000002
 
+# 运行环境：production 时关闭 /docs 与 OpenAPI。
+# APP_ENV=production
+# 浏览器跨域来源（逗号分隔）。生产必须改成实际上线的前端源。
+# CORS_ALLOW_ORIGINS=https://your-frontend.example
+# 仅当 API 在反代之后时开启，登录限流才信任 X-Forwarded-For。
+# TRUST_PROXY=true
+
 # Tushare MCP 数据源
 # TUSHARE_MCP_URL=https://your-tushare-mcp-endpoint?token=your-token
 TUSHARE_MCP_TIMEOUT=30
@@ -734,6 +741,12 @@ npm run build
 - 不要将 `DEEPSEEK_API_KEY`、数据库密码或登录令牌写入代码、日志或版本库。
 - 生产环境应限制 PostgreSQL、Redis 和 FastAPI 管理端口的网络访问。
 - 删除账户和 PostgreSQL 身份迁移会清理关联业务数据，执行前请确认数据库备份策略。
+- **上线前必做：**
+  - 设置 `APP_ENV=production`（关闭 `/docs`、`/redoc`、`/openapi.json`，根路径不再枚举接口）。
+  - 设置 `CORS_ALLOW_ORIGINS` 为实际上线的前端源，不要沿用 localhost。
+  - 用 `FINANCE_ADMIN_PASSWORD` + `tools/bootstrap_admin.py` 创建管理员，**禁止**使用文档中的 `admin` / `admin123`。
+  - 登录/注册有进程内频率限制；多副本部署时请在网关再加一层。
+  - `/api/health` 在 PostgreSQL 不可用或编排无法初始化时返回 HTTP 503；`/api/health/degradation` 仅管理员可访问。
 
 ## 常见问题
 

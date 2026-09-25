@@ -141,3 +141,10 @@ def test_portfolio_schema_cascades_to_users():
         assert f"CREATE TABLE IF NOT EXISTS finance.{table}" in PORTFOLIO_SCHEMA_SQL
     assert PORTFOLIO_SCHEMA_SQL.count("ON DELETE CASCADE") >= 4
 
+
+def test_portfolio_orders_declare_idempotency_unique_index():
+    """委托幂等必须有部分唯一索引，否则并发同一键会双花。"""
+    assert "uq_orders_idempotency" in PORTFOLIO_SCHEMA_SQL
+    assert "uq_cash_transactions_idempotency" in PORTFOLIO_SCHEMA_SQL
+    assert "WHERE idempotency_key <> ''" in PORTFOLIO_SCHEMA_SQL
+

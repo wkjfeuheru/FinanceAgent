@@ -15,6 +15,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
+from finance_agent.api.errors import http_500
 from finance_agent.api.portfolio_schemas import (
     DepositRequest,
     DepositResponse,
@@ -75,7 +76,7 @@ def _guard(action: str, call: Any) -> Any:
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001 - 未预期失败要显式暴露而非静默成功
-        raise HTTPException(status_code=500, detail=f"{action}失败：{exc}") from exc
+        raise http_500(action, exc) from exc
 
 
 # ── 商品展示 ────────────────────────────────────────────────────

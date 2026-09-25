@@ -18,6 +18,45 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
 
 TOKEN_TTL_SECONDS = 7 * 24 * 3600
+PASSWORD_MAX_LENGTH = 64
+WEAK_PASSWORDS = frozenset({
+    "admin123", "123456", "12345678", "password", "admin", "changeme",
+    "qwerty", "111111", "000000",
+})
+
+
+def is_unique_violation(exc: BaseException) -> bool:
+    """识别 PostgreSQL unique_violation（SQLSTATE 23505）及其包装异常。"""
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if str(getattr(current, "sqlstate", "") or "") == "23505":
+            return True
+        try:
+            from psycopg.errors import UniqueViolation
+            if isinstance(current, UniqueViolation):
+                return True
+        except ImportError:
+            pass
+        current = current.__cause__ or current.__context__
+    text = str(exc).lower()
+    return "duplicate" in text and "unique" in text
+
+
+class UniqueConstraintError(Exception):
+    """测试与适配层用来模拟 PostgreSQL unique_violation（SQLSTATE 23505）。"""
+
+    sqlstate = "23505"
+
+
+def _validate_password(password: str) -> None:
+    if len(password or "") < 6:
+        raise ValueError("密码至少需要 6 个字符")
+    if len(password) > PASSWORD_MAX_LENGTH:
+        raise ValueError(f"密码不得超过 {PASSWORD_MAX_LENGTH} 个字符")
+    if password.lower() in WEAK_PASSWORDS:
+        raise ValueError("密码过于简单，请更换")
 
 
 def _hash_password(password: str, salt: str) -> str:
@@ -344,8 +383,7 @@ class PostgresAuthStore(_PostgresBaseStore):
         username = (username or "").strip()
         if len(username) < 2:
             raise ValueError("用户名至少需要 2 个字符")
-        if len(password) < 6:
-            raise ValueError("密码至少需要 6 个字符")
+        _validate_password(password)
         salt = secrets.token_hex(16)
         name = display_name.strip() or username
         self._ensure_schema()
@@ -378,6 +416,9 @@ class PostgresAuthStore(_PostgresBaseStore):
                 "is_admin": bool(is_admin)}
 
     def login(self, username: str, password: str) -> dict[str, Any]:
+        # 超长口令直接当失败，避免未校验的 PBKDF2 成为 DoS 面。
+        if len(password or "") > PASSWORD_MAX_LENGTH:
+            raise ValueError("用户名或密码错误")
         self._ensure_schema()
         with self._transaction() as connection:
             cursor = connection.cursor()
@@ -510,18 +551,23 @@ class PostgresAuthStore(_PostgresBaseStore):
         与注册同用 PBKDF2-SHA256 + 随机盐；换密码必须换盐，否则同一个密码在
         两个账号上会得到相同的哈希。
         """
-        if len(password or "") < 6:
-            raise ValueError("密码至少需要 6 个字符")
+        _validate_password(password)
         self._ensure_schema()
         salt = secrets.token_hex(16)
+        cid = customer_id.upper()
         with self._transaction() as connection:
             cursor = connection.cursor()
             try:
                 cursor.execute(
                     "UPDATE finance.users SET password_hash = %s, salt = %s WHERE customer_id = %s",
-                    (_hash_password(password, salt), salt, customer_id.upper()),
+                    (_hash_password(password, salt), salt, cid),
                 )
                 count = cursor.rowcount
+                # 换密后旧令牌一律失效，否则重置被盗账号后原会话仍可用。
+                cursor.execute(
+                    "DELETE FROM finance.sessions WHERE customer_id = %s",
+                    (cid,),
+                )
             finally:
                 cursor.close()
         return count > 0

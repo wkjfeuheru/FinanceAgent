@@ -69,8 +69,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.password:
         parser.error("必须提供 --password 或环境变量 FINANCE_ADMIN_PASSWORD")
-    if len(args.password) < 6:
-        parser.error("密码至少需要 6 个字符")
+    from finance_agent.config import IS_PRODUCTION
+    from finance_agent.data.postgres_stores import _validate_password
+
+    try:
+        _validate_password(args.password)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if IS_PRODUCTION and len(args.password) < 12:
+        parser.error("生产环境管理员密码至少 12 个字符")
 
     username = args.username.strip()
 
