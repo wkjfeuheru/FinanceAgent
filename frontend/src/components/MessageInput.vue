@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, nextTick } from 'vue'
-import { Promotion, Delete } from '@element-plus/icons-vue'
+import { Promotion, Delete, Close } from '@element-plus/icons-vue'
 
 const props = defineProps<{
   loading: boolean
@@ -9,6 +9,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'send', text: string): void
   (e: 'clear'): void
+  (e: 'stop'): void
 }>()
 
 const text = ref('')
@@ -68,14 +69,23 @@ function handleClear() {
         ></textarea>
       </div>
       <el-button
+        v-if="!loading"
         type="primary"
         :icon="Promotion"
-        :loading="loading"
         @click="handleSend"
         :disabled="!text.trim()"
         class="send-btn"
       >
         发送
+      </el-button>
+      <el-button
+        v-else
+        type="danger"
+        :icon="Close"
+        @click="emit('stop')"
+        class="send-btn"
+      >
+        停止
       </el-button>
     </div>
     <div class="hint">按 Enter 发送，Shift + Enter 换行</div>

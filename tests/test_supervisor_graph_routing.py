@@ -409,7 +409,7 @@ def _plan_outcome(task_id: str, status: str) -> DomainOutcome:
         (["success", "success"], [], "", "completed"),
         (["failed", "failed"], [], "", "failed"),
         (["success", "failed"], [], "", "partial"),
-        (["success", "processing"], [], "", "partial"),
+        (["success", "processing"], [], "", "processing"),
         ([], [], "", "partial"),
         # 2) 用户主动停止：覆盖集合判定，且优先级高于执行器上报
         (["success"], [PLAN_CANCELLED_WARNING], "", "cancelled"),

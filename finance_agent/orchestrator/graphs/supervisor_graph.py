@@ -358,8 +358,8 @@ def reduce_run_status(
 
     优先级链（高 → 低，修改任一层都会影响前端"停止"与"出错"的区分）：
 
-    1. **结论集合**：全部 completed → completed；全部 failed → failed；其余
-       （含空集合、混合、processing）→ partial；
+    1. **结论集合**：全部 completed → completed；全部 failed → failed；
+       含 processing → processing（前端据此轮询量化任务）；其余混合 → partial；
     2. **用户主动停止**：``PLAN_CANCELLED_WARNING`` 出现即覆盖为 cancelled ——
        必须高于执行器上报，否则前端无法区分"停止"与"出错"；
     3. **执行器上报**：上报为降级状态（failed/partial）时覆盖前值，避免"已完成的
@@ -368,10 +368,14 @@ def reduce_run_status(
        声称完全成功）。
     """
     statuses = {_status_from_outcome(outcome) for outcome in outcomes}
+    processing = DOMAIN_STATUS_TO_RUN_STATUS["processing"]
     if statuses == {RunStatus.COMPLETED.value}:
         run_status = RunStatus.COMPLETED.value
     elif statuses == {RunStatus.FAILED.value}:
         run_status = RunStatus.FAILED.value
+    elif processing in statuses:
+        # 任一领域仍在等量化任务：整轮尚未结束，前端必须继续轮询。
+        run_status = processing
     else:
         run_status = RunStatus.PARTIAL.value
 

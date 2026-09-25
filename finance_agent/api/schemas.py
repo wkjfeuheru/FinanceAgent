@@ -114,6 +114,7 @@ class HealthResponse(BaseModel):
     """健康检查响应。"""
     status: str = "ok"
     redis_available: bool = False
+    postgres_available: bool = False
     agents_initialized: bool = False
 
 
@@ -128,8 +129,8 @@ class RegisterRequest(BaseModel):
 
 class LoginRequest(BaseModel):
     """登录请求。"""
-    username: str = Field(..., description="用户名")
-    password: str = Field(..., description="密码")
+    username: str = Field(..., min_length=1, max_length=32, description="用户名")
+    password: str = Field(..., min_length=1, max_length=64, description="密码")
 
 
 class UserInfo(BaseModel):

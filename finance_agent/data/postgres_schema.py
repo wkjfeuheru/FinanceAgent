@@ -2,16 +2,59 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from typing import Any
 
 
 BUSINESS_SCHEMA = "finance"
-_SQL_DIR = Path(__file__).resolve().parents[2] / "sql"
+
+# 结构 DDL（不含 007 种子、不含 FAQ 向量）。部署 CLI 与三处懒建表共用这一份清单。
+SCHEMA_APPLY_ORDER = (
+    "001_base_schema.sql",
+    "002_agent_runtime_schema.sql",
+    "003_identity_migration.sql",
+    "004_research_governance.sql",
+    "005_theme_registry.sql",
+    "006_products_columns.sql",
+    "008_hybrid_orchestration.sql",
+    "011_portfolio.sql",
+    "013_admin_console.sql",
+)
+
+# FAQ 向量分块：依赖 pgvector。migrate 默认会在 CREATE EXTENSION 之后应用。
+FAQ_SCHEMA_APPLY_ORDER = (
+    "009_faq_vector.sql",
+    "010_faq_bigram_search.sql",
+    "012_faq_qa_pair_columns.sql",
+)
+
+SEED_SCHEMA_FILES = ("007_product_seed.sql",)
+
+VECTOR_EXTENSION_SQL = "CREATE EXTENSION IF NOT EXISTS vector"
+
+
+def sql_dir() -> Path:
+    """定位仓库 ``sql/`` 目录；容器内可通过 ``FINANCE_SQL_DIR`` 覆盖。"""
+    env = os.getenv("FINANCE_SQL_DIR", "").strip()
+    if env:
+        path = Path(env)
+        if not path.is_dir():
+            raise RuntimeError(f"FINANCE_SQL_DIR 不是目录: {path}")
+        return path
+    candidates = (
+        Path(__file__).resolve().parents[2] / "sql",
+        Path.cwd() / "sql",
+    )
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    raise RuntimeError("找不到 sql/ 目录。请在仓库根目录运行，或设置 FINANCE_SQL_DIR。")
 
 
 def _load_sql(filename: str) -> str:
     """从仓库根目录的 sql/ 加载 UTF-8 脚本。"""
-    path = _SQL_DIR / filename
+    path = sql_dir() / filename
     try:
         content = path.read_text(encoding="utf-8").strip()
     except OSError as exc:
@@ -19,6 +62,62 @@ def _load_sql(filename: str) -> str:
     if not content:
         raise RuntimeError(f"PostgreSQL SQL 脚本为空: {path}")
     return content
+
+
+def _is_missing_pgvector(exc: BaseException) -> bool:
+    message = str(exc)
+    lowered = message.lower()
+    return "vector" in lowered and (
+        "is not available" in message
+        or "vector.control" in message
+        or "could not open extension control file" in lowered
+        or 'extension "vector"' in lowered
+        or "extension 'vector'" in lowered
+    )
+
+
+def _execute_sql(cursor: Any, label: str, sql: str) -> None:
+    """执行一段 DDL；失败带上脚本名，不吞异常。"""
+    try:
+        cursor.execute(sql)
+    except Exception as exc:
+        raise RuntimeError(f"应用 {label} 失败: {exc}") from exc
+
+
+def apply_postgres_schema(
+    connection: Any,
+    *,
+    include_faq: bool = True,
+    include_seed: bool = False,
+) -> None:
+    """按统一清单幂等应用 schema。失败向上抛出，由调用方决定提交或退出。
+
+    ``include_faq=False`` 时不要求 pgvector，供业务/审计懒建表在无扩展的库上仍能启动。
+    部署以 ``python -m finance_agent.migrate`` 为准（默认含 FAQ）。
+    """
+    cursor = connection.cursor()
+    try:
+        for filename in SCHEMA_APPLY_ORDER:
+            _execute_sql(cursor, filename, _load_sql(filename))
+        if include_faq:
+            try:
+                _execute_sql(cursor, "CREATE EXTENSION vector", VECTOR_EXTENSION_SQL)
+                for filename in FAQ_SCHEMA_APPLY_ORDER:
+                    _execute_sql(cursor, filename, _load_sql(filename))
+            except Exception as exc:
+                original = exc.__cause__ if getattr(exc, "__cause__", None) is not None else exc
+                if _is_missing_pgvector(original) or _is_missing_pgvector(exc):
+                    raise RuntimeError(
+                        "PostgreSQL 缺少 pgvector 扩展，FAQ 索引与检索不可用。"
+                        "请安装 pgvector（例如 postgresql-16-pgvector）并在业务库执行 "
+                        "CREATE EXTENSION vector; 后重试。"
+                    ) from exc
+                raise
+        if include_seed:
+            for filename in SEED_SCHEMA_FILES:
+                _execute_sql(cursor, filename, _load_sql(filename))
+    finally:
+        cursor.close()
 
 
 # 运行审计 JSONB 字段使用显式版本，便于未来读取端按版本兼容。

@@ -99,13 +99,19 @@ FinanceAgent/
 │   ├── product_research/    # 产品研究与适配度评估
 │   ├── faq/                 # 本地中文 FAQ 检索（RAG）
 │   ├── config.py            # 模型及运行环境配置
+│   ├── migrate.py           # 统一幂等 schema apply（python -m finance_agent.migrate）
 │   └── main.py              # FastAPI 应用入口
 ├── frontend/                # Vue 3 前端（对话 / 商品 / 持仓 / 账户）
+├── deploy/                  # Nginx 反代（SSE / SPA）
 ├── sql/                     # PostgreSQL 建表脚本（001-013，含 006/013 补列迁移）
 ├── tools/                   # 端到端校验、管理员引导与种子数据生成脚本
 ├── tests/                   # pytest 测试
+├── docker-compose.yml       # 预发：Postgres/pgvector、Redis、migrate、API、Celery、Nginx
+├── Dockerfile
+├── Dockerfile.web
 ├── pyproject.toml
 ├── requirements.txt
+├── requirements.lock
 └── README.md
 ```
 
@@ -115,7 +121,8 @@ FinanceAgent/
 - Node.js 18 或更高版本
 - Redis 服务
 - 有效的 DeepSeek API Key
-- PostgreSQL 仅在需要使用 PostgreSQL 存储时安装并配置
+- PostgreSQL（认证、业务、checkpoint；预发镜像使用带 pgvector 的 Postgres 16）
+- 生产/预发另需 Docker Compose
 
 ## 快速开始
 
@@ -152,6 +159,8 @@ pip install -e .
 ```bash
 pip install -r requirements.txt
 ```
+
+Docker 镜像按 `requirements.lock` 安装，避免每次构建漂版本。本地开发仍可用上面的下限约束。
 
 安装开发和测试依赖：
 
@@ -212,6 +221,16 @@ POSTGRES_POOL_TIMEOUT=30
 # 管理员 customer_id 白名单，多个值用逗号分隔；与库内 is_admin 取并集。
 # 日常授权请用 tools/bootstrap_admin.py，这里留空即可。
 # ADMIN_CUSTOMER_IDS=CUST000001,CUST000002
+
+# 运行环境：production 时关闭 /docs 与 OpenAPI。
+# APP_ENV=production
+# 浏览器跨域来源（逗号分隔）。生产必须改成实际上线的前端源。
+# 经本仓库 Nginx 同源反代时留空即可。
+# CORS_ALLOW_ORIGINS=https://your-frontend.example
+# 仅当 API 在反代之后时开启，登录限流才信任 X-Forwarded-For。
+# TRUST_PROXY=true
+# 本地默认 127.0.0.1；容器内必须 0.0.0.0。
+# UVICORN_HOST=127.0.0.1
 
 # Tushare MCP 数据源
 # TUSHARE_MCP_URL=https://your-tushare-mcp-endpoint?token=your-token
@@ -302,7 +321,7 @@ FAQ_RELATIVE_SCORE_RATIO=0.85
 
 - 匿名模式已关闭，`AUTH_REQUIRED` 不需要配置，也不能通过环境变量重新开启匿名访问。
 - PostgreSQL 是唯一的关系型存储；未配置、驱动缺失或无法连接时，服务会显式失败，不会回退到 SQLite。
-- 首次连接时程序会自动创建认证、业务、审计、主题注册表与异步任务表。**pgvector 只在 FAQ 索引/检索时使用**（`sql/009_faq_vector.sql`），不属于启动前置条件；缺少 pgvector 只影响 FAQ，不影响登录、对话与管理接口。
+- 首次连接时程序会懒建表（安全网）。**部署以** `python -m finance_agent.migrate` **为准**：默认应用结构脚本（001–006、008、011、013），`CREATE EXTENSION IF NOT EXISTS vector` 后应用 FAQ（009/010/012）；`--seed` 再执行 007（`ON CONFLICT` 幂等）。失败显式退出。**pgvector 只在 FAQ 索引/检索时使用**，不属于 API 启动前置条件；缺少 pgvector 只影响 FAQ，不影响登录、对话与管理接口。
 - **新增列必须配幂等 ALTER。** `sql/001_base_schema.sql` 用的是 `CREATE TABLE IF NOT EXISTS`，对已经建好的库**不会补列**。因此给既有表加列时，不能只改 001 的建表语句，必须在编号更大的脚本里同时加一条 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`（参照 `002`/`005`/`006`/`013`）。漏掉这一步会让旧库缺列——历史上 `products.recommended_holding_period` 就是这样丢的，并连带 `sql/007_product_seed.sql` 无法应用。可用下面的漂移诊断工具把关：
 - 管理员接口（主题注册表、待审核线索、clear-records、商品上下架、用户总览）依赖两条路径，取并集：
   - 库内角色 `finance.users.is_admin`（正式路径，可用 `tools/bootstrap_admin.py` 授予）；
@@ -361,6 +380,8 @@ redis://localhost:6379/0
 uvicorn finance_agent.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
+容器内必须监听 `0.0.0.0`（环境变量 `UVICORN_HOST`，本地默认仍为 `127.0.0.1`）。
+
 启动后可访问：
 
 - API：http://127.0.0.1:8000
@@ -379,10 +400,11 @@ npm run dev
 
 访问 http://localhost:5173。前端开发服务器会将 `/api` 请求代理到 `http://127.0.0.1:8000`。
 
-### 7. 一键启动（推荐）
+### 7. 一键启动（Windows 开发）
 
 上面 4-6 步合计要开三个终端，且顺序不能错：数据库没就绪就起后端会直接 `connection timeout`。
-`scripts/start-all.ps1` 把整套环境按依赖顺序拉起，**每一步都等真正就绪才继续**：
+`scripts/start-all.ps1` 把整套**开发**环境按依赖顺序拉起，**每一步都等真正就绪才继续**。
+**生产/预发请走下一节 Docker Compose**，不要用本脚本当上线入口。
 
 ```powershell
 # 显式调用
@@ -429,6 +451,30 @@ powershell -ExecutionPolicy Bypass -File scripts\stop-all.ps1
 Python/Node 项目。它会额外处理 `uvicorn --reload` 的派生工作进程——该进程命令行不含项目标识，
 且监听 socket 由已被终止的父进程创建（Windows 会把持有者记成那个已死的 PID），是"停了但端口
 还占着"的常见根源。结束后会复核端口是否真正释放并如实报告。
+
+### 8. Docker 预发
+
+生产/预发走 Compose：Postgres（pgvector）、Redis、一次性 `migrate`、API、Celery worker、Nginx 前端。
+密钥只从环境注入，不打进镜像；FAQ embedding 权重不烤进镜像，挂 `.cache/models`。
+Linux 入口：`scripts/start-all.sh`（`docker compose up -d --wait`）。
+
+1. 复制 `.env.example` → `.env`，填 `DEEPSEEK_API_KEY`、`POSTGRES_PASSWORD`、意图模型 key；`APP_ENV=production`。
+2. `docker compose up -d --build`
+3. `docker compose exec api python tools/bootstrap_admin.py --username admin`（生产拒绝弱口令，已在 bootstrap 里）
+4. `docker compose exec api python -m finance_agent.faq index --root docs/faq`
+5. 打开 `http://localhost`（nginx:80），验证登录、对话、商品货架、健康检查 200
+6. 确认 Celery 容器在跑，否则股票技术指标会停在 processing
+
+首次 FAQ 索引会从 Hugging Face 拉 `BAAI/bge-small-zh-v1.5` 到挂载的 `.cache/models`，之后重启复用。
+同源 Nginx 反代后 `CORS_ALLOW_ORIGINS` 可留空；Compose 已设 `TRUST_PROXY=true`、`UVICORN_HOST=0.0.0.0`。
+
+```bash
+cp .env.example .env
+# 编辑 .env 后：
+./scripts/start-all.sh
+# 或：
+docker compose up -d --build
+```
 
 ## 使用流程
 
@@ -674,12 +720,11 @@ python tools/bootstrap_admin.py --username admin --password '你的密码'
 ```
 
 模拟交易的建表脚本为 `sql/011_portfolio.sql`（账户、资金流水、委托与持仓）。
-它已接入 `_ensure_schema` / `setup_schema`，因此应用启动或首次访问业务存储时会自动
-幂等应用，无需手工执行；需要单独建表时也可 `psql -f sql/011_portfolio.sql`。
+部署时由 `python -m finance_agent.migrate` 统一应用；进程内 `_ensure_schema` / `setup_schema`
+仍作为懒建表安全网，首次访问业务存储时会走同一份 `SCHEMA_APPLY_ORDER`。
 
 管理后台的角色与上下架列为 `sql/013_admin_console.sql`（`users.is_admin`、
-`products.is_active`）。同样接入 `_ensure_schema`，启动或首次访问认证/业务存储时自动
-幂等应用；需要单独执行时 `psql -f sql/013_admin_console.sql`。
+`products.is_active`）。同样纳入统一 migrate 与懒建表。
 
 库表漂移诊断（对比 `sql/` 声明的期望结构与线上实际结构，可用于 CI 把关）：
 
@@ -734,6 +779,12 @@ npm run build
 - 不要将 `DEEPSEEK_API_KEY`、数据库密码或登录令牌写入代码、日志或版本库。
 - 生产环境应限制 PostgreSQL、Redis 和 FastAPI 管理端口的网络访问。
 - 删除账户和 PostgreSQL 身份迁移会清理关联业务数据，执行前请确认数据库备份策略。
+- **上线前必做：**
+  - 设置 `APP_ENV=production`（关闭 `/docs`、`/redoc`、`/openapi.json`，根路径不再枚举接口）。
+  - 设置 `CORS_ALLOW_ORIGINS` 为实际上线的前端源，不要沿用 localhost。
+  - 用 `FINANCE_ADMIN_PASSWORD` + `tools/bootstrap_admin.py` 创建管理员，**禁止**使用文档中的 `admin` / `admin123`。
+  - 登录/注册有进程内频率限制；多副本部署时请在网关再加一层。
+  - `/api/health` 在 PostgreSQL 不可用或编排无法初始化时返回 HTTP 503；`/api/health/degradation` 仅管理员可访问。
 
 ## 常见问题
 

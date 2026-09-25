@@ -36,10 +36,31 @@ def safe_parse_json(text: str, default: Any = None) -> Any:
 load_dotenv()
 
 DEEPSEEK_API_KEY = _SYSTEM_DEEPSEEK_API_KEY
+# 本地默认只绑回环；容器内必须 UVICORN_HOST=0.0.0.0 才能被 Nginx 反代到。
+UVICORN_HOST = os.getenv("UVICORN_HOST", "127.0.0.1").strip() or "127.0.0.1"
+UVICORN_PORT = int(os.getenv("UVICORN_PORT", "8000"))
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 REDIS_MEMORY_TTL_SECONDS = int(os.getenv("REDIS_MEMORY_TTL_SECONDS", "3600"))
 # 已关闭匿名模式，所有业务请求必须携带有效 Bearer token。
 AUTH_REQUIRED = True
+
+# 运行环境：production 时关闭 OpenAPI 文档、收紧管理员口令。
+APP_ENV = os.getenv("APP_ENV", "development").strip().lower() or "development"
+IS_PRODUCTION = APP_ENV in {"prod", "production"}
+# 仅在反向代理后开启，登录限流才信任 X-Forwarded-For。
+TRUST_PROXY = os.getenv("TRUST_PROXY", "false").strip().lower() in {"1", "true", "yes", "on"}
+# 浏览器跨域来源；未配置时仅放行本地开发地址。生产必须显式设置。
+CORS_ALLOW_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "CORS_ALLOW_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000",
+    ).split(",")
+    if origin.strip()
+]
+# 登录/注册进程内滑动窗口；多 worker 时各自计数，反向代理侧仍应再加一层。
+AUTH_RATE_LIMIT_ATTEMPTS = int(os.getenv("AUTH_RATE_LIMIT_ATTEMPTS", "8"))
+AUTH_RATE_LIMIT_WINDOW_SECONDS = float(os.getenv("AUTH_RATE_LIMIT_WINDOW_SECONDS", "60"))
 
 # LangGraph 混合编排预算（ReAct 四轮、计划八任务、两次重规划、合规一次改写、整图 32 步）。
 ORCHESTRATION_REACT_STEPS = int(os.getenv("ORCHESTRATION_REACT_STEPS", "4"))

@@ -148,3 +148,58 @@ def test_delete_user_clears_research_rows_before_user():
     assert "finance.research_runs" in joined
     # 顺序：先结果、再运行、最后用户
     assert joined.index("finance.research_results") < joined.index("finance.research_runs") < joined.index("finance.users")
+
+
+def test_chat_stop_rejects_run_id_not_owned_by_caller(auth_store, monkeypatch):
+    """仅凭 run_id 停止时也必须校验归属，不能停掉他人正在跑的会话。"""
+    import asyncio
+
+    class _System:
+        def lookup_active_run(self, run_id):
+            return ("someone-elses-conv", "CUST000002")
+
+        def request_stop(self, conversation_id="", run_id=""):
+            raise AssertionError("不得对他人运行调用 request_stop")
+
+    monkeypatch.setattr(r, "get_system", lambda: _System())
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(r.chat_stop(
+            _FakeRequest({"Authorization": "Bearer good-token"}),
+            conversation_id="",
+            run_id="run-other",
+        ))
+    assert exc.value.status_code == 404
+
+
+def test_chat_stop_allows_owned_run_id(auth_store, monkeypatch):
+    import asyncio
+
+    stopped: dict[str, str] = {}
+
+    class _DB:
+        def get_conversation(self, conversation_id, customer_id):
+            return {"conversation_id": conversation_id, "customer_id": customer_id}
+
+    class _System:
+        def lookup_active_run(self, run_id):
+            return ("my-conv", "CUST000001")
+
+        def request_stop(self, conversation_id="", run_id=""):
+            stopped["conversation_id"] = conversation_id
+            stopped["run_id"] = run_id
+            return True
+
+    monkeypatch.setattr(
+        "finance_agent.orchestrator.persistence.database.get_database", lambda: _DB(),
+    )
+    monkeypatch.setattr(r, "get_system", lambda: _System())
+
+    result = asyncio.run(r.chat_stop(
+        _FakeRequest({"Authorization": "Bearer good-token"}),
+        conversation_id="",
+        run_id="run-mine",
+    ))
+    assert result["stopped"] is True
+    assert stopped["conversation_id"] == "my-conv"
+    assert stopped["run_id"] == "run-mine"

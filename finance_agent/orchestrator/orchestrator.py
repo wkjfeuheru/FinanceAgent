@@ -331,6 +331,19 @@ class AdvisorSystem:
             self._trace_sequences[conversation_id] = sequence
         logger.debug("[Agent Flow] %s | %02d -> %s", conversation_id, sequence, name)
 
+    def lookup_active_run(self, run_id: str) -> tuple[str, str] | None:
+        """返回 ``(conversation_id, customer_id)``；未知 run 返回 None。"""
+        self._ensure_runtime_state()
+        if not run_id:
+            return None
+        with self._stop_lock:
+            active = self._active_runs.get(run_id)
+        if isinstance(active, tuple) and len(active) >= 2:
+            return str(active[0] or ""), str(active[1] or "")
+        if active:
+            return str(active), ""
+        return None
+
     def request_stop(self, conversation_id: str = "", run_id: str = "") -> bool:
         """标记停止请求；已完成的专家结果保留，未开始的专家被跳过。
 
@@ -871,8 +884,17 @@ class AdvisorSystem:
                 "response": "", "conversation_id": "", "warnings": [],
             }
 
-        # 已完成：恢复原会话（合并指标 → 重渲染 → 过合规），不重跑已完成任务。
         recovered = self._recover_completed_job(task_id, customer_id)
+        response = str(recovered.get("response") or "")
+        if not response:
+            # 兄弟 job 尚未完成时恢复路径返回空答复，对调用方仍是 processing。
+            return {
+                "run_status": "processing",
+                "task_id": task_id,
+                "response": "",
+                "conversation_id": recovered.get("conversation_id", ""),
+                "warnings": recovered.get("warnings", []),
+            }
         return {
             "run_status": "completed",
             "task_id": task_id,

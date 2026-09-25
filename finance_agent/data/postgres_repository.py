@@ -264,29 +264,10 @@ class PostgresRuntimeRepository:
 
     def setup_schema(self) -> None:
         """应用业务基础表与运行审计表 DDL（幂等）。"""
-        from finance_agent.data.postgres_schema import (
-            AGENT_RUNTIME_SCHEMA_SQL,
-            BASE_SCHEMA_SQL,
-            IDENTITY_MIGRATION_SQL,
-            PORTFOLIO_SCHEMA_SQL,
-            PRODUCTS_SCHEMA_SQL,
-            RESEARCH_GOVERNANCE_SCHEMA_SQL,
-            THEME_REGISTRY_SCHEMA_SQL,
-        )
+        from finance_agent.data.postgres_schema import apply_postgres_schema
 
         with self._transaction() as connection:
-            cursor = connection.cursor()
-            try:
-                cursor.execute(BASE_SCHEMA_SQL)
-                # 旧库缺列的补齐必须紧跟建表之后（幂等）。
-                cursor.execute(PRODUCTS_SCHEMA_SQL)
-                cursor.execute(AGENT_RUNTIME_SCHEMA_SQL)
-                cursor.execute(IDENTITY_MIGRATION_SQL)
-                cursor.execute(RESEARCH_GOVERNANCE_SCHEMA_SQL)
-                cursor.execute(THEME_REGISTRY_SCHEMA_SQL)
-                cursor.execute(PORTFOLIO_SCHEMA_SQL)
-            finally:
-                cursor.close()
+            apply_postgres_schema(connection, include_faq=False, include_seed=False)
 
     def ensure_conversation(self, customer_id: str, conversation_id: str) -> None:
         """确保会话基础行存在（幂等）。"""

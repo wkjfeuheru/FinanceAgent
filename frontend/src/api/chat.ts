@@ -25,6 +25,7 @@ import type {
   ThemeLeadReviewRequest,
   ThemeRegistryEntry,
   ThemeRegistryUpsertRequest,
+  RunStatusPayload,
 } from '@/types'
 
 const http = axios.create({
@@ -72,6 +73,25 @@ http.interceptors.request.use((config) => {
   }
   return config
 })
+
+http.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    const status = error?.response?.status
+    const url = String(error?.config?.url || '')
+    if (
+      status === 401
+      && !url.includes('/login')
+      && !url.includes('/register')
+    ) {
+      clearUser()
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('auth:expired'))
+      }
+    }
+    return Promise.reject(error)
+  },
+)
 
 /** 同步对话 */
 export async function chat(req: ChatRequest): Promise<ChatResponse> {
@@ -131,14 +151,27 @@ export async function healthCheck(): Promise<HealthResponse> {
  * SSE 流式对话：使用 fetch + ReadableStream（POST 请求）。
  * 后端通过 event: stage / event: response 推送事件。
  */
-export async function chatStream(req: ChatRequest, callbacks: StreamCallbacks): Promise<void> {
+export async function chatStream(
+  req: ChatRequest,
+  callbacks: StreamCallbacks,
+  options?: { signal?: AbortSignal },
+): Promise<void> {
   let response: Response
   const controller = new AbortController()
   const idleTimeoutMs = 600000
   let timeoutId = 0
+  const abortFromIdle = () => controller.abort()
+  const abortFromCaller = () => controller.abort(options?.signal?.reason)
+  if (options?.signal) {
+    if (options.signal.aborted) {
+      abortFromCaller()
+    } else {
+      options.signal.addEventListener('abort', abortFromCaller, { once: true })
+    }
+  }
   const resetIdleTimeout = () => {
     if (timeoutId) window.clearTimeout(timeoutId)
-    timeoutId = window.setTimeout(() => controller.abort(), idleTimeoutMs)
+    timeoutId = window.setTimeout(abortFromIdle, idleTimeoutMs)
   }
   resetIdleTimeout()
   let terminalEventReceived = false
@@ -173,7 +206,11 @@ export async function chatStream(req: ChatRequest, callbacks: StreamCallbacks): 
   } catch (err: any) {
     window.clearTimeout(timeoutId)
     guardedCallbacks.onError(
-      err?.name === 'AbortError' ? '分析超时，请稍后重试' : (err?.message || '网络连接失败'),
+      err?.name === 'AbortError'
+        ? (options?.signal?.reason === 'user-stop' || controller.signal.reason === 'user-stop'
+          ? '已停止生成'
+          : '分析超时，请稍后重试')
+        : (err?.message || '网络连接失败'),
     )
     return
   }
@@ -181,6 +218,12 @@ export async function chatStream(req: ChatRequest, callbacks: StreamCallbacks): 
   if (!response.ok || !response.body) {
     const text = await response.text().catch(() => '')
     window.clearTimeout(timeoutId)
+    if (response.status === 401) {
+      clearUser()
+      window.dispatchEvent(new CustomEvent('auth:expired'))
+      guardedCallbacks.onError('登录已过期，请重新登录')
+      return
+    }
     guardedCallbacks.onError(`请求失败（${response.status}）：${text || response.statusText}`)
     return
   }
@@ -213,7 +256,11 @@ export async function chatStream(req: ChatRequest, callbacks: StreamCallbacks): 
     }
   } catch (err: any) {
     guardedCallbacks.onError(
-      err?.name === 'AbortError' ? '分析超时，请稍后重试' : (err?.message || '流式读取失败'),
+      err?.name === 'AbortError'
+        ? (options?.signal?.reason === 'user-stop' || controller.signal.reason === 'user-stop'
+          ? '已停止生成'
+          : '分析超时，请稍后重试')
+        : (err?.message || '流式读取失败'),
     )
   } finally {
     window.clearTimeout(timeoutId)
@@ -267,6 +314,17 @@ function dispatchEvent(event: SSEEvent, callbacks: StreamCallbacks): void {
 }
 
 // ── 用户认证 API ──────────────────────────────────────────────
+
+export async function getRunStatus(taskId: string): Promise<RunStatusPayload> {
+  const { data } = await http.get<RunStatusPayload>(`/runs/${encodeURIComponent(taskId)}`)
+  return data
+}
+
+export async function stopChat(conversationId: string, runId = ''): Promise<void> {
+  await http.post('/chat/stop', null, {
+    params: { conversation_id: conversationId, run_id: runId },
+  })
+}
 
 /** 用户注册 */
 export async function register(req: RegisterRequest): Promise<RegisterResponse> {
@@ -352,6 +410,8 @@ export async function deactivateTheme(
 export default {
   chat,
   chatStream,
+  getRunStatus,
+  stopChat,
   getProfile,
   getHistory,
   healthCheck,

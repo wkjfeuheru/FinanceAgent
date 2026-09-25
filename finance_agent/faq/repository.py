@@ -81,14 +81,10 @@ class _PostgresRepository:
         """建表：元数据与异步任务表不依赖 pgvector（`async_jobs` 只在此处需要）。"""
         if self._schema_ready:
             return
-        from finance_agent.data.postgres_schema import HYBRID_ORCHESTRATION_SCHEMA_SQL
+        from finance_agent.data.postgres_schema import apply_postgres_schema
 
         with self._transaction() as connection:
-            cursor = connection.cursor()
-            try:
-                cursor.execute(HYBRID_ORCHESTRATION_SCHEMA_SQL)
-            finally:
-                cursor.close()
+            apply_postgres_schema(connection, include_faq=False, include_seed=False)
         self._schema_ready = True
 
 
@@ -96,37 +92,14 @@ class PostgresFaqRepository(_PostgresRepository):
     """FAQ 版本发布和候选查询的 PostgreSQL 实现。"""
 
     def _ensure_schema(self) -> None:
-        # 先建不依赖 pgvector 的元数据表，再建向量分块表；缺扩展时给出修复提示。
-        super()._ensure_schema()
-        if self._vector_ready:
+        # 与 migrate CLI 同一份清单；缺 pgvector 时 apply_postgres_schema 给出修复提示。
+        if self._schema_ready and self._vector_ready:
             return
-        from finance_agent.data.postgres_schema import (
-            FAQ_BIGRAM_SCHEMA_SQL,
-            FAQ_QA_PAIR_SCHEMA_SQL,
-            FAQ_VECTOR_SCHEMA_SQL,
-        )
+        from finance_agent.data.postgres_schema import apply_postgres_schema
 
         with self._transaction() as connection:
-            cursor = connection.cursor()
-            try:
-                cursor.execute(FAQ_VECTOR_SCHEMA_SQL)
-                # 中文关键词检索需要的二元组函数、生成列与索引（见 sql/010）。
-                cursor.execute(FAQ_BIGRAM_SCHEMA_SQL)
-                # 在二元组函数创建后，为已有数据补齐显式问答字段和加权索引。
-                cursor.execute(FAQ_QA_PAIR_SCHEMA_SQL)
-            except Exception as exc:
-                message = str(exc)
-                if "vector" in message and (
-                    "is not available" in message or "vector.control" in message
-                ):
-                    raise RuntimeError(
-                        "PostgreSQL 缺少 pgvector 扩展，FAQ 索引与检索不可用。"
-                        "请安装 pgvector（例如 postgresql-15-pgvector）并在业务库执行 "
-                        "CREATE EXTENSION vector; 后重试。"
-                    ) from exc
-                raise
-            finally:
-                cursor.close()
+            apply_postgres_schema(connection, include_faq=True, include_seed=False)
+        self._schema_ready = True
         self._vector_ready = True
 
     def publish_index(

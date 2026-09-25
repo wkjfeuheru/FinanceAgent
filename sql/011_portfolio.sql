@@ -55,6 +55,11 @@ CREATE TABLE IF NOT EXISTS finance.orders (
 CREATE INDEX IF NOT EXISTS idx_orders_customer
     ON finance.orders (customer_id, created_at DESC);
 
+-- 委托同样需要重试保护：仅应用层先查再写会在并发下双花。
+CREATE UNIQUE INDEX IF NOT EXISTS uq_orders_idempotency
+    ON finance.orders (customer_id, idempotency_key)
+    WHERE idempotency_key <> '';
+
 CREATE TABLE IF NOT EXISTS finance.positions (
     customer_id varchar(64) NOT NULL
         REFERENCES finance.users(customer_id) ON DELETE CASCADE,

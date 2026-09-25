@@ -452,27 +452,33 @@ class PortfolioService:
         if existing is not None:
             return self._transaction_view(existing), self.get_account(cid), True
 
-        with self.store.transaction() as connection:
-            cursor = connection.cursor()
-            try:
-                account = self.store.lock_account(cursor, cid)
-                if account is None:
-                    raise InvalidAmountError("账户不存在")
-                balance = round_money(self._cash_of(account) + value)
-                self.store.update_cash_balance(cursor, cid, balance)
-                self.store.add_deposit(cursor, cid, value)
-                inserted = self.store.insert_transaction(cursor, {
-                    "txn_id": str(uuid.uuid4()),
-                    "customer_id": cid,
-                    "kind": "deposit",
-                    "amount": value,
-                    "balance_after": balance,
-                    "ref_id": "",
-                    "note": "模拟账户充值",
-                    "idempotency_key": idempotency_key,
-                })
-            finally:
-                cursor.close()
+        try:
+            with self.store.transaction() as connection:
+                cursor = connection.cursor()
+                try:
+                    account = self.store.lock_account(cursor, cid)
+                    if account is None:
+                        raise InvalidAmountError("账户不存在")
+                    balance = round_money(self._cash_of(account) + value)
+                    self.store.update_cash_balance(cursor, cid, balance)
+                    self.store.add_deposit(cursor, cid, value)
+                    inserted = self.store.insert_transaction(cursor, {
+                        "txn_id": str(uuid.uuid4()),
+                        "customer_id": cid,
+                        "kind": "deposit",
+                        "amount": value,
+                        "balance_after": balance,
+                        "ref_id": "",
+                        "note": "模拟账户充值",
+                        "idempotency_key": idempotency_key,
+                    })
+                finally:
+                    cursor.close()
+        except Exception as exc:
+            replayed = self._replay_deposit_conflict(cid, idempotency_key, exc)
+            if replayed is not None:
+                return replayed
+            raise
 
         return self._transaction_view(inserted), self.get_account(cid), False
 
@@ -532,54 +538,60 @@ class PortfolioService:
         if breakdown.shares <= 0:
             raise InvalidAmountError("申购金额过低，不足以确认任何份额")
 
-        with self.store.transaction() as connection:
-            cursor = connection.cursor()
-            try:
-                account = self.store.lock_account(cursor, cid)
-                if account is None:
-                    raise InvalidAmountError("账户不存在")
-                balance = self._cash_of(account)
-                if balance < breakdown.cash_out:
-                    raise InsufficientFundsError(
-                        f"可用资金不足：需 {breakdown.cash_out:,.2f} 元，"
-                        f"当前可用 {balance:,.2f} 元"
-                    )
-                position = self.store.get_position_row(cursor, cid, str(product_code).strip())
-                old_shares = float(position.get("shares") or 0) if position else 0.0
-                old_cost = round_money(float(position.get("cost_amount") or 0)) if position else 0.0
-                new_shares = round_shares(old_shares + breakdown.shares)
-                # 成本含费：成交的实际现金支出计入持仓成本，浮动盈亏因此是保守口径。
-                new_cost = round_money(old_cost + breakdown.cash_out)
-                new_balance = round_money(balance - breakdown.cash_out)
+        try:
+            with self.store.transaction() as connection:
+                cursor = connection.cursor()
+                try:
+                    account = self.store.lock_account(cursor, cid)
+                    if account is None:
+                        raise InvalidAmountError("账户不存在")
+                    balance = self._cash_of(account)
+                    if balance < breakdown.cash_out:
+                        raise InsufficientFundsError(
+                            f"可用资金不足：需 {breakdown.cash_out:,.2f} 元，"
+                            f"当前可用 {balance:,.2f} 元"
+                        )
+                    position = self.store.get_position_row(cursor, cid, str(product_code).strip())
+                    old_shares = float(position.get("shares") or 0) if position else 0.0
+                    old_cost = round_money(float(position.get("cost_amount") or 0)) if position else 0.0
+                    new_shares = round_shares(old_shares + breakdown.shares)
+                    # 成本含费：成交的实际现金支出计入持仓成本，浮动盈亏因此是保守口径。
+                    new_cost = round_money(old_cost + breakdown.cash_out)
+                    new_balance = round_money(balance - breakdown.cash_out)
 
-                self.store.upsert_position(cursor, cid, str(product_code).strip(), new_shares, new_cost)
-                self.store.update_cash_balance(cursor, cid, new_balance)
-                inserted = self.store.insert_order(cursor, {
-                    "order_id": str(uuid.uuid4()),
-                    "customer_id": cid,
-                    "product_code": str(product_code).strip(),
-                    "side": "buy",
-                    "shares": breakdown.shares,
-                    "price": quote.nav,
-                    "gross_amount": breakdown.invested,
-                    "fee": breakdown.fee,
-                    "net_amount": breakdown.cash_out,
-                    "realized_pnl": None,
-                    "fee_limitations": breakdown.limitations,
-                    "idempotency_key": idempotency_key,
-                })
-                self.store.insert_transaction(cursor, {
-                    "txn_id": str(uuid.uuid4()),
-                    "customer_id": cid,
-                    "kind": "buy",
-                    "amount": round_money(-breakdown.cash_out),
-                    "balance_after": new_balance,
-                    "ref_id": str(product_code).strip(),
-                    "note": f"申购 {name}".strip(),
-                    "idempotency_key": "",
-                })
-            finally:
-                cursor.close()
+                    self.store.upsert_position(cursor, cid, str(product_code).strip(), new_shares, new_cost)
+                    self.store.update_cash_balance(cursor, cid, new_balance)
+                    inserted = self.store.insert_order(cursor, {
+                        "order_id": str(uuid.uuid4()),
+                        "customer_id": cid,
+                        "product_code": str(product_code).strip(),
+                        "side": "buy",
+                        "shares": breakdown.shares,
+                        "price": quote.nav,
+                        "gross_amount": breakdown.invested,
+                        "fee": breakdown.fee,
+                        "net_amount": breakdown.cash_out,
+                        "realized_pnl": None,
+                        "fee_limitations": breakdown.limitations,
+                        "idempotency_key": idempotency_key,
+                    })
+                    self.store.insert_transaction(cursor, {
+                        "txn_id": str(uuid.uuid4()),
+                        "customer_id": cid,
+                        "kind": "buy",
+                        "amount": round_money(-breakdown.cash_out),
+                        "balance_after": new_balance,
+                        "ref_id": str(product_code).strip(),
+                        "note": f"申购 {name}".strip(),
+                        "idempotency_key": "",
+                    })
+                finally:
+                    cursor.close()
+        except Exception as exc:
+            replayed = self._replay_order_conflict(cid, idempotency_key, str(product_code).strip(), exc)
+            if replayed is not None:
+                return replayed
+            raise
 
         return self._result(cid, inserted, str(product_code).strip())
 
@@ -611,72 +623,78 @@ class PortfolioService:
 
         _, redemption_rate = product_fee_rates(product)
 
-        with self.store.transaction() as connection:
-            cursor = connection.cursor()
-            try:
-                account = self.store.lock_account(cursor, cid)
-                if account is None:
-                    raise InvalidAmountError("账户不存在")
-                position = self.store.get_position_row(cursor, cid, code)
-                held = float(position.get("shares") or 0) if position else 0.0
-                if held <= 0 or position is None:
-                    raise NoPositionError(f"没有 {name or code} 的持仓")
+        try:
+            with self.store.transaction() as connection:
+                cursor = connection.cursor()
+                try:
+                    account = self.store.lock_account(cursor, cid)
+                    if account is None:
+                        raise InvalidAmountError("账户不存在")
+                    position = self.store.get_position_row(cursor, cid, code)
+                    held = float(position.get("shares") or 0) if position else 0.0
+                    if held <= 0 or position is None:
+                        raise NoPositionError(f"没有 {name or code} 的持仓")
 
-                if all_shares:
-                    wanted = held
-                else:
-                    wanted = round_shares(float(shares or 0))
-                    if wanted <= 0:
-                        raise InvalidAmountError("赎回份额必须大于 0")
-                    if wanted > held:
-                        raise InsufficientSharesError(
-                            f"持仓份额不足：需 {wanted} 份，当前持有 {held} 份"
-                        )
+                    if all_shares:
+                        wanted = held
+                    else:
+                        wanted = round_shares(float(shares or 0))
+                        if wanted <= 0:
+                            raise InvalidAmountError("赎回份额必须大于 0")
+                        if wanted > held:
+                            raise InsufficientSharesError(
+                                f"持仓份额不足：需 {wanted} 份，当前持有 {held} 份"
+                            )
 
-                held_cost = round_money(float(position.get("cost_amount") or 0))
-                # 移动加权：按份额比例结转成本，而不是用平均成本乘份额，
-                # 避免四舍五入在多次部分赎回后留下残余成本。
-                if wanted >= held:
-                    cost_out = held_cost
-                else:
-                    cost_out = round_money(held_cost * (wanted / held))
+                    held_cost = round_money(float(position.get("cost_amount") or 0))
+                    # 移动加权：按份额比例结转成本，而不是用平均成本乘份额，
+                    # 避免四舍五入在多次部分赎回后留下残余成本。
+                    if wanted >= held:
+                        cost_out = held_cost
+                    else:
+                        cost_out = round_money(held_cost * (wanted / held))
 
-                breakdown = redemption(wanted, quote.nav, redemption_rate)
-                realized = round_money(breakdown.cash_in - cost_out)
-                remaining_shares = round_shares(held - wanted)
-                remaining_cost = round_money(held_cost - cost_out)
-                if remaining_shares <= 0:
-                    remaining_shares, remaining_cost = 0.0, 0.0
-                balance = round_money(self._cash_of(account) + breakdown.cash_in)
+                    breakdown = redemption(wanted, quote.nav, redemption_rate)
+                    realized = round_money(breakdown.cash_in - cost_out)
+                    remaining_shares = round_shares(held - wanted)
+                    remaining_cost = round_money(held_cost - cost_out)
+                    if remaining_shares <= 0:
+                        remaining_shares, remaining_cost = 0.0, 0.0
+                    balance = round_money(self._cash_of(account) + breakdown.cash_in)
 
-                self.store.upsert_position(cursor, cid, code, remaining_shares, remaining_cost)
-                self.store.update_cash_balance(cursor, cid, balance)
-                inserted = self.store.insert_order(cursor, {
-                    "order_id": str(uuid.uuid4()),
-                    "customer_id": cid,
-                    "product_code": code,
-                    "side": "sell",
-                    "shares": wanted,
-                    "price": quote.nav,
-                    "gross_amount": breakdown.gross,
-                    "fee": breakdown.fee,
-                    "net_amount": breakdown.cash_in,
-                    "realized_pnl": realized,
-                    "fee_limitations": breakdown.limitations,
-                    "idempotency_key": idempotency_key,
-                })
-                self.store.insert_transaction(cursor, {
-                    "txn_id": str(uuid.uuid4()),
-                    "customer_id": cid,
-                    "kind": "sell",
-                    "amount": breakdown.cash_in,
-                    "balance_after": balance,
-                    "ref_id": code,
-                    "note": f"赎回 {name}".strip(),
-                    "idempotency_key": "",
-                })
-            finally:
-                cursor.close()
+                    self.store.upsert_position(cursor, cid, code, remaining_shares, remaining_cost)
+                    self.store.update_cash_balance(cursor, cid, balance)
+                    inserted = self.store.insert_order(cursor, {
+                        "order_id": str(uuid.uuid4()),
+                        "customer_id": cid,
+                        "product_code": code,
+                        "side": "sell",
+                        "shares": wanted,
+                        "price": quote.nav,
+                        "gross_amount": breakdown.gross,
+                        "fee": breakdown.fee,
+                        "net_amount": breakdown.cash_in,
+                        "realized_pnl": realized,
+                        "fee_limitations": breakdown.limitations,
+                        "idempotency_key": idempotency_key,
+                    })
+                    self.store.insert_transaction(cursor, {
+                        "txn_id": str(uuid.uuid4()),
+                        "customer_id": cid,
+                        "kind": "sell",
+                        "amount": breakdown.cash_in,
+                        "balance_after": balance,
+                        "ref_id": code,
+                        "note": f"赎回 {name}".strip(),
+                        "idempotency_key": "",
+                    })
+                finally:
+                    cursor.close()
+        except Exception as exc:
+            replayed = self._replay_order_conflict(cid, idempotency_key, code, exc)
+            if replayed is not None:
+                return replayed
+            raise
 
         return self._result(cid, inserted, code)
 
@@ -714,6 +732,29 @@ class PortfolioService:
         )
 
     # ── 结果装配 ─────────────────────────────────────────────────
+
+    def _replay_deposit_conflict(
+        self, customer_id: str, idempotency_key: str, exc: BaseException,
+    ) -> tuple[TransactionView, AccountSnapshot, bool] | None:
+        """并发同一幂等键时，把 unique 冲突转为首次流水的重放。"""
+        from finance_agent.data.postgres_stores import is_unique_violation
+
+        if not idempotency_key or not is_unique_violation(exc):
+            return None
+        existing = self.store.find_transaction_by_key(customer_id, idempotency_key)
+        if existing is None:
+            return None
+        return self._transaction_view(existing), self.get_account(customer_id), True
+
+    def _replay_order_conflict(
+        self, customer_id: str, idempotency_key: str, product_code: str, exc: BaseException,
+    ) -> TradeResult | None:
+        """并发同一幂等键时，把 unique 冲突转为首次成交的重放。"""
+        from finance_agent.data.postgres_stores import is_unique_violation
+
+        if not idempotency_key or not is_unique_violation(exc):
+            return None
+        return self._replay(customer_id, idempotency_key, product_code)
 
     def _replay(
         self, customer_id: str, idempotency_key: str, product_code: str,
