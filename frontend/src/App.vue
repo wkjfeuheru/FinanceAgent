@@ -216,12 +216,15 @@ onUnmounted(() => {
       </div>
     </header>
 
-    <!-- 投顾对话页保持挂载（keep-alive），切换页面不丢当前会话与草稿 -->
-    <router-view v-slot="{ Component }">
-      <keep-alive :include="['ChatView']">
-        <component :is="Component" :current-user="currentUser" ref="chatViewRef" />
-      </keep-alive>
-    </router-view>
+    <!-- 必须有一层 flex 占位：否则 RouterView/keep-alive 不参与 flex，
+         商品/持仓页的 min-height:0 会把表格高度算成 0，看起来像没有数据。 -->
+    <div class="app-page">
+      <router-view v-slot="{ Component }">
+        <keep-alive :include="['ChatView']">
+          <component :is="Component" :current-user="currentUser" ref="chatViewRef" />
+        </keep-alive>
+      </router-view>
+    </div>
   </div>
 </template>
 
@@ -233,6 +236,14 @@ onUnmounted(() => {
   min-height: 0;
   overflow: hidden;
   background: var(--color-bg);
+}
+
+.app-page {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 /* 后台页面容器：单栏滚动，内容居中限宽，避免面板在大屏上被拉得过宽。 */

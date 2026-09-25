@@ -15,6 +15,7 @@ import {
 const props = defineProps<{ currentUser: UserInfo }>()
 
 const loading = ref(false)
+const loadError = ref('')
 const account = ref<AccountSnapshot | null>(null)
 const orders = ref<OrderView[]>([])
 const transactions = ref<TransactionView[]>([])
@@ -34,6 +35,7 @@ const KIND_TEXT: Record<string, string> = {
 
 async function load() {
   loading.value = true
+  loadError.value = ''
   try {
     const [accountData, orderData, txnData] = await Promise.all([
       getAccount(), listOrders(50), listTransactions(50),
@@ -42,7 +44,11 @@ async function load() {
     orders.value = orderData.orders
     transactions.value = txnData.transactions
   } catch (error: any) {
-    ElMessage.error(error?.message || '账户数据加载失败')
+    account.value = null
+    orders.value = []
+    transactions.value = []
+    loadError.value = error?.message || '账户数据加载失败'
+    ElMessage.error(loadError.value)
   } finally {
     loading.value = false
   }
@@ -97,6 +103,15 @@ onMounted(load)
         <el-button type="primary" :icon="Wallet" @click="openDeposit">充值</el-button>
       </div>
     </header>
+
+    <el-alert
+      v-if="loadError"
+      type="error"
+      show-icon
+      :closable="false"
+      class="warn-alert"
+      :title="loadError"
+    />
 
     <el-alert
       v-if="hasUnpriced"
@@ -280,7 +295,10 @@ onMounted(load)
 </template>
 
 <style scoped>
-.page { flex: 1; min-height: 0; overflow-y: auto; padding: 24px; }
+.page { flex: 1; min-height: 0; overflow: auto; padding: 24px; }
+.table-card :deep(.el-card__body) { overflow: visible; }
+.table-card :deep(.el-table) { width: 100%; }
+.table-card :deep(.el-table__body-wrapper) { min-height: 48px; }
 .page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
 .eyebrow { margin: 0 0 6px; color: var(--color-text-muted); font: 10px/1 var(--font-mono); letter-spacing: .1em; }
 .page-head h2 { margin: 0 0 6px; font-size: 20px; color: var(--color-text); }

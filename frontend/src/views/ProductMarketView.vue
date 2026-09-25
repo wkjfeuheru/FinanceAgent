@@ -12,6 +12,7 @@ import {
 defineProps<{ currentUser: UserInfo }>()
 
 const loading = ref(false)
+const loadError = ref('')
 const products = ref<ProductView[]>([])
 const keyword = ref('')
 
@@ -32,10 +33,13 @@ const filtered = computed(() => {
 
 async function load() {
   loading.value = true
+  loadError.value = ''
   try {
     products.value = (await listProducts()).products
   } catch (error: any) {
-    ElMessage.error(error?.message || '商品加载失败')
+    products.value = []
+    loadError.value = error?.message || '商品加载失败'
+    ElMessage.error(loadError.value)
   } finally {
     loading.value = false
   }
@@ -112,7 +116,8 @@ onMounted(load)
     </header>
 
     <el-card shadow="never" v-loading="loading" class="table-card">
-      <el-empty v-if="!loading && !filtered.length" :image-size="60" description="暂无商品" />
+      <el-empty v-if="!loading && loadError" :image-size="60" :description="loadError" />
+      <el-empty v-else-if="!loading && !filtered.length" :image-size="60" description="暂无商品" />
       <el-table v-else :data="filtered" stripe style="width: 100%">
         <el-table-column prop="code" label="代码" width="100" />
         <el-table-column prop="name" label="名称" min-width="180" show-overflow-tooltip />
@@ -135,7 +140,7 @@ onMounted(load)
             {{ row.redemption_fee || '未披露' }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="120" align="center" fixed="right">
+        <el-table-column label="操作" width="120" align="center">
           <template #default="{ row }">
             <el-tooltip
               :disabled="row.tradable"
@@ -202,7 +207,10 @@ onMounted(load)
 </template>
 
 <style scoped>
-.page { flex: 1; min-height: 0; overflow-y: auto; padding: 24px; }
+.page { flex: 1; min-height: 0; overflow: auto; padding: 24px; }
+.table-card :deep(.el-card__body) { overflow: visible; }
+.table-card :deep(.el-table) { width: 100%; }
+.table-card :deep(.el-table__body-wrapper) { min-height: 48px; }
 .page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
 .eyebrow { margin: 0 0 6px; color: var(--color-text-muted); font: 10px/1 var(--font-mono); letter-spacing: .1em; }
 .page-head h2 { margin: 0 0 6px; font-size: 20px; color: var(--color-text); }

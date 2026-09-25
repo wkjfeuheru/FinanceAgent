@@ -13,6 +13,7 @@ import {
 defineProps<{ currentUser: UserInfo }>()
 
 const loading = ref(false)
+const loadError = ref('')
 const positions = ref<PositionView[]>([])
 const account = ref<AccountSnapshot | null>(null)
 
@@ -29,12 +30,16 @@ const hasUnpriced = computed(() => account.value?.market_value_complete === fals
 
 async function load() {
   loading.value = true
+  loadError.value = ''
   try {
     const result = await listPositions()
     positions.value = result.positions
     account.value = result.account
   } catch (error: any) {
-    ElMessage.error(error?.message || '持仓加载失败')
+    positions.value = []
+    account.value = null
+    loadError.value = error?.message || '持仓加载失败'
+    ElMessage.error(loadError.value)
   } finally {
     loading.value = false
   }
@@ -172,7 +177,12 @@ onMounted(load)
 
     <el-card shadow="never" v-loading="loading" class="table-card">
       <el-empty
-        v-if="!loading && !positions.length"
+        v-if="!loading && loadError"
+        :image-size="60"
+        :description="loadError"
+      />
+      <el-empty
+        v-else-if="!loading && !positions.length"
         :image-size="60"
         description="暂无持仓，去「商品」页面申购"
       />
@@ -216,7 +226,7 @@ onMounted(load)
         <el-table-column label="占比" width="90" align="right">
           <template #default="{ row }">{{ formatShare(row.weight) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="110" align="center" fixed="right">
+        <el-table-column label="操作" width="110" align="center">
           <template #default="{ row }">
             <el-tooltip
               :disabled="row.pricing_status === 'priced'"
@@ -282,7 +292,10 @@ onMounted(load)
 </template>
 
 <style scoped>
-.page { flex: 1; min-height: 0; overflow-y: auto; padding: 24px; }
+.page { flex: 1; min-height: 0; overflow: auto; padding: 24px; }
+.table-card :deep(.el-card__body) { overflow: visible; }
+.table-card :deep(.el-table) { width: 100%; }
+.table-card :deep(.el-table__body-wrapper) { min-height: 48px; }
 .page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
 .eyebrow { margin: 0 0 6px; color: var(--color-text-muted); font: 10px/1 var(--font-mono); letter-spacing: .1em; }
 .page-head h2 { margin: 0 0 6px; font-size: 20px; color: var(--color-text); }

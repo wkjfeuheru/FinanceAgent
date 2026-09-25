@@ -1,7 +1,7 @@
 /** 模拟交易 API 封装：商品货架、账户、持仓、下单、清仓、记录。 */
 
 import axios from 'axios'
-import { getToken } from '@/api/chat'
+import { clearUser, getToken } from '@/api/chat'
 import type {
   AccountSnapshot,
   DepositRequest,
@@ -33,6 +33,11 @@ http.interceptors.request.use((config) => {
 http.interceptors.response.use(
   (response) => response,
   (error) => {
+    const status = error?.response?.status
+    if (status === 401 && typeof window !== 'undefined') {
+      clearUser()
+      window.dispatchEvent(new CustomEvent('auth:expired'))
+    }
     const detail = error?.response?.data?.detail
     const message = typeof detail === 'string' && detail ? detail : (error?.message || '请求失败')
     return Promise.reject(new Error(message))
