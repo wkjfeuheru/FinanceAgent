@@ -57,6 +57,11 @@ providers = [
 [tool.setuptools.packages.find]
 include = ["finance_agent*"]
 
+# 领域 system prompt 与规则 JSON 是非 .py 资源，必须显式声明随包分发，
+# 否则构建出的 wheel 里会缺失，导致生产环境提示词/规则加载失败。
+[tool.setuptools.package-data]
+finance_agent = ["**/*.md", "**/*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

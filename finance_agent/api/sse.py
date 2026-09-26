@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any, AsyncIterator
 
-from finance_agent.api.schemas import ChatResponse, to_chat_response
-from finance_agent.contracts.models import ResponseEnvelope
+from finance_agent.api.schemas.chat import ChatResponse, to_chat_response
+from finance_agent.shared.contracts import ResponseEnvelope
 
 
 def format_sse_event(data: dict[str, Any], event: str = "message") -> str:

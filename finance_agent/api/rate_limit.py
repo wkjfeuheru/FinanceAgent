@@ -9,7 +9,7 @@ from collections import defaultdict, deque
 from fastapi import HTTPException, Request
 
 from finance_agent.api.errors import client_ip
-from finance_agent.config import AUTH_RATE_LIMIT_ATTEMPTS, AUTH_RATE_LIMIT_WINDOW_SECONDS
+from finance_agent.infrastructure.settings import AUTH_RATE_LIMIT_ATTEMPTS, AUTH_RATE_LIMIT_WINDOW_SECONDS
 
 
 class SlidingWindowLimiter:

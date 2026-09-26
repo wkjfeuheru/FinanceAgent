@@ -24,7 +24,7 @@ def sse_error_message(exc: BaseException) -> str:
 
 def client_ip(request: Request) -> str:
     """取限流用的客户端地址；默认不信任 X-Forwarded-For。"""
-    from finance_agent.config import TRUST_PROXY
+    from finance_agent.infrastructure.settings import TRUST_PROXY
 
     if TRUST_PROXY:
         forwarded = request.headers.get("X-Forwarded-For", "")

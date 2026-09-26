@@ -3,10 +3,11 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { SwitchButton } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import LoginView from '@/components/LoginView.vue'
-import ChatView from '@/views/ChatView.vue'
-import { getCurrentUser, logout, getStoredUser, saveUser, clearUser } from '@/api/chat'
-import type { UserInfo } from '@/types'
+import LoginView from '@/features/auth/components/LoginView.vue'
+import ChatView from '@/features/chat/views/ChatView.vue'
+import { getCurrentUser, logout } from '@/features/auth/api'
+import { getStoredUser, saveUser, clearUser } from '@/app/session'
+import type { UserInfo } from '@/features/auth/types'
 
 const route = useRoute()
 const router = useRouter()
@@ -30,8 +31,6 @@ const navItems = [
 const adminNavItems = [
   { name: 'admin-users', label: '用户与持仓' },
   { name: 'admin-products', label: '商品管理' },
-  { name: 'admin-leads', label: '线索审核' },
-  { name: 'admin-themes', label: '主题注册表' },
 ]
 
 /**

@@ -3,7 +3,7 @@ FROM python:3.12-slim-bookworm
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    FINANCE_SQL_DIR=/app/sql \
+    FINANCE_SQL_DIR=/app/migrations \
     FAQ_EMBEDDING_DEVICE=cpu \
     FAQ_EMBEDDING_MODEL_CACHE_DIR=/app/.cache/models \
     UVICORN_HOST=0.0.0.0 \
@@ -30,7 +30,7 @@ RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 
          pip install --no-cache-dir "akshare>=1.10.0" "baostock>=0.8.8"; \
        fi
 
-COPY sql ./sql
+COPY migrations ./migrations
 COPY tools ./tools
 COPY docs/faq ./docs/faq
 

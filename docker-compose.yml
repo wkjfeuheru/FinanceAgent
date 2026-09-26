@@ -30,7 +30,7 @@ services:
       args:
         INSTALL_PROVIDERS: "1"
     image: finance-agent-api:local
-    command: ["python", "-m", "finance_agent.migrate", "--seed"]
+    command: ["python", "-m", "finance_agent.cli.migrate", "--seed"]
     env_file:
       - .env
     environment: &app-environment
@@ -47,7 +47,7 @@ services:
       CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-}
       FAQ_EMBEDDING_DEVICE: cpu
       FAQ_EMBEDDING_MODEL_CACHE_DIR: /app/.cache/models
-      FINANCE_SQL_DIR: /app/sql
+      FINANCE_SQL_DIR: /app/migrations
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?set DEEPSEEK_API_KEY in .env}
     depends_on:
       postgres:
@@ -103,7 +103,7 @@ services:
       [
         "celery",
         "-A",
-        "finance_agent.celery_app:celery_app",
+        "finance_agent.infrastructure.jobs.celery_app:celery_app",
         "worker",
         "-Q",
         "finance.quant",

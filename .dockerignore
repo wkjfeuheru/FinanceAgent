@@ -21,3 +21,5 @@ evals
 docs/chroma_db
 *.md
 !README.md
+# 领域 system prompt 以 .md 形式随包分发，必须放行（否则生产镜像里专家无提示词）。
+!finance_agent/**/*.md

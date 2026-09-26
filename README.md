@@ -28,11 +28,11 @@
    v
 Supervisor Graph（领域分类与路由）
    |
-   +--> 单领域：Stock Research（基本面 + 技术面）
-   +--> 单领域：Market Insight（大盘/情绪/资金面/政策事件）
-   +--> 单领域：Product Research（产品解读与适配度）
-   +--> 单领域：Account Portfolio（自有账户与持仓，只读）
-   +--> 复合领域：Plan-and-Execute（跨领域拆分与汇总）
+   +--> 业务领域（单领域或多领域并行扇出，同一路径）
+   |      Stock Research（基本面 + 技术面）
+   |      Market Insight（大盘/情绪/资金面/政策事件）
+   |      Product Research（产品解读与适配度）
+   |      Account Portfolio（自有账户与持仓，只读）
    +--> 无业务领域：Conversation（FAQ 检索 + 受约束叙述）
    |
    v
@@ -81,38 +81,29 @@ Supervisor Graph 会按意图选择领域，并非每次请求都执行完整流
 ```text
 FinanceAgent/
 ├── finance_agent/
-│   ├── api/                 # FastAPI 路由、请求模型和 SSE
-│   ├── admin/               # 管理后台服务：商品上下架与用户/持仓总览
-│   ├── contracts/           # 请求、响应和运行审计契约
-│   ├── data/                # 认证、业务存储、PostgreSQL 和数据源
-│   ├── middleware/          # 内容过滤和模型重试
-│   ├── orchestrator/        # 工作流编排（LangGraph Supervisor Graph）、记忆与业务工具
-│   │   ├── graphs/          # 宿主图组装：supervisor_graph / plan_execute_graph / conversation_graph
-│   │   ├── routing/         # 意图分类（intent）与参数补全（params，缺参触发弹窗追问）
-│   │   ├── runtime/         # 有界 ReAct 内核、操作注册表、量化网关、断点恢复与共享 reducer
-│   │   ├── persistence/     # 业务库单例接缝（database）、检查点状态（run_state）与线程键（thread_key）
-│   │   ├── nodes/           # LangGraph 节点函数（make_* 工厂）
-│   │   ├── domains/         # 四个业务领域子图（stock / market / product / account）
-│   │   └── tools/           # LangChain 工具（行情、技术指标、组合分析等）
-│   ├── portfolio/           # 模拟交易：费率、净值来源与账户/持仓服务
-│   ├── research/            # 确定性股票研究引擎
-│   ├── product_research/    # 产品研究与适配度评估
-│   ├── faq/                 # 本地中文 FAQ 检索（RAG）
-│   ├── config.py            # 模型及运行环境配置
-│   ├── migrate.py           # 统一幂等 schema apply（python -m finance_agent.migrate）
-│   └── main.py              # FastAPI 应用入口
-├── frontend/                # Vue 3 前端（对话 / 商品 / 持仓 / 账户）
-├── deploy/                  # Nginx 反代（SSE / SPA）
-├── sql/                     # PostgreSQL 建表脚本（001-013，含 006/013 补列迁移）
-├── tools/                   # 端到端校验、管理员引导与种子数据生成脚本
-├── tests/                   # pytest 测试
-├── docker-compose.yml       # 预发：Postgres/pgvector、Redis、migrate、API、Celery、Nginx
+│   ├── api/                 # FastAPI 应用、路由和请求/响应模型
+│   ├── application/         # Advisor 用例、回合协调、持久化与恢复
+│   ├── cli/                 # 管理员、FAQ、诊断和研究回放命令
+│   ├── domains/             # FAQ、组合、产品与股票研究领域
+│   ├── infrastructure/     # PostgreSQL、Redis、LLM、行情与后台任务
+│   ├── orchestration/       # 专家、路由、工作流、记忆与运行时
+│   ├── safety/              # 输入与输出安全策略
+│   ├── shared/              # 跨层契约、序列化和标识符
+│   ├── bootstrap.py         # 应用依赖装配
+│   └── main.py              # 公开 ASGI 入口
+├── frontend/src/            # Vue 应用、共享 API client 与 feature slices
+├── migrations/              # PostgreSQL 编号迁移（001–014）
+├── evals/                   # 评测场景、运行器与基线
+├── tests/                   # architecture / unit / integration / contract / e2e
+├── scripts/                 # 本地启动与评测封装脚本
+├── docs/                    # 架构、FAQ、参考和运维文档
+├── deploy/                  # Docker/Nginx 部署资产
+├── docker-compose.yml
 ├── Dockerfile
 ├── Dockerfile.web
 ├── pyproject.toml
 ├── requirements.txt
-├── requirements.lock
-└── README.md
+└── requirements.lock
 ```
 
 ## 环境要求
@@ -219,7 +210,7 @@ POSTGRES_POOL_MAX_SIZE=16
 POSTGRES_POOL_TIMEOUT=30
 
 # 管理员 customer_id 白名单，多个值用逗号分隔；与库内 is_admin 取并集。
-# 日常授权请用 tools/bootstrap_admin.py，这里留空即可。
+# 日常授权请用 finance_agent.cli.bootstrap_admin，这里留空即可。
 # ADMIN_CUSTOMER_IDS=CUST000001,CUST000002
 
 # 运行环境：production 时关闭 /docs 与 OpenAPI。
@@ -281,16 +272,19 @@ PRODUCT_ANALYSIS_TEMPERATURE=0.2
 
 # 混合 LangGraph 编排预算（单一执行路径：Supervisor Graph）
 # 这些变量是 RunBudgets 的唯一数值源，经 Pydantic 校验后注入会话 ReAct、
-# 计划任务、重规划、合规改写与图递归上限（上限为全局硬天花板，见 contracts.py）。
+# 单轮扇出的领域数、缺参追问次数、合规改写与图递归上限
+# （上限为全局硬天花板，见 orchestration/budgets.py）。
 ORCHESTRATION_REACT_STEPS=4
-ORCHESTRATION_PLAN_TASKS=8
-ORCHESTRATION_REPLANS=2
+ORCHESTRATION_MAX_DOMAINS=4
+ORCHESTRATION_CLARIFY_ROUNDS=2
 ORCHESTRATION_COMPLIANCE_REWRITES=1
 ORCHESTRATION_GRAPH_STEPS=32
 # 端到端墙钟上限：步数上限只约束"走了多少步"，管不住"某一步卡多久"。
-# 单轮请求整体上限（API 层）与跨领域计划上限（扇出循环）。
+# TURN_DEADLINE 是图内强制的**整轮**执行上限（单领域与多领域共用），
+# TURN_TIMEOUT 是 API/SSE 层的等待上限；两者必须满足 TIMEOUT >= DEADLINE，
+# 否则用户会先看到超时而执行线程仍在跑（构造时校验）。
 ORCHESTRATION_TURN_TIMEOUT=180
-ORCHESTRATION_PLAN_DEADLINE=120
+ORCHESTRATION_TURN_DEADLINE=120
 
 # 数据源守门：akshare/baostock 内部多数请求不设 socket 超时，
 # 由 ProviderManager 在调用边界强制超时，并熔断连续失败的源。
@@ -321,14 +315,14 @@ FAQ_RELATIVE_SCORE_RATIO=0.85
 
 - 匿名模式已关闭，`AUTH_REQUIRED` 不需要配置，也不能通过环境变量重新开启匿名访问。
 - PostgreSQL 是唯一的关系型存储；未配置、驱动缺失或无法连接时，服务会显式失败，不会回退到 SQLite。
-- 首次连接时程序会懒建表（安全网）。**部署以** `python -m finance_agent.migrate` **为准**：默认应用结构脚本（001–006、008、011、013），`CREATE EXTENSION IF NOT EXISTS vector` 后应用 FAQ（009/010/012）；`--seed` 再执行 007（`ON CONFLICT` 幂等）。失败显式退出。**pgvector 只在 FAQ 索引/检索时使用**，不属于 API 启动前置条件；缺少 pgvector 只影响 FAQ，不影响登录、对话与管理接口。
-- **新增列必须配幂等 ALTER。** `sql/001_base_schema.sql` 用的是 `CREATE TABLE IF NOT EXISTS`，对已经建好的库**不会补列**。因此给既有表加列时，不能只改 001 的建表语句，必须在编号更大的脚本里同时加一条 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`（参照 `002`/`005`/`006`/`013`）。漏掉这一步会让旧库缺列——历史上 `products.recommended_holding_period` 就是这样丢的，并连带 `sql/007_product_seed.sql` 无法应用。可用下面的漂移诊断工具把关：
-- 管理员接口（主题注册表、待审核线索、clear-records、商品上下架、用户总览）依赖两条路径，取并集：
-  - 库内角色 `finance.users.is_admin`（正式路径，可用 `tools/bootstrap_admin.py` 授予）；
+- 首次连接时程序会懒建表（安全网）。**部署以** `python -m finance_agent.cli.migrate` **为准**：默认应用结构脚本（`migrations/001`–`004`、`006`、`008`、`011`、`013`、`014`），`CREATE EXTENSION IF NOT EXISTS vector` 后应用 FAQ（`migrations/009`、`010`、`012`）；`--seed` 再执行 `migrations/007_product_seed.sql`（`ON CONFLICT` 幂等）。失败显式退出。**pgvector 只在 FAQ 索引/检索时使用**，不属于 API 启动前置条件；缺少 pgvector 只影响 FAQ，不影响登录、对话与管理接口。
+- **新增列必须配幂等 ALTER。** `migrations/001_base_schema.sql` 用的是 `CREATE TABLE IF NOT EXISTS`，对已经建好的库**不会补列**。因此给既有表加列时，不能只改 001 的建表语句，必须在编号更大的脚本里同时加一条 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`（参照 `006`/`013`）。漏掉这一步会让旧库缺列——历史上 `products.recommended_holding_period` 就是这样丢的，并连带 `migrations/007_product_seed.sql` 无法应用。可用下面的漂移诊断工具把关：
+- 管理员接口（clear-records、商品上下架、用户总览）依赖两条路径，取并集：
+  - 库内角色 `finance.users.is_admin`（正式路径，可用 `finance_agent.cli.bootstrap_admin` 授予）；
   - 环境变量 `ADMIN_CUSTOMER_IDS` 白名单（兼容路径，逗号分隔的 customer_id）。
 
   两条都不满足时所有管理员接口返回 403，前端会隐藏对应面板。角色查询失败时**失败关闭**（按非管理员处理），不会因数据库故障放行。
-- 混合编排只有一条执行路径：Supervisor Graph（分类 → 单领域 Domain ReAct / 复合 Plan-and-Execute → 统一合规出口）。异常显式返回 `run_status="failed"`，不会静默回退到任何旧路径。
+- 混合编排只有一条执行路径：Supervisor Graph（分类 → 会话/澄清 或 领域任务铺开 + `Send` 并行扇出 → 缺参追问 → 汇合 → 统一合规出口）。单领域与多领域走同一条路径，只差扇出数量；异常显式返回 `run_status="failed"`，不会静默回退到任何旧路径。
 - 不要将包含真实密钥的 `.env` 文件提交到版本库。
 
 ### 3.1 FAQ 索引、Celery worker 与异步状态
@@ -343,7 +337,7 @@ psql -d advisor -c 'CREATE EXTENSION IF NOT EXISTS vector;'
 FAQ 原文位于 `docs/faq/*.md`，每个问答以 `## FAQ-001 标题` 的二级标题组织（一个问答一个 chunk）。发布索引版本：
 
 ```bash
-python -m finance_agent.faq index --root docs/faq --model-cache-dir .cache/models
+python -m finance_agent.cli.index_faq --root docs/faq --model-cache-dir .cache/models
 ```
 
 该命令先校验全部文档，再在单事务内写入向量与全文值、切换活跃版本；任一文档校验失败则整批不发布。缺少 pgvector 时命令会给出明确的安装提示，不会影响其它功能。
@@ -351,7 +345,7 @@ python -m finance_agent.faq index --root docs/faq --model-cache-dir .cache/model
 启动 CPU 密集量化计算的独立 worker（使用 `CELERY_REDIS_DB` 的独立 Redis DB 与 `CELERY_QUANT_QUEUE` 队列）：
 
 ```bash
-celery -A finance_agent.celery_app:celery_app worker -Q finance.quant -l info
+celery -A finance_agent.infrastructure.jobs.celery_app:celery_app worker -Q finance.quant -l info
 ```
 
 Celery 任务只计算并写结果，不调用 LangGraph；未在同步预算内完成的量化任务会写入 `AsyncJobRef` 并中断图（`awaiting_quant`），可经鉴权的异步状态端点查询并恢复：
@@ -460,8 +454,8 @@ Linux 入口：`scripts/start-all.sh`（`docker compose up -d --wait`）。
 
 1. 复制 `.env.example` → `.env`，填 `DEEPSEEK_API_KEY`、`POSTGRES_PASSWORD`、意图模型 key；`APP_ENV=production`。
 2. `docker compose up -d --build`
-3. `docker compose exec api python tools/bootstrap_admin.py --username admin`（生产拒绝弱口令，已在 bootstrap 里）
-4. `docker compose exec api python -m finance_agent.faq index --root docs/faq`
+3. `docker compose exec api python -m finance_agent.cli.bootstrap_admin --username admin`（生产拒绝弱口令，已在 bootstrap 里）
+4. `docker compose exec api python -m finance_agent.cli.index_faq --root docs/faq`
 5. 打开 `http://localhost`（nginx:80），验证登录、对话、商品货架、健康检查 200
 6. 确认 Celery 容器在跑，否则股票技术指标会停在 processing
 
@@ -531,11 +525,11 @@ docker compose up -d --build
 
 ```bash
 # 创建（或提升）admin 并重置其密码；默认把其他用户全部降为普通用户
-python tools/bootstrap_admin.py --username admin --password '你的密码'
+python -m finance_agent.cli.bootstrap_admin --username admin --password '你的密码'
 # 也可用环境变量传密码，避免出现在 shell 历史里
-FINANCE_ADMIN_PASSWORD='你的密码' python tools/bootstrap_admin.py --username admin
+FINANCE_ADMIN_PASSWORD='你的密码' python -m finance_agent.cli.bootstrap_admin --username admin
 # 只查看当前角色分布，不写入
-python tools/bootstrap_admin.py --dry-run
+python -m finance_agent.cli.bootstrap_admin --dry-run
 ```
 
 密码不回显、明文不落库（PBKDF2-SHA256 + 随机盐），因此**无法从库或仓库反查**——
@@ -560,8 +554,6 @@ python tools/bootstrap_admin.py --dry-run
 | --- | --- | --- |
 | 用户与持仓 | `/admin/users` | 全部用户的资金、持仓数量与盈亏；点开可看某人的持仓明细 |
 | 商品管理 | `/admin/products` | 发行/编辑商品；下架或重新上架 |
-| 线索审核 | `/admin/leads` | 审核外部数据写入的主题线索 |
-| 主题注册表 | `/admin/themes` | 主题名称/别名与代表股配置 |
 
 `/admin` 重定向到 `/admin/users`。每个子路由都独立标注管理员守卫，不依赖父记录
 `meta` 的隐式合并 —— 守卫漏判会让普通用户直接看到后台，代价太高，不值得省这几行。
@@ -576,12 +568,6 @@ python tools/bootstrap_admin.py --dry-run
   历史成交与持仓也会失去可解释的标的。
 - 下架后该商品从用户货架消失、不再出现在名称候选里，申购被拒（`product_offline`）。
 - **既有持仓仍然可以赎回** —— 只挡买入，否则用户会被困在无法退出的持仓里。
-
-主题注册表是**库内记录与内置主题的并集**：库内登记的记录优先（可覆盖内置主题的别名与
-代表股，也可显式停用），库内没有的内置主题照常保留。两者按 `theme_id` 合并，因此
-在后台登记新主题**不会**停用内置主题 —— 这一点很关键：请求解析器要扫描 `list_themes`
-才能把"推荐人工智能主题股票"识别为主题筛选，若库内一有记录就丢掉内置主题，内置主题会
-被静默停用并退化成候选股比对。
 
 ## API 概览
 
@@ -608,11 +594,6 @@ python tools/bootstrap_admin.py --dry-run
 | `POST` | `/api/admin/products` | 发行/编辑商品 | 是，仅管理员 |
 | `POST` | `/api/admin/products/{code}/offline` | 下架商品（软下架，不可申购） | 是，仅管理员 |
 | `POST` | `/api/admin/products/{code}/publish` | 重新上架商品 | 是，仅管理员 |
-| `GET` | `/api/admin/themes/{theme_id}/leads` | 查看主题待核验线索 | 是，仅管理员 |
-| `POST` | `/api/admin/theme-leads/{lead_id}/review` | 审核主题线索 | 是，仅管理员 |
-| `GET` | `/api/admin/themes` | 查看主题注册表 | 是，仅管理员 |
-| `POST` | `/api/admin/themes` | 新增/更新主题（名称、别名、代表股） | 是，仅管理员 |
-| `DELETE` | `/api/admin/themes/{theme_id}` | 停用主题（软删） | 是，仅管理员 |
 | `DELETE` | `/api/account` | 删除当前账户 | 是 |
 | `GET` | `/api/portfolio/products` | 商品货架（净值、风险等级、费率） | 是 |
 | `GET` | `/api/portfolio/products/{code}` | 单个商品详情 | 是 |
@@ -681,70 +662,59 @@ python -m compileall -q finance_agent
 pytest -q
 ```
 
-主题候选池的日终刷新（仅处理审核有效且证据未过期的成员）：
-
-```bash
-python -m finance_agent.research.refresh --theme-id ai_compute
-```
-
-生产调度可在收盘后每日执行一次。也可通过 `THEME_REFRESH_IDS=ai_compute,robotics`
-配置多个主题；刷新失败会在 JSON 汇总中记录原因，且不会写入占位评分。
-
 产品数据灌库（产品解读专家的唯一事实来源；数据由运维准备，本仓库不接入外部产品数据源）：
 
 ```bash
 # 由结构化数据生成幂等 SQL；校验失败时不产出任何文件
-python tools/generate_product_seed.py \
-  --input tools/data/products.sample.json \
-  --output sql/007_product_seed.sql
-# 再按既有方式应用到数据库（例如 psql -f sql/007_product_seed.sql）
+python -m finance_agent.cli.generate_product_seed \
+  --input finance_agent/cli/data/products.sample.json \
+  --output migrations/007_product_seed.sql
+# 再按既有方式应用到数据库（例如 psql -f migrations/007_product_seed.sql）
 ```
 
 生成器只接受 `products` / `holdings` / `performance` 三类记录，按外键顺序输出
 `INSERT ... ON CONFLICT`（明细表先按产品清空再写入，因此可重复执行）；所有值经类型
-白名单与单引号加倍转义。`tools/data/products.sample.json` 是可直接使用的样例。
+白名单与单引号加倍转义。`finance_agent/cli/data/products.sample.json` 是可直接使用的样例。
 
 模拟交易的端到端自检（需要可用的 PostgreSQL；用一次性用户与商品跑完
 充值 → 申购 → 持仓 → 部分赎回 → 清仓 → 注销级联，结束后自动清理）：
 
 ```bash
-python tools/verify_portfolio_live.py
+python -m finance_agent.cli.verify_portfolio_live
 ```
+
+该命令走**真实** `PostgresPortfolioStore`，是模拟交易持久化层的实机闸门：改动
+`finance_agent/infrastructure/persistence/postgres/` 下任何 store 之后都必须跑一遍。
+**不变式**：`_PostgresBaseStore` 的子类可以覆写 `transaction()`（在其中调用
+`_ensure_schema()`，`PostgresPortfolioStore` 就是如此），但 `_apply_schema()` 必须用原始
+`TransactionRunner` 跑迁移——`_schema_lock` 是不可重入的 `threading.Lock`，迁移若再经过
+`self.transaction()` 就会与 `_ensure_schema()` 形成同线程自死锁。这类死锁一旦发生在
+事件循环上，整个 API（含 `/api/health`）都会失去响应。
 
 管理员账号的创建与角色授予（幂等；详见「管理员账号」一节）。
 本地开发内置 `admin` / `admin123`，如需更换口令：
 
 ```bash
-python tools/bootstrap_admin.py --dry-run                 # 查看当前角色分布
-python tools/bootstrap_admin.py --username admin --password '你的密码'
+python -m finance_agent.cli.bootstrap_admin --dry-run                 # 查看当前角色分布
+python -m finance_agent.cli.bootstrap_admin --username admin --password '你的密码'
 ```
 
-模拟交易的建表脚本为 `sql/011_portfolio.sql`（账户、资金流水、委托与持仓）。
-部署时由 `python -m finance_agent.migrate` 统一应用；进程内 `_ensure_schema` / `setup_schema`
+模拟交易的建表脚本为 `migrations/011_portfolio.sql`（账户、资金流水、委托与持仓）。
+部署时由 `python -m finance_agent.cli.migrate` 统一应用；进程内 `_ensure_schema` / `setup_schema`
 仍作为懒建表安全网，首次访问业务存储时会走同一份 `SCHEMA_APPLY_ORDER`。
 
-管理后台的角色与上下架列为 `sql/013_admin_console.sql`（`users.is_admin`、
+管理后台的角色与上下架列为 `migrations/013_admin_console.sql`（`users.is_admin`、
 `products.is_active`）。同样纳入统一 migrate 与懒建表。
 
-库表漂移诊断（对比 `sql/` 声明的期望结构与线上实际结构，可用于 CI 把关）：
+库表漂移诊断（对比 `migrations/` 声明的期望结构与线上实际结构，可用于 CI 把关）：
 
 ```bash
-python tools/diagnose_schema_drift.py
+python -m finance_agent.cli.diagnose_schema_drift
 ```
 
 它会把建表脚本应用到一个一次性探针库作为权威期望结构，再与线上库逐表逐列比对，
 结束后自动删除探针库；线上库只执行只读查询。发现缺失表/列或类型不一致时退出码为 1，
 `--keep-probe` 可保留探针库以便人工检查。
-
-首次建立或补充主题候选池时，配置 `THEME_DISCOVERY_ENDPOINT`、
-`THEME_DISCOVERY_SOURCE_NAME`、`THEME_DISCOVERY_SOURCE_CLASS` 和可选的
-`THEME_DISCOVERY_API_TOKEN`，再运行：
-
-```bash
-python -m finance_agent.research.theme_discovery --theme-id ai_compute
-```
-
-外部数据只会作为待核验研究线索写入 PostgreSQL；必须在管理员审核通过后才能参与主题筛选。
 
 构建前端：
 
@@ -770,7 +740,7 @@ npm run build
 - BaoStock **不支持北交所**（`bj.` 报错、`sh.`/`sz.` 会静默返回 0 行），本仓库对北交所代码显式报错。已废止的 `43`/`83`/`87` 开头代码同样显式报错而**不做猜测映射**：末三位规则会把 `830799`（诺思兰德，现行为 `920047`）错指到另一家公司。
 - 行情与估值按 `(provider, code, 复权口径, 日期窗口)` 落盘缓存，默认 TTL 3600 秒，位于仓库根目录 `.cache/quotes`（`QUOTE_CACHE_TTL_SECONDS=0` 可关闭）。缓存写入失败只记告警，不影响取数。
 - 行业与披露日来自东财业绩报表 `stock_yjbb_em`（按报告期，自动回退到最近已披露期）：行业为**申万二级**（如"白酒Ⅱ"）并与 A 股清单合并，供候选搜索的行业关键词匹配；披露日按报告期回填到财务指标。二者均为**补全信息**——取数失败时对应字段缺失、限制项如实呈现，不阻断分析。财务指标接口必须显式传 `start_year`，否则默认 `1900` 会返回 0 行并使基本面评分退化为中性分。
-- 规则版本当前为 `research_rules/v1.2`：**v1.2** 起适配度（suitability）在缺值时不再默认 50.0，改为排除该项按实际可算项加权（此前画像完整的请求会被静默注入中性适配度、可能改变结论）；**v1.1** 补上 PE/PB 后基本面评分由 5 项而非 3 项平均而成。口径变化必须换版本号，否则同一 `(theme, stock, rule_version, as_of)` 键上的 upsert 会覆盖旧口径的历史快照。旧版本 `v1`/`v1.1` 仍然保留，审计记录按其中记录的版本号精确重放。
+- 规则版本当前为 `research_rules/v1.2`：**v1.2** 起适配度（suitability）在缺值时不再默认 50.0，改为排除该项按实际可算项加权（此前画像完整的请求会被静默注入中性适配度、可能改变结论）；**v1.1** 补上 PE/PB 后基本面评分由 5 项而不是 3 项平均而成。口径变化必须换版本号，审计记录按其版本号精确重放。旧版本 `v1`/`v1.1` 仍然保留。
 - **使用限制：** 这些第三方行情数据仅供个人研究使用，不得再分发；本地缓存亦仅供本机使用。
 
 ## 安全注意事项
@@ -782,7 +752,7 @@ npm run build
 - **上线前必做：**
   - 设置 `APP_ENV=production`（关闭 `/docs`、`/redoc`、`/openapi.json`，根路径不再枚举接口）。
   - 设置 `CORS_ALLOW_ORIGINS` 为实际上线的前端源，不要沿用 localhost。
-  - 用 `FINANCE_ADMIN_PASSWORD` + `tools/bootstrap_admin.py` 创建管理员，**禁止**使用文档中的 `admin` / `admin123`。
+  - 用 `FINANCE_ADMIN_PASSWORD` + `finance_agent.cli.bootstrap_admin` 创建管理员，**禁止**使用文档中的 `admin` / `admin123`。
   - 登录/注册有进程内频率限制；多副本部署时请在网关再加一层。
   - `/api/health` 在 PostgreSQL 不可用或编排无法初始化时返回 HTTP 503；`/api/health/degradation` 仅管理员可访问。
 
@@ -809,3 +779,20 @@ npm run build
 若 **估值缺失**：确认 `ak.stock_value_em` 或 BaoStock 是否可达，并查看快照的限制项——缺少 PE/PB 现在会以 `fundamental_missing:pe_ttm` 这样的**逐字段**原因码记录，而不是静默降级。注意北交所与已废止代码会被显式拒绝，那属于预期行为。
 
 若 **本地缓存干扰排查**：把 `QUOTE_CACHE_TTL_SECONDS` 设为 `0` 关闭缓存，或删除仓库根目录下的 `.cache/quotes`。
+
+### 商品 / 持仓 / 账户页面没有数据
+
+先分辨是「数据缺失」还是「后端被卡住」：请求 `http://127.0.0.1:8000/api/health`。
+若连一个不存在的路径（例如 `/api/nope`）都超时、而 TCP 仍能连上，说明**事件循环被阻塞**，
+而不是库里没数据。此时停止后端进程并重新启动即可恢复（启动前必须按上文设置
+`DEEPSEEK_API_KEY`，缺失时应用导入即失败，端口被 `--reload` 父进程占着却无人响应，症状与此完全一致）。
+
+根因类别与防线：
+
+- 持仓/账户接口背后是同步 psycopg 调用。模拟交易、管理后台与健康检查的路由因此一律是同步
+  `def`，由 Starlette 放进线程池执行——慢查询只会占住一个 worker，不会冻住 `/api/health`。
+  `tests/architecture/test_api_structure.py::test_blocking_route_handlers_stay_synchronous`
+  会挡住把它改回 `async def` 的改动。
+- 存储层懒建表的自死锁（见「常用开发命令」中 `verify_portfolio_live` 的不变式）曾造成同样的
+  整站无响应；`tests/integration/test_postgres_stores.py` 的看门狗测试守着它。
+- 前端无需改动：接口恢复后刷新浏览器即可看到商品货架、持仓明细与账户面板。

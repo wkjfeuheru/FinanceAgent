@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-# config.py 在导入阶段要求存在 API Key；测试不应访问真实 LLM。
+# Infrastructure settings require an API key at import time; tests use a fake key.
 os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/15")
 
@@ -24,7 +24,7 @@ def isolated_quote_cache(monkeypatch):
     （``WinError 5``，普通 ``mkdir`` 建的同级目录则正常）。仓库内路径可写，
     且 ``.cache/`` 已在 .gitignore 中。
     """
-    from finance_agent import config
+    from finance_agent.infrastructure import settings as config
 
     base = Path(__file__).resolve().parent.parent / ".cache" / "test-quote-cache"
     cache_dir = base / f"case-{uuid.uuid4().hex[:8]}"
@@ -46,3 +46,55 @@ def work_dir():
     path.mkdir(parents=True, exist_ok=True)
     yield path
     shutil.rmtree(path, ignore_errors=True)
+
+
+# ── 领域专家的假 tool-calling 模型 ──────────────────────────────────────
+# 专家是 LangGraph 原生 ``create_agent`` 工具循环，模型必须支持 ``bind_tools``
+# 并能返回 ``tool_calls``。``GenericFakeChatModel`` 只实现了消息流，不实现
+# ``bind_tools``，因此子类补上（返回自身，不真正绑定）。
+_fake_chat_models = pytest.importorskip(
+    "langchain_core.language_models.fake_chat_models",
+    reason="需要 langchain_core 的假 chat 模型",
+)
+
+
+def make_fake_tool_model(messages):
+    """构造一个可绑定工具、按序返回给定消息的假模型。
+
+    ``messages`` 是 ``AIMessage`` 序列：带 ``tool_calls`` 的条目驱动工具循环，
+    不带工具调用的条目作为最终答复。``iter`` 保证每轮消费一条。
+    """
+    from langchain_core.messages import AIMessage  # noqa: F401 - 供调用方构造
+
+    base = _fake_chat_models.GenericFakeChatModel
+
+    class _FakeToolModel(base):  # type: ignore[misc, valid-type]
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+    return _FakeToolModel(messages=iter(messages))
+
+
+def tool_call(name: str, args: dict | None = None, call_id: str = "c1"):
+    """构造一条发起工具调用的 AIMessage。"""
+    from langchain_core.messages import AIMessage
+
+    return AIMessage(
+        content="",
+        tool_calls=[{
+            "name": name, "args": dict(args or {}), "id": call_id, "type": "tool_call",
+        }],
+    )
+
+
+def final_message(text: str):
+    """构造一条最终答复 AIMessage。"""
+    from langchain_core.messages import AIMessage
+
+    return AIMessage(content=text)
+
+
+@pytest.fixture
+def fake_tool_model():
+    """把上面的工厂以 fixture 形式暴露，避免各测试文件重复定义假模型类。"""
+    return make_fake_tool_model

@@ -26,7 +26,7 @@ env/
 # Runtime data
 docs/chroma_db/
 
-# Eval run artifacts (regenerate with `python -m evals.run_all`)
+# Eval run artifacts (regenerate with `python -m evals.runners.run_all`)
 evals/results/
 
 # Node

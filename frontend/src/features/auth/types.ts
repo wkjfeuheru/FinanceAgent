@@ -1,0 +1,69 @@
+/** 用户画像 */
+export interface UserProfile {
+  risk_preference: string
+  budget_amount: number
+  stock_codes: string[]
+  holding_period: string
+  investment_goal: string
+}
+
+/** 用户画像响应（含元信息） */
+export interface ProfileResponse {
+  customer_id: string
+  risk_preference: string
+  budget_amount: number
+  stock_codes: string[]
+  holding_period: string
+  investment_goal: string
+  updated_at: string
+}
+
+// ── 用户认证相关类型 ─────────────────────────────────────────
+
+/** 注册请求 */
+export interface RegisterRequest {
+  username: string
+  password: string
+  display_name?: string
+}
+
+/** 登录请求 */
+export interface LoginRequest {
+  username: string
+  password: string
+}
+
+/** 已登录用户信息（持久化到 localStorage） */
+export interface UserInfo {
+  customer_id: string
+  username: string
+  display_name: string
+  token: string
+  expires_in?: number
+  login_at?: number
+  is_admin?: boolean
+}
+
+/** 登录响应 */
+export interface LoginResponse {
+  customer_id: string
+  username: string
+  display_name: string
+  token: string
+  expires_in: number
+  is_admin?: boolean
+}
+
+/** 注册响应 */
+export interface RegisterResponse {
+  customer_id: string
+  username: string
+  display_name: string
+}
+
+/** 清除记录响应 */
+export interface ClearRecordsResponse {
+  status: string
+  cleared_keys: number
+  message: string
+}
