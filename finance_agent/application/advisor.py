@@ -465,8 +465,12 @@ class AdvisorSystem:
     def _persist(
         self, customer_id: str, conversation_id: str, message: str,
         output: Dict[str, Any], run_id: str,
+        model_facts: List[Dict[str, Any]] | None = None,
     ) -> None:
-        self._persistence().persist(customer_id, conversation_id, message, output, run_id)
+        self._persistence().persist(
+            customer_id, conversation_id, message, output, run_id,
+            model_facts=model_facts,
+        )
 
     def _best_effort(self, category: str, action: Callable[[], Any]) -> None:
         """执行尽力而为的副作用：失败只记录日志与计数，不影响已生成的用户回复。"""

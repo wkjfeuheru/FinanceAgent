@@ -40,15 +40,13 @@ from finance_agent.orchestration.needs_input import (
 
 
 def test_every_business_domain_is_registered():
-    """四个业务领域都必须在字段登记表里出现（含空元组的市场/账户）。"""
+    """三个业务领域都必须在字段登记表里出现（含空元组的账户）。"""
     assert set(EXPERT_FIELDS) == set(BusinessDomain)
 
 
-def test_market_and_account_have_no_askable_fields():
-    """市场洞察与账户问答没有可追问字段：永不因缺参弹窗。"""
-    assert fields_for(BusinessDomain.MARKET_INSIGHT) == ()
+def test_account_has_no_askable_fields():
+    """账户问答没有可追问字段：永不因缺参弹窗。"""
     assert fields_for(BusinessDomain.ACCOUNT_PORTFOLIO) == ()
-    assert known_field_names(BusinessDomain.MARKET_INSIGHT) == ()
     assert known_field_names(BusinessDomain.ACCOUNT_PORTFOLIO) == ()
 
 
@@ -105,7 +103,7 @@ def test_build_form_returns_none_when_nothing_missing():
     """无缺参返回 None（不发空弹窗）。"""
     assert build_form([]) is None
     assert build_form([(BusinessDomain.STOCK_RESEARCH, ())]) is None
-    assert build_form([(BusinessDomain.MARKET_INSIGHT, ())]) is None
+    assert build_form([(BusinessDomain.ACCOUNT_PORTFOLIO, ())]) is None
 
 
 def test_build_question_is_deterministic_template():

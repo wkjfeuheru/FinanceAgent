@@ -265,6 +265,18 @@ class ProviderManager:
         """获取近期财经快讯（政策新闻候选；按时间倒序）。"""
         return self._call("get_policy_news")
 
+    def get_board_list(self, board_type: str = "concept") -> Any:
+        """获取板块列表（概念/行业）。
+
+        目前只有 AKShare 声明该能力，其余源抛 ``UnsupportedProviderCapability``：
+        它们会进 ``last_metadata["unsupported"]`` 而**不计入熔断**（能力缺口不是故障）。
+        """
+        return self._call("get_board_list", board_type)
+
+    def get_board_constituents(self, board_name: str, board_type: str = "concept") -> Any:
+        """获取指定板块的成分股（含个股涨跌幅与成交额）。"""
+        return self._call("get_board_constituents", board_name, board_type)
+
 
 _manager_instance: ProviderManager | None = None
 _manager_lock = threading.Lock()

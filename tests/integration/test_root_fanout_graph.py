@@ -20,6 +20,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 from finance_agent.orchestration.budgets import RunBudgets
+from tests.conftest import make_fake_supervisor_model
 from finance_agent.orchestration.contracts import (
     RUN_CANCELLED_WARNING,
     TURN_DEADLINE_WARNING,
@@ -37,7 +38,7 @@ from finance_agent.orchestration.graphs.supervisor import (
 from finance_agent.orchestration.needs_input import build_form
 
 STOCK = BusinessDomain.STOCK_RESEARCH.value
-MARKET = BusinessDomain.MARKET_INSIGHT.value
+PRODUCT = BusinessDomain.PRODUCT_RESEARCH.value
 
 
 class _Classifier:
@@ -127,6 +128,7 @@ def _graph(*, intents, runner=None, checkpointer=None, budgets=None, should_stop
            semantic_check=None, trust_embeddings=None):
     return build_supervisor_graph(
         SupervisorDependencies(
+            supervisor_model=make_fake_supervisor_model(),
             classifier=_Classifier(*intents, queries=queries),
             domain_runner=runner or _Runner(),
             conversation_runner=conversation_runner
@@ -173,15 +175,15 @@ def test_single_domain_uses_the_same_fanout_path():
 
 def test_multi_domain_fans_out_in_parallel_with_one_task_per_domain():
     runner = _Runner()
-    graph = _graph(intents=[["stock_analysis", "market_insight"]], runner=runner)
+    graph = _graph(intents=[["stock_analysis", "product_analysis"]], runner=runner)
 
     result = graph.invoke(_inputs())
 
     ran = sorted(c.task.domain.value for c in runner.contexts)
-    assert ran == sorted([STOCK, MARKET])
+    assert ran == sorted([STOCK, PRODUCT])
     assert set(result["task_results"]) == {
         task_id_of("run-1", BusinessDomain.STOCK_RESEARCH),
-        task_id_of("run-1", BusinessDomain.MARKET_INSIGHT),
+        task_id_of("run-1", BusinessDomain.PRODUCT_RESEARCH),
     }
     assert run_of(result)["run_status"] == "completed"
 
@@ -190,24 +192,24 @@ def test_scoped_domain_queries_reach_task_descriptions_without_llm_rewriter():
     """每域子请求必须直达任务描述（改写器不可用时走确定性回退）。
 
     回归：状态搬家（routing 移入 ``run``）后 ``scoped_queries`` 曾仍读顶层，
-    导致每个领域都拿到整句原话——一个域拿到"分析600519，另外大盘怎么样"这种
+    导致每个领域都拿到整句原话——一个域拿到"分析600519，另外看看基金"这种
     混了别的领域实体的描述，正是分段下发要避免的情况。
     """
     runner = _Runner()
     graph = _graph(
-        intents=[["stock_analysis", "market_insight"]],
+        intents=[["stock_analysis", "product_analysis"]],
         runner=runner,
         queries={
             "stock_analysis": "分析 600519 的基本面",
-            "market_insight": "今天大盘怎么样",
+            "product_analysis": "分析华夏成长基金",
         },
     )
 
-    graph.invoke({**_inputs(), "user_message": "分析 600519 的基本面，另外今天大盘怎么样"})
+    graph.invoke({**_inputs(), "user_message": "分析 600519 的基本面，另外分析华夏成长基金"})
 
     goals = {c.task.domain: c.task.goal for c in runner.contexts}
     assert goals[BusinessDomain.STOCK_RESEARCH] == "分析 600519 的基本面"
-    assert goals[BusinessDomain.MARKET_INSIGHT] == "今天大盘怎么样"
+    assert goals[BusinessDomain.PRODUCT_RESEARCH] == "分析华夏成长基金"
 
 
 # ── 崩溃恢复：领域任务逐个落检查点 ───────────────────────────────────────
@@ -225,7 +227,7 @@ def test_completed_domain_results_survive_a_crash_of_a_later_domain():
 
     def flaky(context) -> DomainOutcome:
         calls.append(context.task.domain.value)
-        if context.task.domain is BusinessDomain.MARKET_INSIGHT:
+        if context.task.domain is BusinessDomain.PRODUCT_RESEARCH:
             # 用 BaseException 模拟"进程被杀"：领域节点内部的 except Exception
             # 只会把领域标记为 failed，不会中断进程。
             raise SystemExit("simulated process abort")
@@ -237,7 +239,7 @@ def test_completed_domain_results_survive_a_crash_of_a_later_domain():
         )
 
     graph = _graph(
-        intents=[["stock_analysis", "market_insight"]],
+        intents=[["stock_analysis", "product_analysis"]],
         runner=flaky,
         checkpointer=InMemorySaver(),
     )
@@ -435,7 +437,7 @@ def test_progress_stages_are_emitted_per_domain_and_per_phase():
     """图内不再"只有宿主发进度"：路由/拆解/各领域/合规都有 stage 事件。"""
     seen: list[str] = []
     graph = _graph(
-        intents=[["stock_analysis", "market_insight"]],
+        intents=[["stock_analysis", "product_analysis"]],
         progress=lambda stage, message: seen.append(stage),
     )
 
@@ -444,7 +446,7 @@ def test_progress_stages_are_emitted_per_domain_and_per_phase():
     assert seen[0] == "routing"
     assert "scope" in seen
     assert f"domain:{STOCK}" in seen
-    assert f"domain:{MARKET}" in seen
+    assert f"domain:{PRODUCT}" in seen
     assert seen[-1] == "compliance"
 
 

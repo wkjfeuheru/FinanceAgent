@@ -46,12 +46,6 @@ def _stock_assemble() -> Any:
     return stock_assemble
 
 
-def _market_tools() -> list[Any]:
-    from finance_agent.domains.market.expert import market_tools
-
-    return market_tools()
-
-
 def _product_tools() -> list[Any]:
     from finance_agent.domains.products.expert import product_tools
 
@@ -72,12 +66,6 @@ DOMAIN_SPECS: dict[BusinessDomain, DomainSpec] = {
         tools=_stock_tools,
         unavailable="股票数据暂时无法生成，请稍后重试。",
         assemble=_stock_assemble,
-    ),
-    BusinessDomain.MARKET_INSIGHT: DomainSpec(
-        domain=BusinessDomain.MARKET_INSIGHT,
-        prompt_path="domains/market/expert/prompts/system.md",
-        tools=_market_tools,
-        unavailable="市场数据暂时无法生成，请稍后重试。",
     ),
     BusinessDomain.PRODUCT_RESEARCH: DomainSpec(
         domain=BusinessDomain.PRODUCT_RESEARCH,

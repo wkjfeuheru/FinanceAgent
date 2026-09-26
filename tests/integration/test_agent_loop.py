@@ -30,7 +30,7 @@ from finance_agent.orchestration.contracts import (
 from finance_agent.orchestration.experts.base import build_expert_graph, sink_of
 from tests.conftest import final_message, make_fake_tool_model, tool_call
 
-MARKET = BusinessDomain.MARKET_INSIGHT
+PRODUCT = BusinessDomain.PRODUCT_RESEARCH
 
 
 class _CountingIterator:
@@ -53,27 +53,27 @@ class _CountingIterator:
 
 
 def _make_probe_tool(calls: list[str] | None = None):
-    """一个写入 ``market_insight`` 冻结键位的最小市场工具。"""
+    """一个写入 ``product_analysis`` 冻结键位的最小市场工具。"""
     observations = calls if calls is not None else []
 
     @tool
-    def market_probe(query: str, config: RunnableConfig) -> str:
+    def product_probe(query: str, config: RunnableConfig) -> str:
         """采集市场数据。"""
         observations.append(query)
         sink = sink_of(config)
         if sink is not None:
-            sink.record("market_probe", payload={"market_insight": {"query": query}})
+            sink.record("product_probe", payload={"product_analysis": {"query": query}})
         return "{}"
 
-    market_probe._observations = observations  # type: ignore[attr-defined]
-    return market_probe
+    product_probe._observations = observations  # type: ignore[attr-defined]
+    return product_probe
 
 
 def _context(goal: str = "看看大盘") -> DomainTaskContext:
     return DomainTaskContext(
         task=PlanTask(
-            task_id="single:run-1:market_insight",
-            domain=MARKET,
+            task_id="single:run-1:product_analysis",
+            domain=PRODUCT,
             goal=goal,
             instruction=goal,
             expected_output="domain_outcome",
@@ -87,9 +87,9 @@ def _context(goal: str = "看看大盘") -> DomainTaskContext:
 
 def _graph(model, *, tools, max_steps=4):
     return build_expert_graph(
-        MARKET,
+        PRODUCT,
         tools=list(tools),
-        system_prompt="你是市场专家，只输出结构化结论（json）。",
+        system_prompt="你是产品专家，只输出结构化结论（json）。",
         max_steps=max_steps,
         model=model,
     )
@@ -102,7 +102,7 @@ def test_final_ai_text_becomes_summary():
     """工具轮之后的最终文本成为结论 summary；已写入的产物进入 structured_data。"""
     probe = _make_probe_tool()
     model = make_fake_tool_model([
-        tool_call("market_probe", {"query": "大盘概览"}, call_id="a1"),
+        tool_call("product_probe", {"query": "大盘概览"}, call_id="a1"),
         final_message("今日大盘震荡，成交温和。"),
     ])
 
@@ -110,7 +110,7 @@ def test_final_ai_text_becomes_summary():
 
     assert outcome.status == "success"
     assert outcome.summary == "今日大盘震荡，成交温和。"
-    assert outcome.structured_data["market_insight"] == {"query": "大盘概览"}
+    assert outcome.structured_data["product_analysis"] == {"query": "大盘概览"}
 
 
 def test_no_tool_call_returns_text_but_degrades_to_partial():
@@ -134,7 +134,7 @@ def test_step_limit_truncation_degrades_to_partial():
     """模型一直要求调工具，被步数上限截断：partial + react_step_limit。"""
     probe = _make_probe_tool()
     model = make_fake_tool_model([
-        tool_call("market_probe", {"query": "x"}, call_id=f"c{i}") for i in range(10)
+        tool_call("product_probe", {"query": "x"}, call_id=f"c{i}") for i in range(10)
     ])
 
     outcome = _graph(model, tools=[probe], max_steps=2).invoke(
@@ -151,7 +151,7 @@ def test_step_limit_truncation_degrades_to_partial():
 def test_model_call_limit_caps_model_invocations():
     """``run_limit=N`` 至多调用模型 N 次（即便模型还有更多可用响应）。"""
     counter = _CountingIterator([
-        tool_call("market_probe", {"query": "x"}, call_id=f"c{i}") for i in range(10)
+        tool_call("product_probe", {"query": "x"}, call_id=f"c{i}") for i in range(10)
     ])
     model = make_fake_tool_model(counter)
 
@@ -178,7 +178,7 @@ def test_tool_outside_whitelist_is_not_executed():
     outcome = _graph(model, tools=[probe]).invoke({"context": _context()})["domain_outcome"]
 
     assert executed == [], "白名单外工具不得被执行"
-    assert "market_insight" not in outcome.structured_data
+    assert "product_analysis" not in outcome.structured_data
 
 
 def test_whitelisted_tool_is_executed_only_when_requested():
@@ -193,7 +193,7 @@ def test_whitelisted_tool_is_executed_only_when_requested():
 
     executed.clear()
     model = make_fake_tool_model([
-        tool_call("market_probe", {"query": "资金面"}, call_id="z1"),
+        tool_call("product_probe", {"query": "资金面"}, call_id="z1"),
         final_message("已取数。"),
     ])
     _graph(model, tools=[probe]).invoke({"context": _context()})
@@ -219,7 +219,8 @@ def test_request_user_input_yields_needs_input_outcome():
         {"context": _context()}
     )["domain_outcome"]
 
-    # 市场域没有可追问字段（EXPERT_FIELDS 为空），字段被拒 → 不置位 pending_input。
+    # 产品域没有 ``market_overview`` 这种可追问字段（EXPERT_FIELDS 不含它），
+    # 字段被拒 → 不置位 pending_input。
     assert outcome.status != "needs_input"
 
 
@@ -227,7 +228,7 @@ def test_request_user_input_yields_needs_input_outcome():
 
 
 def _digest_probe(record: dict, digest: str):
-    """写入冻结键位的工具（模拟 market/account 等）。"""
+    """写入冻结键位的工具（模拟 product/account 等）。"""
 
     @tool
     def digest_probe(query: str, config: RunnableConfig) -> str:
@@ -243,7 +244,7 @@ def _digest_probe(record: dict, digest: str):
 def test_summary_is_model_analysis_without_digest_appendix():
     """正文 = 模型分析；不再拼接中文 data_digest。"""
     probe = _digest_probe(
-        {"market_insight": {"mode": "market_overview", "status": "success",
+        {"product_analysis": {"mode": "market_overview", "status": "success",
                             "indices": [{"close": 3888.11}]}},
         "【大盘概览】\n- 上证指数：3,888.11（-1.18%）",
     )
@@ -263,7 +264,7 @@ def test_summary_is_model_analysis_without_digest_appendix():
 def test_fallback_when_analysis_missing():
     """模型没给分析（如被步数截断）时，用兜底说明，不回填中文模板。"""
     probe = _digest_probe(
-        {"market_insight": {"mode": "market_overview", "status": "success"}},
+        {"product_analysis": {"mode": "market_overview", "status": "success"}},
         "【大盘概览】\n- 上证指数：3,888.11（-1.18%）",
     )
     model = make_fake_tool_model([
@@ -287,7 +288,7 @@ def test_fallback_when_analysis_missing():
 def test_ungrounded_number_in_analysis_is_flagged():
     """分析中凭空出现的数字进入 limitations 与 analysis_grounding。"""
     probe = _digest_probe(
-        {"market_insight": {"indices": [{"close": 3888.11}]}},
+        {"product_analysis": {"indices": [{"close": 3888.11}]}},
         "",
     )
     model = make_fake_tool_model([
@@ -306,7 +307,7 @@ def test_ungrounded_number_in_analysis_is_flagged():
 def test_grounded_numbers_pass_with_rounding_and_sign():
     """有依据的数字（含四舍五入与正负号差异）不误报。"""
     probe = _digest_probe(
-        {"market_insight": {"indices": [{"close": 3888.114, "pct_chg": -1.182}]}},
+        {"product_analysis": {"indices": [{"close": 3888.114, "pct_chg": -1.182}]}},
         "",
     )
     model = make_fake_tool_model([

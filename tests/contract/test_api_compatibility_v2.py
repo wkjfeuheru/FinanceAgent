@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from finance_agent.shared.contracts import AsyncJobRef
+from tests.conftest import make_fake_supervisor_model
 from finance_agent.orchestration.contracts import BusinessDomain, DomainOutcome
 from finance_agent.orchestration.graphs.supervisor import SupervisorDependencies, build_supervisor_graph, project_supervisor_state
 
@@ -21,7 +22,6 @@ _LEGACY_KEYS = {
     "analysis_results",
     "personalization_status",
     "product_analysis",
-    "market_insight",
     "compliance_result",
     "conversation_id",
     "run_status",
@@ -126,17 +126,17 @@ def test_projection_reports_processing_task_ids():
     assert projected["pending_task_ids"] == ["job-quant-1"]
 
 
-def test_composite_projection_merges_market_and_product():
+def test_composite_projection_merges_stock_and_product():
     """多领域结论各自投影到自己的结构化字段（由根图 Send 扇出产生）。"""
 
     def domain_runner(context) -> DomainOutcome:
-        if context.task.domain is BusinessDomain.MARKET_INSIGHT:
+        if context.task.domain is BusinessDomain.STOCK_RESEARCH:
             return DomainOutcome(
                 task_id=context.task.task_id,
                 domain=context.task.domain,
                 status="success",
-                summary="情绪偏暖。",
-                structured_data={"market_insight": {"sentiment": "warm"}},
+                summary="贵州茅台分析完成。",
+                structured_data={"stock_analysis": {"600519": {"rating": "推荐"}}},
             )
         return DomainOutcome(
             task_id=context.task.task_id,
@@ -148,16 +148,17 @@ def test_composite_projection_merges_market_and_product():
 
     graph = build_supervisor_graph(
         SupervisorDependencies(
+            supervisor_model=make_fake_supervisor_model(),
             classifier=_FakeClassifierWithDomains(),
             domain_runner=domain_runner,
             rewriter=lambda state, domains: {},
         )
     )
 
-    result = graph.invoke({"user_message": "市场情绪和基金产品怎么搭配", "run_id": "run-2"})
+    result = graph.invoke({"user_message": "分析茅台并推荐基金产品", "run_id": "run-2"})
     projected = project_supervisor_state(result)
 
-    assert projected["market_insight"] == {"sentiment": "warm"}
+    assert projected["stock_analysis"] == {"600519": {"rating": "推荐"}}
     assert projected["product_analysis"] == {"recommended": ["基金A"]}
     assert projected["run_status"] == "completed"
 
@@ -166,7 +167,7 @@ class _FakeClassifierWithDomains:
     def classify_intents(self, message: str, context_summary: str = "") -> dict:
         return {
             "intents": [
-                {"intent": "market_insight", "query": message, "confidence": 0.99},
+                {"intent": "stock_analysis", "query": message, "confidence": 0.99},
                 {"intent": "product_analysis", "query": message, "confidence": 0.99},
             ],
             "uncertain_intents": [],

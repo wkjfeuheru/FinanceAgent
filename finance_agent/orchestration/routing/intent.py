@@ -38,13 +38,12 @@ from finance_agent.orchestration.contracts import BusinessDomain
 _INTENT_CONFIDENCE_THRESHOLD = 0.9
 
 _INTENT_CLASSIFIER_PROMPT = f"""你是金融工作流的多意图分类器，只分类当前用户消息，不回答问题。
-近期上下文摘要只能用于解析“它、这些股票”等指代，不得从上下文新增当前消息未表达的意图。
-“最近AI行业有什么值得投资的股票，为我推荐几个”只能输出 stock_recommendation。
+近期上下文摘要包含本对话之前轮次的消息，只能用于三件事：解析指代（"它""那两只""这些股票"）、补全延续性追问、把追问问具体；不得凭空新增用户没表达过的标的或意图。
+"最近AI行业有什么值得投资的股票，为我推荐几个"只能输出 stock_recommendation。
 
-允许的意图（只能填这六个之一）：
-- market_insight：大盘/指数/市场整体问题（概览、情绪、资金面、政策影响）
+允许的意图（只能填这五个之一）：
 - stock_analysis：具体个股的基本面/技术面/行情
-- stock_recommendation：用户想找一组股票候选；主题/行业/板块筛选最终返回固定的不支持提示
+- stock_recommendation：用户想找一组股票候选，或按主题/行业/板块找标的；专家会用板块取数工具给出该板块的公开标的与规则评分（不构成推荐）。
 - product_analysis：具体产品（基金/理财，句中有明确名称或 6 位产品代码）的查询与分析
 - portfolio_analysis：本人持仓的配置诊断与优化参考
 - casual_chat：投资知识/规则/概念问答，以及金融相关闲聊
@@ -67,11 +66,8 @@ portfolio_analysis 只处理**配置诊断与优化参考**：用户想让自己
 product_analysis 只处理**具体产品**（句中出现明确的基金/理财名称或 6 位产品代码）的查询与分析：
 “110011 怎么样”“分析一下华夏成长基金”用 product_analysis。
 
-market_insight 只回答大盘/指数/市场整体问题，绝不输出个股结论或推荐：
-“今天大盘怎么样”“市场情绪/赚钱效应/涨跌家数”“资金面/两融/北向持仓”“政策/消息面对市场的影响”
-都属于 market_insight。
 stock_analysis 只回答具体个股的基本面/技术面/行情；
-主题/行业/板块候选筛选不受支持；仍将此类请求分类为 stock_recommendation，以便服务端返回固定的不支持提示。
+按主题/行业/板块找标的（如“帮我推荐几个AI行业值得关注的股票”）仍归类为 stock_recommendation：由专家用板块取数工具给出该板块的公开标的与规则评分，而不是在这里拒绝。
 
 投资**知识、规则与概念**问答一律归 casual_chat，不得因为句中出现“基金/产品/理财”等词就判为 product_analysis：
 “如何理解基金的风险等级（R1-R5）”“基金的风险等级有哪些”“什么是基金净值/最大回撤”“申购费率是多少”“T+1 是什么”
@@ -82,10 +78,17 @@ stock_analysis 只回答具体个股的基本面/技术面/行情；
 
 每个意图必须包含 intent、query、confidence、reason、evidence。
 evidence 必须逐字摘自 current_message，不能来自上下文。query 只包含该意图对应的当前轮子请求。
-当 confidence 小于 {_INTENT_CONFIDENCE_THRESHOLD} 时，必须返回非空 clarification_question，提出一个简短、具体、可直接回答的问题；不得直接回答或执行业务。
+**延续性追问必须结合上下文补全**：当前消息若在延续/细化上一轮的主题（如"我是稳健型选手，你有什么建议？""换成低风险的""那这两只怎么配"），必须把它补全为该主题所属领域的**一条**可执行子请求，query 写成补全后的完整请求，evidence 仍取当前消息里的原话（例如"我是稳健型选手"）。
+当 confidence 小于 {_INTENT_CONFIDENCE_THRESHOLD} 时，必须返回非空 clarification_question：它必须**点名上一轮的标的或主题**（例如"您是想让我基于上一轮那两只基金给出稳健型配置建议吗？"），不得只回"请补充更具体的信息"这类与上下文无关的话；不得直接回答或执行业务。
 解析用户对上轮反问的回复时，query 应结合上下文形成完整、可执行的子请求；不能重复其他已经完成的意图。
-不得因为近期上下文重复输出已经完成的高置信度意图。
-只输出 JSON 对象：{{"intents": [...], "finance_related": true}}。"""
+不得因为近期上下文重复输出已经完成的高置信度意图；没有新诉求就不要重复执行。
+另外输出 profile_facts，只记录用户在本条消息里**明确自述**的自身事实，形如
+{{"field": "risk_preference|budget_amount|holding_period|investment_goal", "value": "…", "quote": "…"}}：
+quote 必须是 current_message 的逐字片段，value 必须由 quote 直接支持；
+risk_preference 取值只能是 R1 低风险 / R2 中低风险 / R3 中风险 / R4 中高风险 / R5 高风险；
+budget_amount 是以元为单位的数字（"10万"→100000）；holding_period 如"1年""3个月"；investment_goal 是短句。
+猜测、假设、疑问、你自己的推断、助手上一轮说过的话一律不记录；没有就输出空列表。
+只输出 JSON 对象：{{"intents": [...], "finance_related": true, "profile_facts": []}}。"""
 
 
 class IntentClassificationError(RuntimeError):
@@ -155,6 +158,9 @@ class DeepSeekIntentClassifier:
         return {
             "intents": valid,
             "finance_related": bool(payload.get("finance_related", False)),
+            # 画像候选与路由协议**解耦**：一条脏候选不得把整轮路由打回分类失败
+            # （那会让用户连问题都问不出去）。逐条宽松解析，脏条目直接丢弃。
+            "profile_facts": normalize_profile_facts(payload.get("profile_facts")),
         }
 
     def classify(
@@ -233,7 +239,7 @@ class DeepSeekIntentClassifier:
 
 
 _INTENTS = (
-    "market_insight", "stock_analysis", "stock_recommendation",
+    "stock_analysis", "stock_recommendation",
     "product_analysis", "portfolio_analysis", "casual_chat",
 )
 
@@ -243,7 +249,6 @@ _INTENTS = (
 _INTENT_TO_DOMAIN: dict[str, BusinessDomain | None] = {
     "stock_analysis": BusinessDomain.STOCK_RESEARCH,
     "stock_recommendation": BusinessDomain.STOCK_RESEARCH,
-    "market_insight": BusinessDomain.MARKET_INSIGHT,
     "product_analysis": BusinessDomain.PRODUCT_RESEARCH,
     "portfolio_analysis": BusinessDomain.ACCOUNT_PORTFOLIO,
     "casual_chat": None,
@@ -251,15 +256,11 @@ _INTENT_TO_DOMAIN: dict[str, BusinessDomain | None] = {
 _LOGGER = logging.getLogger(__name__)
 
 
-# 模型偶尔会把旧的**领域内模式名**当成 intent 填（例如把 "market_overview" 当意图）。
+# 模型偶尔会把旧的**领域内模式名**当成 intent 填（例如把 "single_analysis" 当意图）。
 # 这些值在领域里语义唯一，直接还原成所属 intent，避免一条可修复的格式错误被
 # 当成分类失败（表现为"暂时无法识别该请求的业务领域"）。子意图体系本身已删除；
 # 本表只为兼容历史输出与旧 checkpoint 而保留。
 _MODE_TO_INTENT: dict[str, str] = {
-    "market_overview": "market_insight",
-    "market_sentiment": "market_insight",
-    "capital_flow": "market_insight",
-    "policy_impact": "market_insight",
     "single_analysis": "stock_analysis",
     "candidate_search": "stock_recommendation",
     "product_lookup": "product_analysis",
@@ -275,6 +276,41 @@ def _resolve_intent(raw_intent: str) -> str | None:
     if raw_intent in _INTENTS:
         return raw_intent
     return _MODE_TO_INTENT.get(raw_intent)
+
+
+#: 模型可自述的画像字段白名单（与 ``AgentMemoryContext.apply_model_facts`` 同口径）。
+_PROFILE_FACT_FIELDS = ("risk_preference", "budget_amount", "holding_period", "investment_goal")
+#: 候选 quote/value 的长度上限：画像只需要"用户原话 + 归一值"，长句是噪音。
+_MAX_QUOTE_CHARS = 40
+_MAX_VALUE_CHARS = 30
+
+
+def normalize_profile_facts(raw: Any) -> list[dict[str, str]]:
+    """宽松归一模型给出的画像候选：只留白名单字段，脏条目逐条丢弃。
+
+    与 intents 的校验策略刻意不同：画像候选是**附加值**，解析失败不能牵连整轮
+    路由。取值是否真的被用户原话支持，由 ``AgentMemoryContext.apply_model_facts``
+    做确定性门控（逐字引用 + 值域/关键词一致），此处只做形状归一。
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        field_name = str(item.get("field", "") or "").strip()
+        value = str(item.get("value", "") or "").strip()
+        quote = str(item.get("quote", "") or "").strip()
+        if field_name not in _PROFILE_FACT_FIELDS or not value or not quote:
+            continue
+        fact = {
+            "field": field_name,
+            "value": value[:_MAX_VALUE_CHARS],
+            "quote": quote[:_MAX_QUOTE_CHARS],
+        }
+        if fact not in out:
+            out.append(fact)
+    return out
 
 
 def normalize_intent_item(
@@ -460,11 +496,16 @@ class IntentClassifier:
             return merged_items
 
         merged = merge_valid(parsed)
+        profile_facts = normalize_profile_facts(
+            parsed.get("profile_facts") if isinstance(parsed, dict) else None
+        )
         if classification_error:
             source = "classification_error"
             merged = {}
             finance_related = False
             uncertain = []
+            # 路由都没认出来，本轮不写任何长期记忆（如实降级，不猜）。
+            profile_facts = []
         elif not merged and not uncertain:
             # 模型返回了 intents，但没有一条通过校验。必须标记分类失败，
             # 否则编排层只看到空字典会误判成功。
@@ -495,6 +536,7 @@ class IntentClassifier:
             "finance_related": finance_related,
             "intent_source": source,
             "classification_error": classification_error_details,
+            "profile_facts": profile_facts,
         }
 
 
@@ -515,4 +557,5 @@ __all__ = [
     "IntentClassificationError",
     "IntentClassifier",
     "normalize_intent_item",
+    "normalize_profile_facts",
 ]

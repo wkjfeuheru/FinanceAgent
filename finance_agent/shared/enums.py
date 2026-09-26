@@ -25,7 +25,6 @@ class TaskKind(str, Enum):
     """任务类型，对应各专业 Agent 的业务边界。"""
 
     STOCK_ANALYSIS = "stock_analysis"
-    MARKET_INSIGHT = "market_insight"
     PRODUCT_ANALYSIS = "product_analysis"
     CASUAL_CHAT = "casual_chat"
     DATA_PREPARATION = "data_preparation"
@@ -40,7 +39,6 @@ class IntentKind(str, Enum):
     （``tests/test_supervisor_graph_routing.py`` 的注册表一致性测试守护这一点）。
     """
 
-    MARKET_INSIGHT = "market_insight"
     STOCK_ANALYSIS = "stock_analysis"
     STOCK_RECOMMENDATION = "stock_recommendation"
     PRODUCT_ANALYSIS = "product_analysis"

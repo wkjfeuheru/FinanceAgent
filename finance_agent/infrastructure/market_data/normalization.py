@@ -451,8 +451,75 @@ def normalize_northbound_holdings(payload: Any) -> dict[str, Any] | None:
     }
 
 
+# ── 板块/概念（东财口径）────────────────────────────────────────────────────
+# 东财板块接口返回中文列，且概念与行业两张表的列名并不完全一致（行业表首列是
+# "排名"，两张都有"板块名称/板块代码/涨跌幅/上涨家数/下跌家数/领涨股票"）。
+# 统一出口后，工具层只读 name/code/change_pct/up_count/down_count/leader。
+
+BOARD_LIST_LABELS: dict[str, tuple[str, ...]] = {
+    "name": ("板块名称", "name"),
+    "code": ("板块代码", "code"),
+    "change_pct": ("涨跌幅", "change_pct"),
+    "up_count": ("上涨家数", "up_count"),
+    "down_count": ("下跌家数", "down_count"),
+    "leader": ("领涨股票", "leader"),
+}
+
+# 成分表的列名比列表表更"标准"（代码/名称/最新价/涨跌幅/成交额/换手率…）。
+BOARD_CONSTITUENT_LABELS: dict[str, tuple[str, ...]] = {
+    "code": ("代码", "code"),
+    "name": ("名称", "name"),
+    "price": ("最新价", "price"),
+    "change_pct": ("涨跌幅", "change_pct"),
+    "turnover_amount": ("成交额", "turnover_amount", "amount"),
+}
+
+
+def _normalize_board_rows(
+    payload: Any,
+    labels: dict[str, tuple[str, ...]],
+    *,
+    require: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    """按标签表归一板块记录；缺必填字段的记录整条丢弃（不产出半条记录）。
+
+    数值字段统一走 ``_as_number``：上游用 ``-``/``NaN`` 表示停牌或未披露，
+    这里一律落成 ``None``，而不是 0——0 会被误读成"平盘/零成交"。
+    """
+    numeric = {"change_pct", "up_count", "down_count", "price", "turnover_amount"}
+    out: list[dict[str, Any]] = []
+    for row in _rows_of(payload):
+        if not isinstance(row, dict):
+            continue
+        record: dict[str, Any] = {}
+        for target, aliases in labels.items():
+            source = next((name for name in aliases if not _is_missing(row.get(name))), None)
+            if source is None:
+                continue
+            value = row[source]
+            record[target] = _as_number(value) if target in numeric else str(value).strip()
+        if any(_is_missing(record.get(field)) for field in require):
+            continue
+        out.append(record)
+    return out
+
+
+def normalize_board_list(payload: Any) -> list[dict[str, Any]]:
+    """统一板块列表记录（name/code/change_pct/up_count/down_count/leader）。"""
+    return _normalize_board_rows(payload, BOARD_LIST_LABELS, require=("name",))
+
+
+def normalize_board_constituents(payload: Any) -> list[dict[str, Any]]:
+    """统一板块成分记录（code/name/price/change_pct/turnover_amount）。"""
+    return _normalize_board_rows(
+        payload, BOARD_CONSTITUENT_LABELS, require=("code", "name"),
+    )
+
+
 __all__ = [
     "BASIC_ALIASES",
+    "BOARD_CONSTITUENT_LABELS",
+    "BOARD_LIST_LABELS",
     "BREADTH_LABELS",
     "DAILY_ALIASES",
     "FINANCIAL_ALIASES",
@@ -462,6 +529,8 @@ __all__ = [
     "TRADE_CAL_ALIASES",
     "VALUATION_ALIASES",
     "normalize_basic_records",
+    "normalize_board_constituents",
+    "normalize_board_list",
     "normalize_breadth_record",
     "normalize_daily_records",
     "normalize_financial_records",

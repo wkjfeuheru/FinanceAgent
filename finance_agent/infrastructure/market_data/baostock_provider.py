@@ -238,3 +238,11 @@ class BaostockDataSource:
     def get_policy_news(self) -> Any:
         """BaoStock 不提供财经快讯/政策新闻。"""
         raise UnsupportedProviderCapability("BaoStock 不提供财经快讯接口")
+
+    def get_board_list(self, board_type: str = "concept") -> Any:
+        """BaoStock 不提供板块/概念列表。"""
+        raise UnsupportedProviderCapability("BaoStock 不提供板块列表接口")
+
+    def get_board_constituents(self, board_name: str, board_type: str = "concept") -> Any:
+        """BaoStock 不提供板块成分。"""
+        raise UnsupportedProviderCapability("BaoStock 不提供板块成分接口")

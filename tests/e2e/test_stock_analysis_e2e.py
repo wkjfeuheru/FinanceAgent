@@ -16,6 +16,7 @@ import os
 import pytest
 
 from finance_agent.orchestration.contracts import BusinessDomain, DomainOutcome
+from tests.conftest import make_fake_supervisor_model
 from finance_agent.orchestration.graphs.supervisor import (
     SupervisorDependencies,
     build_supervisor_graph,
@@ -58,6 +59,7 @@ def _echo_runner(context):
 def _run(intents, message: str) -> dict:
     graph = build_supervisor_graph(
         SupervisorDependencies(
+            supervisor_model=make_fake_supervisor_model(),
             classifier=_FakeClassifier(intents), domain_runner=_echo_runner,
         )
     )
@@ -66,7 +68,6 @@ def _run(intents, message: str) -> dict:
 
 @pytest.mark.parametrize("intent,domain", [
     ("stock_analysis", "stock_research"),
-    ("market_insight", "market_insight"),
     ("product_analysis", "product_research"),
     ("portfolio_analysis", "account_portfolio"),
 ])
@@ -87,10 +88,10 @@ def test_cross_domain_message_routes_to_both_domains():
     （旧断言的 ``plan_execute`` 执行模式与计划层一并删除：单/多领域现在共用
     ``domain_workflow`` 一条路径，区别只是 ``Send`` 扇出数量。）
     """
-    result = _run(["stock_analysis", "market_insight"], "分析茅台并看大盘")
+    result = _run(["stock_analysis", "product_analysis"], "分析茅台并比较基金产品")
 
     routing = routing_of(result)
-    assert set(routing["domains"]) == {"stock_research", "market_insight"}
+    assert set(routing["domains"]) == {"stock_research", "product_research"}
     assert routing["execution_mode"] == "domain_workflow"
     assert run_of(result)["run_status"] == "completed"
     assert len(result["task_results"]) == 2
@@ -98,11 +99,11 @@ def test_cross_domain_message_routes_to_both_domains():
 
 def test_projection_carries_legacy_response_shape():
     """投影保留旧响应键（task_plan / response / run_status）。"""
-    result = _run(["market_insight"], "今天大盘怎么样")
+    result = _run(["stock_analysis"], "分析600519")
 
     projected = project_supervisor_state(result, conversation_id="e2e-conversation")
 
-    assert projected["task_plan"] == ["market_insight"]
+    assert projected["task_plan"] == ["stock_research"]
     assert projected["response"]
     assert projected["run_status"] == "completed"
     assert projected["conversation_id"] == "e2e-conversation"

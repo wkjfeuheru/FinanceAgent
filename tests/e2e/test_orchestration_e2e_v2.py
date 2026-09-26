@@ -10,6 +10,7 @@ from __future__ import annotations
 import threading
 
 from finance_agent.orchestration.contracts import BusinessDomain, DomainOutcome
+from tests.conftest import make_fake_supervisor_model
 from finance_agent.application.advisor import AdvisorSystem
 from finance_agent.orchestration.graphs.supervisor import SupervisorDependencies, build_supervisor_graph
 
@@ -78,6 +79,7 @@ def _v2_system(monkeypatch, intents):
     system._trace_agent = lambda *a, **k: None
     system.supervisor = build_supervisor_graph(
         SupervisorDependencies(
+            supervisor_model=make_fake_supervisor_model(),
             classifier=_FakeClassifier(intents),
             conversation_runner=lambda state: {"final_response": "你好。", "status": "success"},
             domain_runner=_domain_runner,
@@ -124,6 +126,7 @@ def test_violating_output_is_rewritten_or_blocked_not_shown_raw(monkeypatch):
 
     system.supervisor = build_supervisor_graph(
         SupervisorDependencies(
+            supervisor_model=make_fake_supervisor_model(),
             classifier=_FakeClassifier(["stock_analysis"]),
             domain_runner=violating_runner,
         )

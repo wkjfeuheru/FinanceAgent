@@ -115,6 +115,11 @@ class RoutingDecision(BaseModel):
     domain_queries: dict[str, str] = Field(default_factory=dict)
     # 未执行部分的提示（如低置信度意图需澄清），用于向用户明示而非静默丢弃。
     warnings: list[str] = Field(default_factory=list)
+    # 本轮用户**自述**事实的候选（分类器同一次调用产出：``{field, value, quote}``）。
+    # 编排层只负责透传，落库前的确定性门控在
+    # ``AgentMemoryContext.apply_model_facts``；它随 ``run.routing`` 进 checkpoint，
+    # 但**不进** /api/chat 的响应契约。
+    profile_facts: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ComplianceDecision(BaseModel):

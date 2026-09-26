@@ -57,6 +57,9 @@ def test_stock_expert_tool_whitelist_composition():
         "get_valuation_indicators",
         "get_income_statement",
         "search_candidates",
+        # 主题/板块筛选：定位板块 + 按确定性评分排序给出候选清单。
+        "list_boards",
+        "screen_board_candidates",
         "compute_technical",
         "evaluate_research",
     ]
@@ -64,22 +67,21 @@ def test_stock_expert_tool_whitelist_composition():
 
 
 def test_stock_expert_tool_whitelist_is_isolated_from_other_domains():
-    """股票专家不得携带产品/市场/账户工具，避免跨域误取数。"""
+    """股票专家不得携带产品/账户工具，避免跨域误取数。"""
     names = {tool.name for tool in stock_tools()}
     foreign = {
         "query_product", "list_products",
-        "get_market_overview", "get_market_sentiment", "get_capital_flow",
-        "get_policy_impact", "get_positions", "review_allocation",
+        "get_positions", "review_allocation",
     }
     assert names.isdisjoint(foreign)
 
 
 def test_stock_expert_refuses_foreign_task():
-    """股票专家拿到市场领域任务必须安全失败，且不调用任何工具/模型。"""
+    """股票专家拿到产品领域任务必须安全失败，且不调用任何工具/模型。"""
     # 空消息序列：一旦模型被调用就会 StopIteration，从而暴露"越权执行"。
     graph = build_expert(BusinessDomain.STOCK_RESEARCH, model=make_fake_tool_model([]))
     outcome = graph.invoke(
-        {"context": _context(domain=BusinessDomain.MARKET_INSIGHT, goal="今天大盘怎么样")}
+        {"context": _context(domain=BusinessDomain.PRODUCT_RESEARCH, goal="分析华夏成长基金")}
     )["domain_outcome"]
 
     assert outcome.status == "failed"
@@ -158,6 +160,138 @@ def test_resolve_stock_names_lists_ambiguous_tokens_without_guessing(monkeypatch
     assert result["codes"] == [], "歧义时不得静默选定代码"
     assert result["ambiguous_tokens"] == ["招商"]
     assert {item["code"] for item in result["candidates"]} == {"600036", "600999"}
+
+
+# ── 主题/板块筛选链路：定位板块 → 评分清单 → 结构化产物 ─────────────────
+
+class _BoardManager:
+    """板块取数替身：概念板块表 + 成分表（不联网）。"""
+
+    def get_board_list(self, board_type: str = "concept"):
+        assert board_type == "concept"
+        return [
+            {"name": "人工智能", "code": "BK0800", "change_pct": 2.3, "up_count": 8, "down_count": 2},
+            {"name": "半导体", "code": "BK1036", "change_pct": -1.1, "up_count": 3, "down_count": 9},
+        ]
+
+    def get_board_constituents(self, board_name: str, board_type: str = "concept"):
+        assert board_name == "人工智能"
+        return [
+            {"code": "300308", "name": "中际旭创", "price": 123.4, "change_pct": 5.6, "turnover_amount": 2.0e9},
+            {"code": "002230", "name": "科大讯飞", "price": 55.1, "change_pct": 1.1, "turnover_amount": 1.5e9},
+            {"code": "688111", "name": "金山办公", "price": 300.0, "change_pct": 0.5, "turnover_amount": 1.2e9},
+            {"code": "600519", "name": "贵州茅台", "price": 1700.0, "change_pct": 0.2, "turnover_amount": 0.9e9},
+        ]
+
+
+def _analysis_result(code: str, total: float):
+    from finance_agent.domains.research.contracts import (
+        Action,
+        AnalysisKind,
+        AnalysisRequest,
+        AnalysisResult,
+    )
+
+    return AnalysisResult(
+        request=AnalysisRequest(kind=AnalysisKind.SINGLE_STOCK, stock_codes=[code]),
+        action=Action.WATCH,
+        data_quality="complete",
+        rule_version="research_rules/v1.2",
+        scores={"fundamental": 1.0, "technical": 1.0, "risk": 1.0, "suitability": 1.0, "total": total},
+        evidence_ids=[f"{code}-fact"],
+        narrative=f"{code} 的确定性结论。",
+    )
+
+
+def test_board_screening_chain_gives_a_scored_list(monkeypatch):
+    """模型先后调用 ``list_boards`` / ``screen_board_candidates``：专家产出评分清单。"""
+    from finance_agent.domains.research.expert import screening
+
+    scores = {"300308": 7.0, "002230": 9.0, "688111": 8.0, "600519": 6.0}
+    monkeypatch.setattr(screening, "get_provider_manager", lambda: _BoardManager())
+    monkeypatch.setattr(
+        screening, "evaluate",
+        lambda request, *, user_profile, gateway: (
+            _analysis_result(request.stock_codes[0], scores[request.stock_codes[0]]), [],
+        ),
+    )
+    model = make_fake_tool_model([
+        tool_call("list_boards", {"keyword": "人工智能"}, call_id="c1"),
+        tool_call(
+            "screen_board_candidates",
+            {"board_name": "人工智能", "board_type": "concept",
+             "max_evaluations": 4, "max_results": 3},
+            call_id="c2",
+        ),
+        final_message("人工智能板块按确定性评分排序的候选如下（不构成投资建议或推荐）：……"),
+    ])
+    graph = build_expert(BusinessDomain.STOCK_RESEARCH, model=model)
+
+    outcome = graph.invoke(
+        {"context": _context(goal="帮我推荐几个AI行业值得关注的股票")}
+    )["domain_outcome"]
+
+    board = outcome.structured_data["board_candidates"]
+    assert board["board"] == "人工智能"
+    assert board["status"] == "complete"
+    assert [item["code"] for item in board["selected"]] == ["002230", "688111", "300308"]
+    assert board["disclaimer"] == screening.SCREEN_DISCLAIMER
+    # 清单同时落进公开结构化契约：前端卡片与确定性内核守卫都靠它。
+    assert len(outcome.structured_data["analysis_results"]) == 4
+    assert set(outcome.structured_data["stock_analysis"]) == set(scores)
+    assert outcome.status == "success"
+
+
+def test_board_screening_no_match_gives_guidance_instead_of_a_list(monkeypatch):
+    """板块匹配不到时：工具给引导文案，专家不得编造候选。"""
+    from finance_agent.domains.research.expert import screening
+
+    class _EmptyManager:
+        def get_board_list(self, board_type: str = "concept"):
+            return [{"name": "半导体", "code": "BK1036", "change_pct": -1.1}]
+
+        def get_board_constituents(self, board_name: str, board_type: str = "concept"):
+            raise AssertionError("未匹配到板块时不应查询成分")
+
+    monkeypatch.setattr(screening, "get_provider_manager", lambda: _EmptyManager())
+    model = make_fake_tool_model([
+        tool_call("list_boards", {"keyword": "量子计算"}, call_id="c1"),
+        final_message("没有匹配到该板块，请给出更具体的板块名称，或直接提供股票名称/代码。"),
+    ])
+    graph = build_expert(BusinessDomain.STOCK_RESEARCH, model=model)
+
+    outcome = graph.invoke({"context": _context(goal="推荐几个量子计算股票")})["domain_outcome"]
+
+    assert "board_candidates" not in outcome.structured_data
+    assert "未匹配" in outcome.summary or "板块" in outcome.summary
+
+
+def test_board_screening_source_outage_is_reported_as_data_unavailable(monkeypatch):
+    """板块数据源取数失败：不得说成"未匹配到板块"，也不得产出候选。"""
+    from finance_agent.domains.research.expert import screening
+
+    class _DownManager:
+        def get_board_list(self, board_type: str = "concept"):
+            raise RuntimeError(f"所有可用数据源均无法执行 get_board_list: {board_type}")
+
+        def get_board_constituents(self, board_name: str, board_type: str = "concept"):
+            raise AssertionError("数据源不可用时不应查询成分")
+
+    monkeypatch.setattr(screening, "get_provider_manager", lambda: _DownManager())
+    model = make_fake_tool_model([
+        tool_call("list_boards", {"keyword": "AI"}, call_id="c1"),
+        final_message(
+            "板块数据源暂不可用（东财板块接口取数失败），这不是关键词问题："
+            "可稍后重试，或直接提供股票名称/代码做个股分析。"
+        ),
+    ])
+    graph = build_expert(BusinessDomain.STOCK_RESEARCH, model=model)
+
+    outcome = graph.invoke({"context": _context(goal="帮我推荐几个AI行业值得关注的股票")})["domain_outcome"]
+
+    assert "board_candidates" not in outcome.structured_data
+    assert "数据源暂不可用" in outcome.summary
+    assert "未匹配" not in outcome.summary
 
 
 # ── 技术指标：历史不足的诚实降级 ─────────────────────────────────────

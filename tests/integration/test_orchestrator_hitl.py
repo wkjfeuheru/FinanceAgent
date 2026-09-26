@@ -22,6 +22,7 @@ from __future__ import annotations
 from langgraph.checkpoint.memory import InMemorySaver
 
 from finance_agent.orchestration.contracts import DomainOutcome
+from tests.conftest import make_fake_supervisor_model
 from finance_agent.orchestration.memory import UserProfileCard
 from finance_agent.orchestration.needs_input import build_form
 from finance_agent.application.advisor import AdvisorSystem
@@ -93,6 +94,7 @@ class _FakeMemory:
 def _supervisor(*, runner=None, classifier=None, conversation_runner=None):
     return build_supervisor_graph(
         SupervisorDependencies(
+            supervisor_model=make_fake_supervisor_model(),
             classifier=classifier or _FakeClassifier(),
             domain_runner=runner or _NeedsInputRunner(),
             conversation_runner=conversation_runner,

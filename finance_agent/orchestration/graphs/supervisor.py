@@ -2,29 +2,30 @@
 
 本模块是该工作流的**唯一宿主**：状态定义、节点工厂、边装配与响应投影同源。
 
-拓扑（``plan`` 节点内嵌子图与 ``single_domain`` 分支均已删除）：
+拓扑：
 
 ```text
 START → classify ─┬─ conversation ─┐
                   ├─ clarify ──────┤
-                  └─ scope_tasks ──┴─→ [Send(domain_worker × N)] → converge
+                  └─ supervisor ───┴─→ [Send(domain_worker × N)] → converge
                                                                    ├─ ask → [Send(domain_worker × M)] → converge ⟲
                                                                    ├─ synthesize → compliance
                                                                    └─ compliance → END
 ```
 
+``supervisor`` 是 **LLM 决策节点**（见 ``llm_supervisor.make_supervisor_node``）：由
+``create_agent`` 通过 ``transfer_to_<domain>`` handoff 工具选定业务领域，再由节点统一
+构造根图 ``Send`` 并行扇出。它取代了旧的确定性 ``scope_tasks`` 节点——后者按分类器
+的意图推导直接铺开任务，不做领域取舍。
+
 设计要点：
 
-- **单领域与多领域是同一条路径**：``scope_tasks`` 为每个业务领域构造一条自包含任务
-  描述，再由 ``Send`` 并行扇出。单领域只是扇出数为 1，因此截止时间、停止语义、
-  崩溃恢复三者对两种场景完全一致。
+- **单领域与多领域是同一条路径**：``supervisor`` 为每个被选中的业务领域构造一条
+  自包含任务描述，再由 ``Send`` 并行扇出。单领域只是扇出数为 1，因此截止时间、
+  停止语义、崩溃恢复三者对两种场景完全一致。
 - **扇出即检查点**：``Send`` 的每个领域任务都是根图的独立 superstep，随根
-  checkpointer 持久化。进程在第二个领域处崩溃时，resume 只重跑未完成的领域
-  （旧做法是在节点函数里 ``invoke`` 一个未挂 checkpointer 的子图，任何异常都要
-  整轮重跑）。
+  checkpointer 持久化。进程在第二个领域处崩溃时，resume 只重跑未完成的领域。
 - **每轮派生状态收在单个 ``run`` 键下**，由 ``classify`` 用 ``Overwrite`` 整键重置。
-  跨轮残留从"新增键必须记得登记"变成结构上不可能（历史上 ``trusted_content`` 与
-  ``param_blocked`` 都曾静默泄漏到下一轮）。
 - **告警分两级**：``warnings`` 只披露（提示类），``degradations`` 会把
   ``run_status`` 从 completed 翻成 partial/failed/cancelled。
 - Supervisor 不承载任何工具实现；取数与计算由各领域 ReAct 专家子图完成。
@@ -86,6 +87,8 @@ _DOMAIN_ORDER = DOMAIN_ORDER
 
 CLASSIFICATION_FAILED_RESPONSE = "暂时无法理解您的请求，请转接人工或尝试换一种说法。"
 CLARIFICATION_FALLBACK = "请补充更具体的信息，例如要分析的标的、市场范围或产品类型。"
+#: 追问文案长度上限：它直接进入用户可见正文，过长会挤掉真正要问的那一句。
+MAX_CLARIFICATION_CHARS = 200
 CANCELLED_RESPONSE = "已停止本次生成。"
 #: 用户在缺参追问弹窗上选择"取消"时的收尾文案（与停止生成区分）。
 PARAM_CANCELLED_RESPONSE = "已取消本次请求。您可以随时重新提问。"
@@ -178,15 +181,26 @@ def classify_domains(
             domain_queries[domain.value] = query
     domains.sort(key=_DOMAIN_ORDER.index)
     uncertain = classified.get("uncertain_intents", []) or []
+    # 本轮用户自述事实的候选（分类器同一次调用产出）。编排层只做透传，
+    # 落库前的确定性门控在 ``AgentMemoryContext.apply_model_facts``。
+    profile_facts = [
+        dict(item) for item in (classified.get("profile_facts") or []) if isinstance(item, dict)
+    ]
 
     if not domains:
         if uncertain:
+            # 低置信度时模型已知道自己缺什么（并已被要求点名上一轮的标的/主题）：
+            # 优先原样转述它的问题，只有它什么都没给才用固定兜底——固定兜底与
+            # 上下文无关，正是"系统没看上下文"的观感来源。
             return RoutingDecision(
                 domains=[],
                 execution_mode="clarify",
-                clarification=CLARIFICATION_FALLBACK,
+                clarification=_first_clarification(uncertain) or CLARIFICATION_FALLBACK,
+                profile_facts=profile_facts,
             )
-        return RoutingDecision(domains=[], execution_mode="conversation")
+        return RoutingDecision(
+            domains=[], execution_mode="conversation", profile_facts=profile_facts,
+        )
 
     # 低置信度意图不进入执行，但**不得静默丢弃**：把被跳过的子请求与所需澄清
     # 作为提示带回，让用户知道哪一部分没执行、需要补充什么。
@@ -207,7 +221,23 @@ def classify_domains(
         execution_mode="domain_workflow",
         domain_queries=domain_queries,
         warnings=dropped_notes,
+        profile_facts=profile_facts,
     )
+
+
+def _first_clarification(uncertain: list[dict[str, Any]]) -> str:
+    """取模型给出的**第一条非空**澄清问题（保序、限长）。
+
+    低置信度时模型已经知道自己缺什么；把它丢掉换成一句固定文案，用户就会觉得
+    "系统没看上下文"。只有模型什么都没给时才由调用方用 ``CLARIFICATION_FALLBACK``。
+    """
+    for item in uncertain:
+        if not isinstance(item, dict):
+            continue
+        question = str(item.get("clarification_question", "") or "").strip()
+        if question:
+            return question[:MAX_CLARIFICATION_CHARS]
+    return ""
 
 
 @dataclass
@@ -225,6 +255,9 @@ class SupervisorDependencies:
     rewriter: Any = None
     #: 多领域汇合节点的模型注入点（None 时用 ``get_model_for_agent("synthesis")``）。
     synthesis_model: Any = None
+    #: Supervisor 决策节点的模型注入点（None 时用 ``get_supervisor_model()``）。
+    #: 测试注入假模型以绕过真实 LLM；生产留空走 deepseek-v4-flash。
+    supervisor_model: Any = None
     #: 进度回调注入点（``(stage, message) -> None``）。None 时节点不发进度。
     #: 图内节点必须是纯函数式依赖注入，不能反向引用宿主对象。
     progress: Callable[[str, str], None] | None = None
@@ -569,6 +602,73 @@ def make_scope_tasks_node(
 
 def _domain_label(domain: BusinessDomain) -> str:
     return domain_label(domain)
+
+
+def make_llm_supervisor_node(
+    *,
+    model: Any,
+    rewriter: Callable[[dict[str, Any], list[BusinessDomain]], dict[str, str]] | None,
+    max_domains: int,
+    should_stop: Callable[[], bool] | None = None,
+    progress: Callable[[str, str], None] | None = None,
+) -> Callable[[dict[str, Any]], Command]:
+    """构造 LLM 决策的 ``supervisor`` 节点（取代确定性 ``scope_tasks``）。
+
+    本工厂只做**状态 ↔ 机制适配**：把根图状态里的候选领域、任务改写器与 ``Send``
+    载荷形状，接到 ``llm_supervisor.make_supervisor_node`` 的注入点上。决策与扇出
+    的机制细节留在 ``llm_supervisor`` 模块，二者职责不混。
+    """
+    from finance_agent.orchestration.graphs import llm_supervisor
+
+    domains = list(DOMAIN_ORDER)
+    labels = {domain: _domain_label(domain) for domain in domains}
+
+    def candidate_domains_of(state: dict[str, Any]) -> list[BusinessDomain]:
+        routing = routing_of(state)
+        chosen: list[BusinessDomain] = []
+        for value in routing.get("domains", []) or []:
+            try:
+                domain = BusinessDomain(str(value))
+            except ValueError:
+                continue
+            if domain not in chosen:
+                chosen.append(domain)
+        return chosen
+
+    def describe_tasks(
+        state: dict[str, Any], chosen: list[BusinessDomain]
+    ) -> tuple[dict[str, str], list[str]]:
+        return _task_descriptions(state, chosen, rewriter)
+
+    def build_payload(
+        state: dict[str, Any], task_like: dict[str, Any], domain: BusinessDomain
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        run_id = str(state.get("run_id", ""))
+        goal = str(task_like.get("goal") or "")
+        task = PlanTask(
+            task_id=task_id_of(run_id, domain),
+            domain=domain,
+            goal=goal,
+            instruction=goal,
+            expected_output="domain_outcome",
+        )
+        payload = task_to_payload(task)
+        return payload, _worker_payload(state, payload, domain)
+
+    def should_dispatch(state: dict[str, Any]) -> bool:
+        return not _halt_reason(state, run_of(state), should_stop)
+
+    return llm_supervisor.make_supervisor_node(
+        model,
+        domains=domains,
+        domain_labels=labels,
+        candidate_domains_of=candidate_domains_of,
+        describe_tasks=describe_tasks,
+        build_payload=build_payload,
+        max_domains=max_domains,
+        should_dispatch=should_dispatch,
+        progress=progress,
+    )
 
 
 def make_domain_worker(
@@ -1133,7 +1233,7 @@ def compliance_error_handler(state: dict[str, Any], error: NodeError) -> Command
 
 
 def build_supervisor_graph(dependencies: SupervisorDependencies, *, checkpointer: Any = None):
-    """编译 Supervisor Graph；节点只做分类、铺开任务、扇出与汇合。
+    """编译 Supervisor Graph；节点只做分类、领域决策、扇出与汇合。
 
     ``checkpointer`` 为 ``None`` 时不持久化（单次调用与测试场景）；生产由
     ``AdvisorSystem`` 注入 PostgresSaver。领域任务是根图的独立 superstep，因此
@@ -1142,6 +1242,7 @@ def build_supervisor_graph(dependencies: SupervisorDependencies, *, checkpointer
     budgets = dependencies.budgets or RunBudgets.from_config()
     progress = dependencies.progress
     rewriter = dependencies.rewriter if dependencies.rewriter is not None else _default_rewriter()
+    mode = supervisor_mode()
 
     classify_node = make_classify_node(
         dependencies.classifier,
@@ -1149,6 +1250,13 @@ def build_supervisor_graph(dependencies: SupervisorDependencies, *, checkpointer
         progress=progress,
     )
     conversation_node = make_conversation_node(dependencies.conversation_runner)
+    supervisor_node = make_llm_supervisor_node(
+        model=dependencies.supervisor_model,
+        rewriter=rewriter,
+        max_domains=budgets.max_domains,
+        should_stop=dependencies.should_stop,
+        progress=progress,
+    )
     scope_tasks_node = make_scope_tasks_node(
         rewriter, max_domains=budgets.max_domains, progress=progress,
     )
@@ -1177,6 +1285,10 @@ def build_supervisor_graph(dependencies: SupervisorDependencies, *, checkpointer
     graph.add_node("classify", classify_node, error_handler=classification_error_handler)
     graph.add_node("conversation", conversation_node, error_handler=degradation_error_handler)
     graph.add_node("clarify", clarify_node)
+    graph.add_node("supervisor", supervisor_node, destinations=("domain_worker", "converge"),
+                   error_handler=degradation_error_handler)
+    # scope_tasks 仅保留给紧急回退模式（``ORCHESTRATION_SUPERVISOR_MODE=legacy``）；
+    # 节点始终登记，便于两种模式共用同一张图骨架。LLM 模式下它为不可达节点。
     graph.add_node("scope_tasks", scope_tasks_node, error_handler=degradation_error_handler)
     graph.add_node("domain_worker", domain_worker, error_handler=degradation_error_handler)
     # converge 不设 error_handler：其本身不做模型调用与 I/O。
@@ -1189,20 +1301,22 @@ def build_supervisor_graph(dependencies: SupervisorDependencies, *, checkpointer
     graph.add_node("compliance", compliance_node, error_handler=compliance_error_handler)
 
     graph.add_edge(START, "classify")
+    domain_branch = "scope_tasks" if mode == "legacy" else "supervisor"
     graph.add_conditional_edges(
         "classify",
         route,
         {
             "conversation": "conversation",
             "clarify": "clarify",
-            "domain": "scope_tasks",
+            "domain": domain_branch,
         },
     )
     for node in ("conversation", "clarify"):
         graph.add_edge(node, "converge")
-    graph.add_conditional_edges(
-        "scope_tasks", make_scope_router(dependencies.should_stop), ["domain_worker", "converge"],
-    )
+    if mode == "legacy":
+        graph.add_conditional_edges(
+            "scope_tasks", make_scope_router(dependencies.should_stop), ["domain_worker", "converge"],
+        )
     graph.add_edge("domain_worker", "converge")
     graph.add_conditional_edges(
         "converge",
@@ -1216,6 +1330,20 @@ def build_supervisor_graph(dependencies: SupervisorDependencies, *, checkpointer
     graph.add_edge("synthesize", "compliance")
     graph.add_edge("compliance", END)
     return graph.compile(checkpointer=checkpointer)
+
+
+#: Supervisor 领域决策的实现开关。``llm``（默认）走 LLM handoff 决策；``legacy``
+#: 回退到确定性 ``scope_tasks``。这是**临时**急停开关：观察期结束后（独立改动）
+#: 会连同 ``scope_tasks`` 路径一并移除。
+_SUPERVISOR_MODES = ("llm", "legacy")
+
+
+def supervisor_mode() -> str:
+    """读取 ``ORCHESTRATION_SUPERVISOR_MODE``（非法值一律按默认 ``llm`` 处理）。"""
+    import os
+
+    value = str(os.getenv("ORCHESTRATION_SUPERVISOR_MODE", "llm") or "").strip().lower()
+    return value if value in _SUPERVISOR_MODES else "llm"
 
 
 def _default_rewriter() -> Callable[..., Any] | None:
@@ -1263,7 +1391,6 @@ _V2_RESPONSE_KEYS = (
     "analysis_results",
     "personalization_status",
     "product_analysis",
-    "market_insight",
     "compliance_result",
     "conversation_id",
     "run_status",
@@ -1308,7 +1435,6 @@ def project_supervisor_state(state: dict[str, Any], *, conversation_id: str = ""
             "analysis_results": [],
             "personalization_status": "",
             "product_analysis": {},
-            "market_insight": {},
             "compliance_result": dict(run.get("compliance", {}) or {}),
             "conversation_id": conversation_id,
             "run_status": str(run.get("run_status") or RunStatus.COMPLETED.value),
@@ -1342,8 +1468,6 @@ def project_supervisor_state(state: dict[str, Any], *, conversation_id: str = ""
             for key in ("personalization_status",):
                 if key in data:
                     output[key] = data[key]
-        elif domain == BusinessDomain.MARKET_INSIGHT.value:
-            output["market_insight"] = data.get("market_insight", data)
         elif domain == BusinessDomain.PRODUCT_RESEARCH.value:
             nested = data.get("product_analysis")
             output["product_analysis"] = nested if isinstance(nested, dict) else data
@@ -1398,7 +1522,6 @@ def project_interrupt_state(
         "analysis_results": [],
         "personalization_status": "",
         "product_analysis": {},
-        "market_insight": {},
         "compliance_result": {},
         "conversation_id": conversation_id,
         "run_status": "awaiting_input",
@@ -1433,9 +1556,11 @@ __all__ = [
     "clarify_node",
     "compliance_error_handler",
     "degradation_error_handler",
+    "make_llm_supervisor_node",
     "route",
     "routing_of",
     "run_of",
+    "supervisor_mode",
     "task_id_of",
     "task_results_of",
     "project_interrupt_state",

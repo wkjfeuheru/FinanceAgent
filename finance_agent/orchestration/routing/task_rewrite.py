@@ -12,11 +12,15 @@ Supervisor 负责把用户的**本轮原话**（结合近期历史做指代消�
 
 from __future__ import annotations
 
+import json
+import logging
 import re
 from typing import Any
 
 from finance_agent.orchestration.contracts import BusinessDomain, PlanTask
 from finance_agent.orchestration.runtime.state import routing_of
+
+logger = logging.getLogger(__name__)
 
 #: 6 位数字代码（A 股/产品通吃）。
 _SIX_DIGIT_RE = re.compile(r"(?<!\d)\d{6}(?!\d)")
@@ -127,7 +131,7 @@ _REWRITE_PROMPT = """你是任务改写器。把用户请求改写为每个业�
    时间范围、分析维度）。
 2. **不得新增**用户没提的标的、数字或约束，不得回答问题。
 3. 每个领域一条描述，用该领域的语言表达（如股票领域要含标的与关注维度）。
-4. 只输出 JSON，形如：{{"tasks": {{"stock_research": "…", "market_insight": "…"}}}}
+4. 只输出 JSON，形如：{{"tasks": {{"stock_research": "…", "product_research": "…"}}}}
 
 涉及领域：{domains}
 近期上下文：{history}
@@ -155,6 +159,9 @@ def build_llm_rewriter(model: Any, *, fallback: bool = True):
             payload = json.loads(raw) if isinstance(raw, str) else raw
             tasks = payload.get("tasks") if isinstance(payload, dict) else None
         except Exception:  # noqa: BLE001 - 改写失败回退子请求原文
+            # 静默回退是这里的历史缺陷：改写器一旦不可用，所有指代性追问都会退回
+            # 未补全的原话，而调用方只看得到"像没上下文"。至少留下日志。
+            logger.warning("task_rewrite_failed", exc_info=True)
             tasks = None
         if not isinstance(tasks, dict):
             if fallback:

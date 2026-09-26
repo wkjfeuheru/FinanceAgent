@@ -111,3 +111,33 @@ def test_beijing_exchange_is_rejected_by_baostock_and_served_by_akshare():
 
     rows = AkshareDataSource().get_daily("920799", adjustment="forward")
     assert rows and rows[-1]["trade_date"]
+
+
+# ── 板块/概念（按主题找标的的唯一入口）────────────────────────────────────────
+# 这条路径只挂在 *.push2.eastmoney.com 上，该域名在部分网络环境会连续数分钟 502/断连，
+# 因此它必须纳入联网冒烟：本仓库自己的字段映射与主机轮换也要真实验证一次。
+
+def test_board_list_reaches_eastmoney_and_contains_ai_theme():
+    """概念板块表必须能取到，且含"人工智能"这类口语主题。"""
+    from finance_agent.infrastructure.market_data.akshare_provider import AkshareDataSource
+
+    rows = AkshareDataSource().get_board_list("concept")
+
+    assert len(rows) >= 100, "概念板块表明显偏小，取数可能被截断"
+    names = {row["name"] for row in rows}
+    assert "人工智能" in names, f"概念板块表缺人工智能，样例：{sorted(names)[:20]}"
+    ai = next(row for row in rows if row["name"] == "人工智能")
+    assert ai["code"].startswith("BK")
+    assert ai["change_pct"] is None or isinstance(ai["change_pct"], float)
+
+
+def test_board_constituents_are_reachable_by_name():
+    """板块名 → 代码 → 成分股：AI 主题必须能给出可评估的成分清单。"""
+    from finance_agent.infrastructure.market_data.akshare_provider import AkshareDataSource
+
+    provider = AkshareDataSource()
+    rows = provider.get_board_constituents("人工智能", "concept")
+
+    assert len(rows) >= 3, "人工智能板块成分不足，无法产出候选清单"
+    assert all(row["code"] and row["name"] for row in rows)
+    assert any(row.get("turnover_amount") for row in rows)

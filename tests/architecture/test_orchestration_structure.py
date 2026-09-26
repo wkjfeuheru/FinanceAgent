@@ -28,6 +28,7 @@ GRAPH_SYMBOLS = {
         "project_supervisor_state",
         "project_interrupt_state",
         "make_classify_node",
+        "make_llm_supervisor_node",
         "make_scope_tasks_node",
         "make_domain_worker",
         "make_converge_node",
@@ -36,6 +37,11 @@ GRAPH_SYMBOLS = {
         "task_id_of",
         "run_of",
         "reduce_run_status",
+    ),
+    "llm_supervisor": (
+        "SupervisorAgentState",
+        "make_supervisor_node",
+        "create_domain_handoff_tool",
     ),
     "conversation": (
         "ConversationState",
@@ -119,11 +125,16 @@ def test_cross_domain_fanout_is_expressed_as_send_at_the_root_graph() -> None:
     扇出不在图上，检查点覆盖不到，父图的节点级重试还会连带整轮重跑。这里用几个
     可验证的形状约束把它钉住。（领域/会话专家在节点内跑 ``create_agent`` 的 ReAct
     循环是既有且经评审的模式，不在本约束范围内。）
+
+    LLM supervisor 的 ``Send`` 构造在 ``llm_supervisor`` 模块，因此根图与之都需
+    出现 ``Send(`` 与 ``domain_worker`` 目标——两条约束共同保证扇出始终在根图上。
     """
     source = (GRAPHS_DIR / "supervisor.py").read_text(encoding="utf-8")
+    llm_source = (GRAPHS_DIR / "llm_supervisor.py").read_text(encoding="utf-8")
 
-    assert "Send(" in source, "根图必须用 Send 表达跨领域扇出"
+    assert "Send(" in source or "Send(" in llm_source, "根图必须用 Send 表达跨领域扇出"
     assert '"domain_worker"' in source, "Send 目标必须是根图登记的节点"
+    assert 'Send("domain_worker"' in llm_source, "LLM supervisor 的扇出目标必须是 domain_worker"
     assert "build_plan_execute_graph" not in source
     assert "plan_graph" not in source
     assert "deterministic_planner" not in source

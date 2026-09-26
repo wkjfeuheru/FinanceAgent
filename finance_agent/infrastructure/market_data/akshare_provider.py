@@ -13,13 +13,17 @@
 
 from __future__ import annotations
 
+import logging
+import threading
 import time
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
+from finance_agent.infrastructure.market_data import em_board
 from finance_agent.infrastructure.market_data.board_codes import canonical_index, ensure_current_code, sina_symbol
 from finance_agent.infrastructure.market_data.normalization import (
     normalize_basic_records,
+    normalize_board_list,
     normalize_breadth_record,
     normalize_daily_records,
     normalize_financial_records,
@@ -39,6 +43,10 @@ _ADJUST_MAP = {"raw": "", "forward": "qfq", "backward": "hfq"}
 # 退避序列：首次立即尝试，之后两次重试。新浪源 docstring 自带"大量抓取容易封 IP"
 # 警告，而筛选路径是按候选逐个取数的 N+1 模式，因此必须退避。
 _RETRY_DELAYS = (0.5, 1.5)
+
+logger = logging.getLogger(__name__)
+#: 板块 ``name → code`` 索引的跨线程保护（provider 是单例，逐股取数是并行的）。
+_BOARD_INDEX_LOCK = threading.Lock()
 
 
 def _sleep(seconds: float) -> None:
@@ -183,9 +191,7 @@ class AkshareDataSource:
             except Exception as exc:  # provider 边界统一处理第三方异常
                 last = exc
         if last is not None:
-            import logging
-
-            logging.getLogger(__name__).warning("AKShare %s 取数失败: %s", label, last)
+            logger.warning("AKShare %s 取数失败: %s", label, last)
         return []
 
     def _earnings_snapshot(self) -> dict[str, Any]:
@@ -519,3 +525,115 @@ class AkshareDataSource:
         )
         cache_write("policy_news", cache_key, result)
         return result
+
+    # ── 板块/概念（东财）─────────────────────────────────────────────────
+    # 这里是"按主题/板块找标的"的唯一数据入口：概念板块表能命中"人工智能"这类
+    # 口语主题（申万二级行业名做不到），成分表再给出代码/名称/涨跌幅/成交额。
+    #
+    # 取数走本仓库自建的 ``em_board`` 直连客户端，而不是 akshare 的板块函数：
+    # akshare 1.18.97 的概念板块列表/成分解析器字段数与列名数不一致，网络正常时也会
+    # 抛 ``Length mismatch``（见 ``em_board`` 模块 docstring 的实测记录）；自建客户端
+    # 还能做主机轮换与有界重试。``stock_board_industry_name_em``（行业列表）是唯一
+    # 自洽的 akshare 板块函数，仅作兜底保留。
+    #
+    # **不缓存行情**：两张表都带实时涨跌幅与成交额，缓存会给出过期行情。只保留
+    # ``name → code`` 索引（成分查询要拿板块代码），TTL 很短且从不用于展示行情。
+
+    #: 板块类型 → akshare 兜底接口名（仅列表；成分接口实测损坏，不登记）。
+    _BOARD_FALLBACK_ENDPOINTS: dict[str, str] = {
+        "industry": "stock_board_industry_name_em",
+    }
+    #: ``name → code`` 索引的存活时间（秒）。仅用于成分查询解析板块代码。
+    _BOARD_INDEX_TTL = 120.0
+
+    def _board_type_key(self, board_type: str) -> str:
+        """校验并归一板块类型；非法类型显式失败（能力缺口，不是故障）。"""
+        key = str(board_type or "").strip().lower()
+        if key not in ("concept", "industry"):
+            raise UnsupportedProviderCapability(
+                f"未知板块类型：{board_type}（只支持 concept / industry）"
+            )
+        return key
+
+    def _board_index(self, kind: str) -> dict[str, str]:
+        """返回 ``板块名 → 板块代码`` 索引（缺失或过期时重建）。"""
+        holder = self.__dict__.setdefault("_board_index_cache", {})
+        with _BOARD_INDEX_LOCK:
+            cached = holder.get(kind)
+            if cached and time.monotonic() - cached[0] <= self._BOARD_INDEX_TTL:
+                return dict(cached[1])
+        rows = self._board_fetch_list(kind)
+        index = {
+            str(row.get("name") or "").strip(): str(row.get("code") or "").strip()
+            for row in rows
+            if str(row.get("name") or "").strip() and str(row.get("code") or "").strip()
+        }
+        if not index:
+            logger.warning("板块表为空，无法解析板块代码：%s", kind)
+        return index
+
+    def _board_fetch_list(self, kind: str) -> list[dict[str, Any]]:
+        """直连客户端优先、akshare 行业列表兜底；全部失败返回空列表。
+
+        成功时顺带刷新 ``name → code`` 索引：板块定位与成分查询在同一轮里前后发生，
+        索引命中能让成分查询省掉一次板块表取数（板块接口正是最脆弱的一环）。
+        """
+        rows = em_board.fetch_board_list(kind)
+        if not rows:
+            endpoint = self._BOARD_FALLBACK_ENDPOINTS.get(kind)
+            fetch = getattr(self.ak, endpoint, None) if endpoint else None
+            if callable(fetch):
+                try:
+                    rows = normalize_board_list(_records(fetch()))
+                except Exception as exc:  # provider 边界统一处理第三方异常
+                    logger.warning("AKShare 板块列表兜底失败 %s: %s", endpoint, exc)
+                    rows = []
+                if rows:
+                    logger.warning("板块列表已降级到 AKShare %s", endpoint)
+        if rows:
+            index = {
+                str(row.get("name") or "").strip(): str(row.get("code") or "").strip()
+                for row in rows
+                if str(row.get("name") or "").strip() and str(row.get("code") or "").strip()
+            }
+            if index:
+                holder = self.__dict__.setdefault("_board_index_cache", {})
+                with _BOARD_INDEX_LOCK:
+                    holder[kind] = (time.monotonic(), dict(index))
+        return rows
+
+    def get_board_list(self, board_type: str = "concept") -> list[dict[str, Any]]:
+        """获取东财板块列表（概念或行业），含板块涨跌幅与涨跌家数。
+
+        取数失败返回**空列表**而不是抛异常：``ProviderManager`` 对空结果只记
+        ``failures`` 元数据、不计失败、不熔断，板块主机的 URL 级故障因此不会把
+        akshare 的整体健康度拉黑（否则 K 线/估值取数会被连带熔断 60 秒）。
+        不可用语义由 manager 在降级链末尾统一抛 ``ProviderUnavailableError``。
+        """
+        kind = self._board_type_key(board_type)
+        rows = self._board_fetch_list(kind)
+        if not rows:
+            logger.warning("板块列表取数失败 board_type=%s", kind)
+        return rows
+
+    def get_board_constituents(
+        self, board_name: str, board_type: str = "concept",
+    ) -> list[dict[str, Any]]:
+        """获取指定板块的成分股（含个股涨跌幅与成交额）。
+
+        ``board_name`` 必须来自板块列表；成分接口按**板块代码**查询，因此先用
+        ``name → code`` 索引解析。解析不到或取数失败同样返回空列表（理由同
+        ``get_board_list``），绝不返回"另一个板块"的成分。
+        """
+        kind = self._board_type_key(board_type)
+        name = str(board_name or "").strip()
+        if not name:
+            raise UnsupportedProviderCapability("板块成分查询缺少板块名称")
+        code = self._board_index(kind).get(name, "")
+        if not code:
+            logger.warning("板块名未在最新板块表中找到：%s（%s）", name, kind)
+            return []
+        rows = em_board.fetch_board_constituents(code)
+        if not rows:
+            logger.warning("板块成分取数失败 board=%s code=%s", name, code)
+        return rows

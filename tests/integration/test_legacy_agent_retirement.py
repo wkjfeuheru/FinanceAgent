@@ -10,6 +10,7 @@ import importlib
 import inspect
 
 from finance_agent.application.advisor import AdvisorSystem
+from tests.conftest import make_fake_supervisor_model
 
 
 def test_legacy_agent_modules_are_deleted():
@@ -86,7 +87,8 @@ def test_v2_root_graph_has_mandatory_compliance_exit():
     """所有执行分支都必须汇聚到一个合规节点，且只有合规节点通向终点。"""
     from finance_agent.orchestration.graphs.supervisor import build_supervisor_graph, SupervisorDependencies
 
-    graph = build_supervisor_graph(SupervisorDependencies(classifier=object()))
+    graph = build_supervisor_graph(SupervisorDependencies(
+            supervisor_model=make_fake_supervisor_model(),classifier=object()))
     nodes = {name for name in graph.get_graph().nodes}
     ends = [edge for edge in graph.get_graph().edges if edge[1] == "__end__"]
 

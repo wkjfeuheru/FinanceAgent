@@ -22,6 +22,7 @@ import threading
 import time
 
 from finance_agent.orchestration.budgets import RunBudgets
+from tests.conftest import make_fake_supervisor_model
 from finance_agent.orchestration.contracts import (
     RUN_CANCELLED_WARNING,
     TURN_DEADLINE_WARNING,
@@ -71,6 +72,7 @@ def _graph(*, intents, runner=None, conversation_runner=None, should_stop=None,
     把外部依赖带进这些韧性测试。"""
     return build_supervisor_graph(
         SupervisorDependencies(
+            supervisor_model=make_fake_supervisor_model(),
             classifier=_Classifier(intents),
             domain_runner=runner,
             conversation_runner=conversation_runner,
@@ -189,25 +191,25 @@ def test_failing_domain_does_not_abort_sibling_domains():
     旧做法在单个节点里串行执行计划：任何一步异常都要整轮重跑。现在每个领域任务是
     独立 superstep，失败只把该领域标为 failed，成功领域照常进入汇合与合规。
     """
-    def only_market_fails(context):
-        if context.task.domain is BusinessDomain.MARKET_INSIGHT:
-            raise RuntimeError("market provider down")
+    def only_product_fails(context):
+        if context.task.domain is BusinessDomain.PRODUCT_RESEARCH:
+            raise RuntimeError("product provider down")
         return _ok(context)
 
     graph = _graph(
-        intents=["stock_analysis", "market_insight"],
-        runner=only_market_fails,
+        intents=["stock_analysis", "product_analysis"],
+        runner=only_product_fails,
     )
-    result = graph.invoke({"user_message": "分析贵州茅台并看市场情绪", "run_id": "r1"})
+    result = graph.invoke({"user_message": "分析贵州茅台并比较基金产品", "run_id": "r1"})
     run = run_of(result)
 
     stock_id = task_id_of("r1", BusinessDomain.STOCK_RESEARCH)
-    market_id = task_id_of("r1", BusinessDomain.MARKET_INSIGHT)
-    assert set(result["task_results"]) == {stock_id, market_id}
+    product_id = task_id_of("r1", BusinessDomain.PRODUCT_RESEARCH)
+    assert set(result["task_results"]) == {stock_id, product_id}
     assert result["task_results"][stock_id]["status"] == "success"
-    assert result["task_results"][market_id]["status"] == "failed"
+    assert result["task_results"][product_id]["status"] == "failed"
     # 失败域的降级可观测，且只把整轮降为 partial（不是 failed）：另一域仍有结论。
-    assert "domain_runner_failed:market_insight" in run["warnings"]
+    assert "domain_runner_failed:product_research" in run["warnings"]
     assert run["run_status"] == "partial"
 
 
@@ -217,7 +219,8 @@ def test_classification_node_failure_reports_unknown_domain():
         def classify_intents(self, message, context_summary=""):
             raise RuntimeError("classifier down")
 
-    graph = build_supervisor_graph(SupervisorDependencies(classifier=_BoomClassifier()))
+    graph = build_supervisor_graph(SupervisorDependencies(
+            supervisor_model=make_fake_supervisor_model(),classifier=_BoomClassifier()))
     result = graph.invoke({"user_message": "分析贵州茅台", "run_id": "r1"})
 
     assert run_of(result)["run_status"] == "failed"

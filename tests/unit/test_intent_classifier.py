@@ -287,19 +287,15 @@ def test_evidence_not_in_message_still_dropped_per_item():
 # ── 模型把领域内模式名误填为 intent ──────────────────────────────────────
 
 def test_mode_misused_as_intent_is_recovered():
-    """模型常把 market_overview 这类模式名填进 intent 字段。
+    """模型常把 single_analysis 这类模式名填进 intent 字段。
 
     这是可修复的格式错误，必须还原成所属意图，而不是丢弃整条分类
-    （否则"今天大盘怎么样"会间歇性失败）。子意图体系已删除：归一后只保留
+    （否则"分析600519"会间歇性失败）。子意图体系已删除：归一后只保留
     intent，不再产出 sub_intent 字段。
     """
     from finance_agent.orchestration.routing.intent import normalize_intent_item
 
     cases = {
-        "market_overview": "market_insight",
-        "market_sentiment": "market_insight",
-        "capital_flow": "market_insight",
-        "policy_impact": "market_insight",
         "candidate_search": "stock_recommendation",
         "single_analysis": "stock_analysis",
         "product_lookup": "product_analysis",
@@ -308,9 +304,9 @@ def test_mode_misused_as_intent_is_recovered():
         "conversation": "casual_chat",
     }
     for raw, intent in cases.items():
-        item = {"intent": raw, "query": "今天大盘怎么样", "confidence": 0.95,
-                "evidence": "今天大盘怎么样"}
-        normalized = normalize_intent_item(item, "今天大盘怎么样")
+        item = {"intent": raw, "query": "分析600519", "confidence": 0.95,
+                "evidence": "分析600519"}
+        normalized = normalize_intent_item(item, "分析600519")
         assert normalized is not None, f"{raw} 应被还原而不是丢弃"
         assert normalized["intent"] == intent
         assert "sub_intent" not in normalized
@@ -324,16 +320,16 @@ def test_legacy_sub_intent_or_execution_mode_field_recovers_intent():
     from finance_agent.orchestration.routing.intent import normalize_intent_item
 
     item = {
-        "intent": "unknown_mode", "query": "今天大盘怎么样", "confidence": 0.95,
-        "evidence": "今天大盘怎么样", "execution_mode": "capital_flow",
+        "intent": "unknown_mode", "query": "分析600519", "confidence": 0.95,
+        "evidence": "分析600519", "execution_mode": "allocation_review",
     }
-    assert normalize_intent_item(item, "今天大盘怎么样")["intent"] == "market_insight"
+    assert normalize_intent_item(item, "分析600519")["intent"] == "portfolio_analysis"
 
     item = {
-        "intent": "whatever", "query": "今天大盘怎么样", "confidence": 0.95,
-        "evidence": "今天大盘怎么样", "sub_intent": "market_overview",
+        "intent": "whatever", "query": "分析600519", "confidence": 0.95,
+        "evidence": "分析600519", "sub_intent": "single_analysis",
     }
-    assert normalize_intent_item(item, "今天大盘怎么样")["intent"] == "market_insight"
+    assert normalize_intent_item(item, "分析600519")["intent"] == "stock_analysis"
 
 # 子意图相关断言（sub_intent / sub_intent_confidence 归一与钳位）随子意图体系
 # 一并删除：``normalize_intent_item`` 不再返回这两个字段。
@@ -367,3 +363,90 @@ def test_prompt_confidence_threshold_is_not_hardcoded_twice():
     assert f"confidence 小于 {threshold}" in prompt
     # 阈值文案在提示词里只出现一次（即那段由常量插值而来）
     assert prompt.count(f"confidence 小于 {threshold}") == 1
+
+
+# ── 画像候选：附加值，解析失败不得牵连整轮路由 ──────────────────────────────
+
+def test_prompt_requires_context_completion_and_specific_clarification():
+    """提示词必须允许用上下文补全延续性追问，并要求追问点名上一轮主题。
+
+    否则"我是稳健型选手，你有什么建议？"这类无实体追问只能拿到低置信度，用户最终
+    看到一句与上下文无关的固定澄清——正是"系统没看上下文"的观感来源。
+    """
+    from finance_agent.orchestration.routing.intent import _INTENT_CLASSIFIER_PROMPT as prompt
+
+    assert "延续" in prompt
+    assert "点名上一轮的标的或主题" in prompt
+    # 低置信度仍必须给出结构化追问，而不是直接执行
+    assert "clarification_question" in prompt
+    # 画像候选的字段与取值口径必须写进提示词，否则模型无从对齐
+    for anchor in ("profile_facts", "risk_preference", "quote"):
+        assert anchor in prompt, f"提示词缺少画像候选锚点：{anchor}"
+
+
+def test_malformed_profile_facts_never_break_routing():
+    """一条脏画像候选不得把整轮路由打回分类失败（那会让用户连问题都问不出去）。"""
+    message = "分析600519"
+    payload = {
+        "intents": [{
+            "intent": "stock_analysis", "query": "分析600519", "confidence": 0.99,
+            "evidence": "分析600519", "execution_mode": "stock_analysis",
+        }],
+        "finance_related": True,
+        "profile_facts": "这不是列表",
+    }
+
+    parsed = _validate(payload, message)
+
+    assert [i["intent"] for i in parsed["intents"]] == ["stock_analysis"]
+    assert parsed["profile_facts"] == []
+
+
+def test_profile_facts_are_normalized_and_dirty_items_dropped():
+    from finance_agent.orchestration.routing.intent import normalize_profile_facts
+
+    facts = normalize_profile_facts([
+        {"field": "risk_preference", "value": "R2 中低风险", "quote": "我是稳健型选手"},
+        # 脏条目：字段不在白名单 / 缺 value / 非 dict / value 非字符串
+        {"field": "stock_code", "value": "600519", "quote": "关注600519"},
+        {"field": "budget_amount", "quote": "预算10万"},
+        "不是字典",
+        {"field": "holding_period", "value": None, "quote": "持有1年"},
+        {"field": "risk_preference", "value": "R2 中低风险", "quote": "我是稳健型选手"},
+    ])
+
+    assert facts == [{"field": "risk_preference", "value": "R2 中低风险", "quote": "我是稳健型选手"}]
+
+
+def test_classify_intents_passes_profile_facts_through():
+    from finance_agent.orchestration.routing.intent import IntentClassifier
+
+    class _Model:
+        def classify(self, message, context_summary=""):
+            return {
+                "intents": [],
+                "uncertain_intents": [],
+                "finance_related": True,
+                "profile_facts": [
+                    {"field": "investment_goal", "value": "稳健增值", "quote": "我想稳健增值"},
+                ],
+            }
+
+    result = IntentClassifier(classifier=_Model()).classify_intents("我想稳健增值")
+
+    assert result["profile_facts"] == [
+        {"field": "investment_goal", "value": "稳健增值", "quote": "我想稳健增值"},
+    ]
+
+
+def test_classification_error_drops_profile_facts():
+    """路由都没认出来时不写任何长期记忆（如实降级，不猜）。"""
+    from finance_agent.orchestration.routing.intent import IntentClassifier
+
+    result = IntentClassifier(
+        classifier=_BoomClassifier(),
+        fallback_classifier=_BoomClassifier(),
+    ).classify_intents("我是稳健型选手")
+
+    assert result["classification_error"]
+    assert result["profile_facts"] == []

@@ -17,7 +17,6 @@ from langchain.chat_models import init_chat_model
 from finance_agent.infrastructure.settings import (
     DEEPSEEK_API_KEY,
     EXPERT_STEPS_ACCOUNT,
-    EXPERT_STEPS_MARKET,
     EXPERT_STEPS_PRODUCT,
     EXPERT_STEPS_STOCK,
     INTENT_MODEL_API_KEY,
@@ -38,7 +37,6 @@ AGENT_TEMPERATURES = {
     "slot_extraction": 0.1,
     "fundamental": 0.3,
     "stock_analysis": 0.3,
-    "market_insight": 0.2,
     "product_analysis": PRODUCT_ANALYSIS_TEMPERATURE,
     "expert": 0.2,
     "synthesis": SYNTHESIS_TEMPERATURE,
@@ -46,7 +44,6 @@ AGENT_TEMPERATURES = {
 
 EXPERT_STEP_BUDGETS: dict[str, int] = {
     "stock_research": EXPERT_STEPS_STOCK,
-    "market_insight": EXPERT_STEPS_MARKET,
     "product_research": EXPERT_STEPS_PRODUCT,
     "account_portfolio": EXPERT_STEPS_ACCOUNT,
 }

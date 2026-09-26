@@ -35,6 +35,7 @@ from finance_agent.orchestration.contracts import (  # noqa: E402
     BusinessDomain,
     DomainOutcome,
 )
+from evals.runners._fakes import deterministic_supervisor_model
 from finance_agent.orchestration.graphs.supervisor import (  # noqa: E402
     SupervisorDependencies,
     build_supervisor_graph,
@@ -44,7 +45,6 @@ _MAX_FETCH_WORKERS = 5
 
 _DOMAINS = [
     BusinessDomain.STOCK_RESEARCH,
-    BusinessDomain.MARKET_INSIGHT,
     BusinessDomain.PRODUCT_RESEARCH,
     BusinessDomain.ACCOUNT_PORTFOLIO,
 ]
@@ -52,7 +52,6 @@ _DOMAINS = [
 #: 意图 → 领域（基准用固定的分类结果，不调模型）。
 _INTENT_FOR = {
     BusinessDomain.STOCK_RESEARCH: "stock_analysis",
-    BusinessDomain.MARKET_INSIGHT: "market_insight",
     BusinessDomain.PRODUCT_RESEARCH: "product_analysis",
     BusinessDomain.ACCOUNT_PORTFOLIO: "portfolio_analysis",
 }
@@ -116,6 +115,7 @@ def bench_serial(domains: list[BusinessDomain], seconds: float, repeats: int) ->
 def bench_send(domains: list[BusinessDomain], seconds: float, repeats: int) -> list[float]:
     graph = build_supervisor_graph(
         SupervisorDependencies(
+            supervisor_model=deterministic_supervisor_model(),
             classifier=_FixedClassifier(domains),
             domain_runner=_sleeping_runner(seconds),
             rewriter=lambda state, domains: {},

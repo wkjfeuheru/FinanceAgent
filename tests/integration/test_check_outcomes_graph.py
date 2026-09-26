@@ -25,6 +25,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 from finance_agent.orchestration.contracts import BusinessDomain, DomainOutcome
+from tests.conftest import make_fake_supervisor_model
 from finance_agent.orchestration.graphs.supervisor import (
     PARAM_CANCELLED_RESPONSE,
     SupervisorDependencies,
@@ -93,6 +94,7 @@ class _StockNeedsInputRunner:
 def _graph(intents, *, runner=None, checkpointer=None, queries=None):
     return build_supervisor_graph(
         SupervisorDependencies(
+            supervisor_model=make_fake_supervisor_model(),
             classifier=_FakeClassifier(intents, queries=queries),
             domain_runner=runner or _StockNeedsInputRunner(),
             conversation_runner=lambda state: {"final_response": "你好", "status": "success"},
@@ -206,20 +208,16 @@ def test_cancel_resume_finishes_without_rerunning_domain():
     assert not any(c.clarification_answers for c in runner.contexts), "取消后不得重跑领域"
 
 
-# ── (e) 市场/账户永不缺参 ────────────────────────────────────────────────
+# ── (e) 账户永不缺参 ────────────────────────────────────────────────────
 
 
-def test_market_and_account_never_interrupt():
-    for intent, domain in (
-        ("market_insight", "market_insight"),
-        ("portfolio_analysis", "account_portfolio"),
-    ):
-        thread = f"t-{domain}"
-        graph = _graph([intent], checkpointer=InMemorySaver())
-        result = graph.invoke(_inputs(thread), _config(thread))
+def test_account_never_interrupts():
+    thread = "t-account_portfolio"
+    graph = _graph(["portfolio_analysis"], checkpointer=InMemorySaver())
+    result = graph.invoke(_inputs(thread), _config(thread))
 
-        assert not result.get("__interrupt__"), f"{domain} 不应触发追问"
-        assert run_of(result)["run_status"] == "completed"
+    assert not result.get("__interrupt__"), "account_portfolio 不应触发追问"
+    assert run_of(result)["run_status"] == "completed"
 
 
 # ── 结论校验：needs_input 不得被当作终态成功放行 ─────────────────────────

@@ -12,7 +12,6 @@ from enum import Enum
 
 class BusinessDomain(str, Enum):
     STOCK_RESEARCH = "stock_research"
-    MARKET_INSIGHT = "market_insight"
     PRODUCT_RESEARCH = "product_research"
     # 用户自有账户与持仓的只读问答；下单/充值只能走 REST，不经对话。
     ACCOUNT_PORTFOLIO = "account_portfolio"
@@ -22,7 +21,6 @@ class BusinessDomain(str, Enum):
 #: 新增领域必须同步加入（``supervisor`` 以 ``.index`` 作排序键，缺失会 ValueError）。
 DOMAIN_ORDER: tuple[BusinessDomain, ...] = (
     BusinessDomain.STOCK_RESEARCH,
-    BusinessDomain.MARKET_INSIGHT,
     BusinessDomain.PRODUCT_RESEARCH,
     BusinessDomain.ACCOUNT_PORTFOLIO,
 )

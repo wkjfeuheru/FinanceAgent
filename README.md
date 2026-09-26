@@ -1,15 +1,14 @@
 # Finance Agent
 
-基于 LangGraph 多 Agent 协作的智能投顾助手。系统通过自然语言收集用户投资需求，完成用户画像提取、股票识别、行情与财务数据获取、基本面分析、技术分析、市场洞察和合规审查，并提供 Vue 3 Web 界面及 FastAPI 接口。
+基于 LangGraph 多 Agent 协作的智能投顾助手。系统通过自然语言收集用户投资需求，完成用户画像提取、股票识别、行情与财务数据获取、基本面分析、技术分析和合规审查，并提供 Vue 3 Web 界面及 FastAPI 接口。
 
 ## 功能特性
 
 - 多 Agent 工作流：由 Supervisor 规划并协调各专业 Agent。
 - A 股数据：默认按 `DATA_PROVIDER_ORDER` 在 AKShare / Tushare MCP / BaoStock 之间按方法降级，获取股票信息、最近交易日行情、历史 K 线和财务指标。
 - 可选数据源：配置 `TUSHARE_MCP_URL` 后启用 Tushare MCP 作为其中一路（需 ≥2000 积分才能提供股息率）。
-- 智能选股：可选接入联网搜索，辅助识别行业、主题和股票名称。
+- 主题/板块筛选：按主题或行业找标的时，先在东方财富的概念/行业板块表里定位板块（"AI"→"人工智能"），再取板块成分，按**确定性规则评分**（与个股研究同一套规则/评分/行动结论）排序给出候选清单；清单明示预筛口径（成交额靠前的有限只数）与免责说明，不按涨跌幅排序、不构成推荐。板块取数走自建直连客户端（字段码显式映射 + 主机轮换 + 有界预算），并区分两种失败：**关键词没匹配到**（提示换更具体的板块名）与**板块数据源取数失败**（如实说明数据源暂不可用，不把故障说成没匹配到）。
 - 基本面与技术面分析：支持财务指标及 MACD、KDJ、RSI、BOLL、MA、WR 等指标。
-- 市场洞察：大盘概览、市场情绪、资金面与政策事件影响，只回答市场整体问题，不输出个股结论。
 - 合规审查：对最终回答执行敏感内容和投资风险检查。输入侧区分“问规则”与“求操作”：合规的知识咨询（如“什么是操纵市场？”）放行并走 FAQ，求助执行类请求（如“帮我操纵股价”）拦截；无法判定时默认拦截。引用 FAQ 原文的回答只审计不改写，避免删改风险词汇导致语句失真。
 - 流式对话：支持基于 SSE 的实时响应。
 - 用户系统：支持注册、登录、Bearer Token 认证、会话管理和账户注销。
@@ -30,7 +29,6 @@ Supervisor Graph（领域分类与路由）
    |
    +--> 业务领域（单领域或多领域并行扇出，同一路径）
    |      Stock Research（基本面 + 技术面）
-   |      Market Insight（大盘/情绪/资金面/政策事件）
    |      Product Research（产品解读与适配度）
    |      Account Portfolio（自有账户与持仓，只读）
    +--> 无业务领域：Conversation（FAQ 检索 + 受约束叙述）
@@ -45,13 +43,11 @@ Compliance（统一合规出口）
 Supervisor Graph 会按意图选择领域，并非每次请求都执行完整流程。**账户领域是只读的**：它只调用
 账户与持仓查询，命中"买入/卖出/清仓/充值"时返回固定引导文案，不做任何资金操作——交易必须
 在「商品」「持仓」「账户」页面由用户显式完成。多标的请求（选股推荐、
-股票比较）会按标的并行取数并逐只给出独立结论。`Market Insight` 只回答市场整体问题，不输出
-个股结论或推荐，支持四种模式：大盘概览（主要指数 + 市场宽度 + 成交额 + 区间涨跌）、市场情绪（涨跌家数/活跃度）、
-资金面（两市融资融券日频含日环比 + 北向持股市值季度参考）、政策事件影响（政策新闻筛选 + 定性影响解读）。
-指数数据走 AKShare 新浪源、宽度走乐咕、融资融券与北向走东财/交易所，政策新闻走新浪全球快讯（央视新闻联播作政策补充）。
-**北向逐日净买额自 2024-08 起因监管披露调整停止披露**（历史序列亦停更），因此资金面改用仍在日频
-披露的两市融资融券作为主指标，北向仅保留季度披露的持股市值并标注滞后。政策事件影响模式的取数为
-确定性关键词筛选，影响解读由 LLM 基于筛选出的事件生成（失败时回退纯事件清单，不伪造）。
+股票比较）会按标的并行取数并逐只给出独立结论。**主题/板块类请求**（如"帮我推荐几个AI行业
+值得关注的股票"）走"板块定位 → 成分取数 → 确定性评分排序"：只对成交额靠前的有限只数
+（默认 10）做规则评估、返回前 5 只候选，回答里必须带预筛口径与免责说明；**关键词没匹配到**与
+**板块数据源取数失败**会被严格区分——前者提示换更具体的板块名，后者如实说明数据源暂不可用
+（不说成"没匹配到"、不反复换词），两种情况下都不会凭记忆列股票。
 
 ## 技术栈
 
@@ -251,7 +247,9 @@ INTENT_MODEL_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1/chat/com
 INTENT_MODEL_API_KEY=your-qwen-api-key
 INTENT_MODEL_TIMEOUT=5
 INTENT_MODEL_MAX_RETRIES=2
-INTENT_MODEL_MAX_TOKENS=512
+# 分类器在同一次调用里还要输出 profile_facts（用户自述事实候选），512 容易被截断，
+# 截断会让整轮路由变成协议错。
+INTENT_MODEL_MAX_TOKENS=800
 INTENT_MODEL_DEADLINE=15
 # 降级链：主模型不可用（超时/欠费/协议错）时自动回退备用模型，避免单一 provider
 # 故障打断全部分类与路由。一般不填 API key（自动继承 DEEPSEEK_API_KEY）。
@@ -285,12 +283,25 @@ ORCHESTRATION_GRAPH_STEPS=32
 # 否则用户会先看到超时而执行线程仍在跑（构造时校验）。
 ORCHESTRATION_TURN_TIMEOUT=180
 ORCHESTRATION_TURN_DEADLINE=120
+# 板块/概念筛选的数据量预算：每轮最多对多少只板块成分做确定性评估、
+# 最终返回多少只候选（返回条数不得超过评估条数）。每只候选要逐只取数，
+# 调大等于让整轮更容易撞上 TURN_DEADLINE。
+ORCHESTRATION_SCREEN_MAX_EVALUATIONS=10
+ORCHESTRATION_SCREEN_MAX_RESULTS=5
 
 # 数据源守门：akshare/baostock 内部多数请求不设 socket 超时，
 # 由 ProviderManager 在调用边界强制超时，并熔断连续失败的源。
 DATA_PROVIDER_TIMEOUT=20
 DATA_PROVIDER_FAILURE_THRESHOLD=3
 DATA_PROVIDER_COOLDOWN=60
+
+# 板块（概念/行业）取数：东财板块接口只挂在 *.push2.eastmoney.com 上，该域名在部分
+# 网络环境会连续数分钟 502/断连，因此这里给出可轮换的主机列表（也可换成可达镜像）。
+# 单类型总预算必须显著小于 DATA_PROVIDER_TIMEOUT，否则会先撞上看门狗超时。
+EM_BOARD_BASE_URLS=https://17.push2.eastmoney.com,https://push2.eastmoney.com,https://79.push2.eastmoney.com
+EM_BOARD_TIMEOUT=4
+EM_BOARD_DEADLINE=10
+EM_BOARD_MAX_PAGES=8
 
 # Celery 量化计算：独立 Redis DB + 专用队列
 CELERY_REDIS_DB=1

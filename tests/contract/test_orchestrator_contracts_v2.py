@@ -35,8 +35,8 @@ def test_budget_rejects_values_above_confirmed_limits():
     ("provided", "expected"),
     [
         ("stock_research", BusinessDomain.STOCK_RESEARCH),
-        ("market_insight", BusinessDomain.MARKET_INSIGHT),
         ("product_research", BusinessDomain.PRODUCT_RESEARCH),
+        ("account_portfolio", BusinessDomain.ACCOUNT_PORTFOLIO),
     ],
 )
 def test_business_domain_accepts_only_the_confirmed_domains(provided, expected):

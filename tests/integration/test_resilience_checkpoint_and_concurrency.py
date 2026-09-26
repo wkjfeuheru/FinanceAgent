@@ -16,6 +16,7 @@ import time
 from langgraph.checkpoint.memory import InMemorySaver
 
 from finance_agent.api import dependencies as deps
+from tests.conftest import make_fake_supervisor_model
 from finance_agent.api.routers import chat as r
 from finance_agent.application.advisor import AdvisorSystem
 from finance_agent.orchestration.graphs.supervisor import (
@@ -46,6 +47,7 @@ def test_root_graph_persists_state_by_thread_id():
     checkpointer = InMemorySaver()
     graph = build_supervisor_graph(
         SupervisorDependencies(
+            supervisor_model=make_fake_supervisor_model(),
             classifier=_FakeClassifier(),
             conversation_runner=_conversation_runner,
         ),
@@ -63,6 +65,7 @@ def test_root_graph_without_checkpointer_still_runs():
     """未注入 checkpointer（测试/单次调用）时必须照常执行，配置被忽略。"""
     graph = build_supervisor_graph(
         SupervisorDependencies(
+            supervisor_model=make_fake_supervisor_model(),
             classifier=_FakeClassifier(),
             conversation_runner=_conversation_runner,
         )
@@ -295,6 +298,7 @@ def test_trusted_content_does_not_leak_across_turns():
 
     graph = build_supervisor_graph(
         SupervisorDependencies(
+            supervisor_model=make_fake_supervisor_model(),
             classifier=_SwitchableClassifier(),
             conversation_runner=lambda state: {
                 "final_response": "定投规则说明。", "status": "success", "cited_faq": True,
@@ -325,6 +329,7 @@ def test_warnings_do_not_leak_across_turns():
     checkpointer = InMemorySaver()
     graph = build_supervisor_graph(
         SupervisorDependencies(
+            supervisor_model=make_fake_supervisor_model(),
             classifier=_FakeClassifier(),
             conversation_runner=_conversation_runner,
         ),

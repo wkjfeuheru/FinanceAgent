@@ -27,6 +27,8 @@ from finance_agent.orchestration.budgets import (
     DOMAINS_HARD_CAP,
     GRAPH_STEPS_HARD_CAP,
     REACT_STEPS_HARD_CAP,
+    SCREEN_EVALUATIONS_HARD_CAP,
+    SCREEN_RESULTS_HARD_CAP,
     RunBudgets,
 )
 
@@ -44,6 +46,8 @@ def test_run_budgets_from_config_reads_environment(monkeypatch):
     monkeypatch.setattr(config, "ORCHESTRATION_CLARIFY_ROUNDS", 3)
     monkeypatch.setattr(config, "ORCHESTRATION_GRAPH_STEPS", 40)
     monkeypatch.setattr(config, "ORCHESTRATION_TURN_DEADLINE", 45.0)
+    monkeypatch.setattr(config, "ORCHESTRATION_SCREEN_MAX_EVALUATIONS", 12)
+    monkeypatch.setattr(config, "ORCHESTRATION_SCREEN_MAX_RESULTS", 4)
 
     budgets = RunBudgets.from_config()
 
@@ -53,6 +57,8 @@ def test_run_budgets_from_config_reads_environment(monkeypatch):
     assert budgets.clarify_rounds == 3
     assert budgets.graph_steps == 40
     assert budgets.turn_deadline == 45.0
+    assert budgets.screen_max_evaluations == 12
+    assert budgets.screen_max_results == 4
 
 
 def test_run_budgets_rejects_values_beyond_hard_caps():
@@ -66,6 +72,16 @@ def test_run_budgets_rejects_values_beyond_hard_caps():
         RunBudgets(clarify_rounds=CLARIFY_ROUNDS_HARD_CAP + 1)
     with pytest.raises(ValidationError):
         RunBudgets(graph_steps=GRAPH_STEPS_HARD_CAP + 1)
+    with pytest.raises(ValidationError):
+        RunBudgets(screen_max_evaluations=SCREEN_EVALUATIONS_HARD_CAP + 1)
+    with pytest.raises(ValidationError):
+        RunBudgets(screen_max_results=SCREEN_RESULTS_HARD_CAP + 1)
+
+
+def test_run_budgets_rejects_results_above_evaluations():
+    """返回的候选只能来自已评估的标的：预算口径自相矛盾必须被拒绝。"""
+    with pytest.raises(ValidationError):
+        RunBudgets(screen_max_evaluations=3, screen_max_results=5)
 
 
 # 已删除：``test_plan_task_limit_alias_follows_config`` 断言

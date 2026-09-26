@@ -42,6 +42,21 @@ def test_orchestration_settings_reject_invalid_values(kwargs):
         OrchestrationSettings(**kwargs)
 
 
+def test_orchestration_settings_bounds_screen_budget():
+    """板块筛选预算：条数有界，且返回条数不得超过评估条数。"""
+    from finance_agent.infrastructure.settings import OrchestrationSettings
+
+    settings = OrchestrationSettings()
+    assert settings.screen_max_evaluations >= 1
+    assert 1 <= settings.screen_max_results <= settings.screen_max_evaluations
+    with pytest.raises(ValidationError):
+        OrchestrationSettings(screen_max_evaluations=0)
+    with pytest.raises(ValidationError):
+        OrchestrationSettings(screen_max_evaluations=99)
+    with pytest.raises(ValidationError):
+        OrchestrationSettings(screen_max_evaluations=3, screen_max_results=5)
+
+
 def test_postgres_settings_reject_invalid_values():
     from finance_agent.infrastructure.settings import PostgresSettings
 
@@ -68,6 +83,8 @@ def test_config_still_exports_the_validated_values():
     assert config.ORCHESTRATION_GRAPH_STEPS == orchestration.graph_steps
     assert config.ORCHESTRATION_TURN_DEADLINE == orchestration.turn_deadline
     assert config.ORCHESTRATION_TURN_TIMEOUT == orchestration.turn_timeout
+    assert config.ORCHESTRATION_SCREEN_MAX_EVALUATIONS == orchestration.screen_max_evaluations
+    assert config.ORCHESTRATION_SCREEN_MAX_RESULTS == orchestration.screen_max_results
     assert config.POSTGRES_HOST == postgres.host
     assert config.POSTGRES_PORT == postgres.port
     assert config.POSTGRES_POOL_MIN_SIZE == postgres.pool_min_size

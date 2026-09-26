@@ -201,6 +201,7 @@ class QuantRecovery:
 
         self.append_recovered_message(
             conversation_id, task_id, str(base.get("summary") or ""), response,
+            structured=structured,
         )
         return {"response": response, "conversation_id": conversation_id, "warnings": warnings}
 
@@ -225,15 +226,26 @@ class QuantRecovery:
 
     def append_recovered_message(
         self, conversation_id: str, task_id: str, summary: str, response: str,
+        structured: dict[str, Any] | None = None,
     ) -> None:
-        """把恢复后的答复写回原会话（尽力而为，不阻塞状态端点返回）。"""
+        """把恢复后的答复写回原会话（尽力而为，不阻塞状态端点返回）。
+
+        ``structured`` 是本轮合并后的结构化载荷：与正常轮次一样投影出**图表最小
+        载荷**再落库，否则异步恢复写出的这条消息在历史里没有图，与同一会话中其它
+        消息表现不一致。
+        """
         if not conversation_id or not response:
             return
 
+        # 延迟导入：本模块只依赖宿主与数据库，避免在导入期拉起持久化协作器的依赖链。
+        from finance_agent.application.run_persistence import build_chart_payload
+
         def _write() -> None:
             db = get_database()
+            metadata: dict[str, Any] = {"recovered_task_id": task_id}
+            metadata.update(build_chart_payload(structured or {}))
             db.append_conversation_message(
-                conversation_id, "assistant", response, {"recovered_task_id": task_id},
+                conversation_id, "assistant", response, metadata,
             )
 
         self._host._best_effort("persist_recovered_message", _write)

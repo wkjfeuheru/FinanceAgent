@@ -31,7 +31,6 @@ class ChatResponse(BaseModel):
     personalization_status: str = ""
     compliance_result: dict[str, Any] = Field(default_factory=dict, description="合规审查结果")
     product_analysis: dict[str, Any] | None = Field(default=None, description="产品解读结果")
-    market_insight: dict[str, Any] = Field(default_factory=dict, description="市场洞察结果")
     account: dict[str, Any] = Field(default_factory=dict, description="账户与持仓快照（只读）")
     conversation_id: str = ""
     tasks: list[dict[str, Any]] = Field(default_factory=list)
@@ -69,8 +68,6 @@ def to_chat_response(result: ResponseEnvelope | Mapping[str, Any] | ChatResponse
                     "stock_data", "fundamental_analysis", "stock_analysis", "technical_analysis",
                     "analysis_results", "personalization_status",
                 ) if key in data})
-            elif expert_result.expert_name == "market_insight":
-                payload["market_insight"] = data.get("market_insight", data)
             elif expert_result.expert_name == "product_analysis":
                 nested = data.get("product_analysis")
                 payload["product_analysis"] = nested if isinstance(nested, dict) else data

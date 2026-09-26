@@ -90,8 +90,8 @@ HOLDING_PERIOD_FIELD = FieldSpec(
     scope="profile", placeholder="可选",
 )
 
-#: 各领域**允许追问**的字段登记处。空元组表示该领域没有可追问字段——市场洞察的
-#: 采集器零入参（时间窗口读配置），账户问答只需会话里的客户身份，二者都不会缺参。
+#: 各领域**允许追问**的字段登记处。空元组表示该领域没有可追问字段——账户问答
+#: 只需会话里的客户身份，不会缺参。
 EXPERT_FIELDS: dict[BusinessDomain, tuple[FieldSpec, ...]] = {
     BusinessDomain.STOCK_RESEARCH: (
         STOCK_TARGET_FIELD, ANALYSIS_TYPE_FIELD,
@@ -100,7 +100,6 @@ EXPERT_FIELDS: dict[BusinessDomain, tuple[FieldSpec, ...]] = {
     BusinessDomain.PRODUCT_RESEARCH: (
         PRODUCT_REFERENCE_FIELD, RISK_PREFERENCE_FIELD, HOLDING_PERIOD_FIELD,
     ),
-    BusinessDomain.MARKET_INSIGHT: (),
     BusinessDomain.ACCOUNT_PORTFOLIO: (),
 }
 
@@ -109,7 +108,6 @@ PROFILE_FIELDS = ("risk_preference", "holding_period")
 
 _DOMAIN_LABELS: dict[BusinessDomain, str] = {
     BusinessDomain.STOCK_RESEARCH: "股票",
-    BusinessDomain.MARKET_INSIGHT: "市场",
     BusinessDomain.PRODUCT_RESEARCH: "产品",
     BusinessDomain.ACCOUNT_PORTFOLIO: "账户",
 }

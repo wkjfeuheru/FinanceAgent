@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import asdict
-from typing import Any, Callable, Dict, List, Protocol
+from typing import Any, Callable, Dict, List, Mapping, Protocol
 
 from finance_agent.shared.contracts import FactSnapshot
 from finance_agent.orchestration.needs_input import profile_updates
@@ -13,6 +13,31 @@ from finance_agent.orchestration.runtime.thread_key import build_thread_id
 from finance_agent.domains.research.contracts import AnalysisRequest, AnalysisResult
 
 logger = logging.getLogger(__name__)
+
+#: 图表最小载荷的键位。这两个键就够前端还原图表（评分对比 / 技术速览）；
+#: `technical_analysis` 的全量 `values` 序列与 K 线原始数组刻意**不存**，
+#: 避免 `conversation_messages.metadata` 无声膨胀。
+#:
+#: 契约耦合：前端 `features/chat/chartData.ts` 只读这两个键。任一端改了键位都必须
+#: 同步另一端，否则历史会话的图表会静默消失（不报错，只是不显示）。
+CHART_PAYLOAD_KEYS: tuple[str, ...] = (
+    "analysis_results",
+    "technical_analysis",
+)
+
+
+def build_chart_payload(output: Mapping[str, Any] | None) -> Dict[str, Any]:
+    """把本轮结果投影为"图表最小载荷"（纯函数，便于单测）。
+
+    只保留**非空**的键：空 dict / 空列表不入库，`metadata` 读出来就不会出现一堆
+    空对象，前端也能靠"键是否存在"决定要不要画图。
+    """
+    payload: Dict[str, Any] = {}
+    for key in CHART_PAYLOAD_KEYS:
+        value = (output or {}).get(key)
+        if value:
+            payload[key] = value
+    return payload
 
 
 class _Host(Protocol):
@@ -123,6 +148,7 @@ class PersistenceCoordinator:
     def persist(
         self, customer_id: str, conversation_id: str, message: str,
         output: Dict[str, Any], run_id: str,
+        model_facts: List[Dict[str, Any]] | None = None,
     ) -> None:
         self._host._best_effort(
             "audit_complete_run",
@@ -152,9 +178,13 @@ class PersistenceCoordinator:
         def persist_conversation() -> None:
             database = self._database_getter()
             database.append_conversation_message(conversation_id, "user", message)
+            # 图表最小载荷随助手消息一起落库：历史会话重新打开时靠它复原三张图。
+            # 键位与前端 `features/chat/chartData.ts` 的读取口径对齐。
+            assistant_metadata: Dict[str, Any] = {"task_plan": output.get("task_plan", [])}
+            assistant_metadata.update(build_chart_payload(output))
             database.append_conversation_message(
                 conversation_id, "assistant", output.get("response", ""),
-                {"task_plan": output.get("task_plan", [])},
+                assistant_metadata,
             )
             database.rename_conversation_from_message(conversation_id, message)
 
@@ -168,7 +198,9 @@ class PersistenceCoordinator:
                     customer_id, conversation_id, "assistant", output.get("response", ""),
                     {"task_plan": output.get("task_plan", [])},
                 )
-                and self._host.memory.update_profile_from_result(customer_id, message, output)
+                and self._host.memory.update_profile_from_result(
+                    customer_id, message, output, model_facts=model_facts,
+                )
             )
             if persisted is False:
                 self._host._bump_degradation("memory_persist_failed")

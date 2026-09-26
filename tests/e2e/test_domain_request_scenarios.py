@@ -23,6 +23,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 from finance_agent.orchestration.contracts import BusinessDomain, DomainOutcome
+from tests.conftest import make_fake_supervisor_model
 from finance_agent.orchestration.graphs.supervisor import (
     PARAM_CANCELLED_RESPONSE,
     SupervisorDependencies,
@@ -103,6 +104,7 @@ class _StockNeedsInputRunner:
 def _build(intents, *, runner=None, queries=None, checkpointer="default"):
     return build_supervisor_graph(
         SupervisorDependencies(
+            supervisor_model=make_fake_supervisor_model(),
             classifier=_StubClassifier(intents, queries=queries),
             domain_runner=runner or _RecordingRunner(),
             conversation_runner=lambda state: {"final_response": "你好", "status": "success"},
@@ -131,11 +133,6 @@ SINGLE_DOMAIN_CASES = [
     ("股票-按代码", "分析600519", "stock_analysis", "stock_research"),
     ("股票-按名称", "分析贵州茅台", "stock_analysis", "stock_research"),
     ("股票-候选推荐", "推荐几只白酒龙头股", "stock_recommendation", "stock_research"),
-    # 市场洞察：四种模式
-    ("市场-大盘概览", "今天大盘怎么样", "market_insight", "market_insight"),
-    ("市场-情绪", "最近市场情绪如何", "market_insight", "market_insight"),
-    ("市场-资金面", "最近资金面如何", "market_insight", "market_insight"),
-    ("市场-政策事件", "最近有什么政策影响市场", "market_insight", "market_insight"),
     # 产品研究
     ("产品-查询", "分析一下华夏成长基金", "product_analysis", "product_research"),
     # 账户/持仓：只读
@@ -175,8 +172,8 @@ def test_conversation_request_executes_no_domain():
 COMPOSITE_CASES = [
     ("股票+产品", "分析贵州茅台并比较合适的基金产品",
      ["stock_analysis", "product_analysis"], ["stock_research", "product_research"]),
-    ("股票+市场", "大盘怎么样，顺便分析下600519",
-     ["stock_analysis", "market_insight"], ["stock_research", "market_insight"]),
+    ("股票+账户", "分析下600519，再看看我的持仓怎么配置",
+     ["stock_analysis", "portfolio_analysis"], ["stock_research", "account_portfolio"]),
 ]
 
 
@@ -253,9 +250,8 @@ def test_cancel_resume_finishes_without_rerunning():
 
 
 def test_domains_without_required_params_never_interrupt():
-    """市场/账户无可追问字段：任何问句都不得因缺参挂起。"""
+    """账户领域无可追问字段：任何问句都不得因缺参挂起。"""
     for intent, domain in (
-        ("market_insight", "market_insight"),
         ("portfolio_analysis", "account_portfolio"),
     ):
         runner = _RecordingRunner()

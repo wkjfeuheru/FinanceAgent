@@ -50,10 +50,9 @@ ORCHESTRATION_CLARIFY_ROUNDS = _orchestration.clarify_rounds
 ORCHESTRATION_GRAPH_STEPS = _orchestration.graph_steps
 
 # 领域 ReAct 专家的分域步数预算（工具调用轮次）。细粒度工具包下，"多标的技术面
-# 对比"需要多次取数+指标计算+收尾，stock 明显多于其它域；market/account/product
+# 对比"需要多次取数+指标计算+收尾，stock 明显多于其它域；account/product
 # 通常 2-4 次工具调用即可收敛。这些是**默认值**，硬上限另行校验（见 orchestration.budgets）。
 EXPERT_STEPS_STOCK = int(os.getenv("EXPERT_STEPS_STOCK", "10"))
-EXPERT_STEPS_MARKET = int(os.getenv("EXPERT_STEPS_MARKET", "6"))
 EXPERT_STEPS_PRODUCT = int(os.getenv("EXPERT_STEPS_PRODUCT", "6"))
 EXPERT_STEPS_ACCOUNT = int(os.getenv("EXPERT_STEPS_ACCOUNT", "6"))
 # 多域汇合节点的模型温度：仅组织表述、不重算数字，低温保证事实稳定。
@@ -64,6 +63,11 @@ SYNTHESIS_TEMPERATURE = float(os.getenv("SYNTHESIS_TEMPERATURE", "0.2"))
 # 两者的大小关系由 ``OrchestrationSettings`` 校验：等待上限不得短于执行上限。
 ORCHESTRATION_TURN_TIMEOUT = _orchestration.turn_timeout
 ORCHESTRATION_TURN_DEADLINE = _orchestration.turn_deadline
+
+# 板块/概念筛选的数据量预算（单一事实源，工具层不再自带默认值）：
+# 每轮最多评估多少只板块成分、最终返回多少只候选。
+ORCHESTRATION_SCREEN_MAX_EVALUATIONS = _orchestration.screen_max_evaluations
+ORCHESTRATION_SCREEN_MAX_RESULTS = _orchestration.screen_max_results
 
 # 最终答复的分块下发（SSE delta）。答案必须先经合规出口定稿，因此这里流的是
 # **已通过校验**的文本，不是模型原始 token：合规校验的是完整草稿，边生成边推送
@@ -159,6 +163,21 @@ FUYAO_ENABLED = bool(FUYAO_API_KEY) and os.getenv("FUYAO_ENABLED", "true").strip
 BAOSTOCK_ENABLED = os.getenv("BAOSTOCK_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 BAOSTOCK_USERNAME = os.getenv("BAOSTOCK_USERNAME", "").strip()
 BAOSTOCK_PASSWORD = os.getenv("BAOSTOCK_PASSWORD", "").strip()
+
+# 板块（概念/行业）取数：东财板块接口只挂在 *.push2.eastmoney.com 上，该域名在部分
+# 网络环境（例如本机经系统代理）会连续数分钟 502/断连，因此这里显式给出**主机列表**
+# 供轮换。改用环境变量还有两个用途：排障时可换成可达镜像；离线端到端测试可指向本地
+# 打桩服务（`http://127.0.0.1:<port>`）。
+EM_BOARD_BASE_URLS = os.getenv(
+    "EM_BOARD_BASE_URLS",
+    "https://17.push2.eastmoney.com,https://push2.eastmoney.com,https://79.push2.eastmoney.com",
+).strip()
+# 单请求超时 / 单个板块类型总预算（秒）。总预算必须显著小于 DATA_PROVIDER_TIMEOUT，
+# 否则会先撞上 ProviderManager 的看门狗超时而拿不到"取数失败"的明确结论。
+EM_BOARD_TIMEOUT = float(os.getenv("EM_BOARD_TIMEOUT", "4"))
+EM_BOARD_DEADLINE = float(os.getenv("EM_BOARD_DEADLINE", "10"))
+# 翻页上限：每页 100 行，8 页覆盖当前最大的概念板块表（约 500 行）。
+EM_BOARD_MAX_PAGES = int(os.getenv("EM_BOARD_MAX_PAGES", "8"))
 # 行情与估值的本地落盘缓存（最小版本，只覆盖 K 线与估值两条路径）。
 # 默认锚定仓库根目录，避免随进程工作目录漂移；TTL 设为 0 表示关闭缓存。
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -181,7 +200,9 @@ INTENT_MODEL_API_KEY = os.getenv(
 ).strip()
 INTENT_MODEL_TIMEOUT = float(os.getenv("INTENT_MODEL_TIMEOUT", os.getenv("DEEPSEEK_INTENT_TIMEOUT", "5")))
 INTENT_MODEL_MAX_RETRIES = int(os.getenv("INTENT_MODEL_MAX_RETRIES", os.getenv("DEEPSEEK_INTENT_MAX_RETRIES", "2")))
-INTENT_MODEL_MAX_TOKENS = int(os.getenv("INTENT_MODEL_MAX_TOKENS", "512"))
+# 512 只够"intents + finance_related"；分类器现在还要在**同一次调用**里输出
+# profile_facts（用户自述事实候选），输出被截断会让整轮路由变成协议错。
+INTENT_MODEL_MAX_TOKENS = int(os.getenv("INTENT_MODEL_MAX_TOKENS", "800"))
 INTENT_MODEL_DEADLINE = float(os.getenv("INTENT_MODEL_DEADLINE", "15"))
 # 意图分类降级链：主模型不可用（超时/欠费/协议错）时自动回退到备用模型，
 # 避免单一 provider 故障打断全部分类与路由。默认备用为 DeepSeek 兼容接口。
@@ -194,7 +215,8 @@ INTENT_FALLBACK_API_KEY = os.getenv(
 ).strip()
 INTENT_FALLBACK_TIMEOUT = float(os.getenv("INTENT_FALLBACK_TIMEOUT", "20"))
 INTENT_FALLBACK_MAX_RETRIES = int(os.getenv("INTENT_FALLBACK_MAX_RETRIES", "1"))
-INTENT_FALLBACK_MAX_TOKENS = int(os.getenv("INTENT_FALLBACK_MAX_TOKENS", "512"))
+# 与主模型同口径：输出里多了 profile_facts，512 容易被截断。
+INTENT_FALLBACK_MAX_TOKENS = int(os.getenv("INTENT_FALLBACK_MAX_TOKENS", "800"))
 INTENT_FALLBACK_DEADLINE = float(os.getenv("INTENT_FALLBACK_DEADLINE", "25"))
 # 旧名称保留，避免未迁移调用方导入失败。
 DEEPSEEK_INTENT_MODEL = INTENT_MODEL

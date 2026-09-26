@@ -16,7 +16,9 @@ from finance_agent.orchestration.contracts import (
     BusinessDomain,
     DomainOutcome,
 )
+from tests.conftest import make_fake_supervisor_model
 from finance_agent.orchestration.graphs.supervisor import (
+    CLARIFICATION_FALLBACK,
     CLASSIFICATION_FAILED_RESPONSE,
     SupervisorDependencies,
     build_supervisor_graph,
@@ -51,11 +53,11 @@ def _payload(intents: list[str], *, error: dict | None = None, uncertain: list |
         ("你好", ["casual_chat"], [], "conversation"),
         ("分析贵州茅台", ["stock_analysis"], ["stock_research"], "domain_workflow"),
         ("推荐一些股票", ["stock_recommendation"], ["stock_research"], "domain_workflow"),
-        ("市场情绪怎么样", ["market_insight"], ["market_insight"], "domain_workflow"),
+        ("我的持仓怎么配置", ["portfolio_analysis"], ["account_portfolio"], "domain_workflow"),
         # 多领域不再有独立的 plan_execute 模式：单/多领域共用 domain_workflow，
         # 跨领域由根图 Send 扇出（domain_queries 仍按域切分本次请求）。
-        ("市场情绪和基金产品怎么搭配", ["market_insight", "product_analysis"],
-         ["market_insight", "product_research"], "domain_workflow"),
+        ("分析茅台并比较基金产品", ["stock_analysis", "product_analysis"],
+         ["stock_research", "product_research"], "domain_workflow"),
     ],
 )
 def test_root_routes_by_domain_count(message, intents, domains, mode):
@@ -69,11 +71,11 @@ def test_root_routes_by_domain_count(message, intents, domains, mode):
 def test_domains_are_ordered_by_canonical_domain_order_not_intent_order():
     """多领域结果按 _DOMAIN_ORDER 稳定排序，与分类器给出的意图顺序无关。"""
     decision = classify_domains(
-        "市场情绪和基金产品怎么搭配",
-        classifier=_FakeClassifier(_payload(["product_analysis", "market_insight"])),
+        "分析茅台并比较基金产品",
+        classifier=_FakeClassifier(_payload(["product_analysis", "stock_analysis"])),
     )
 
-    assert [domain.value for domain in decision.domains] == ["market_insight", "product_research"]
+    assert [domain.value for domain in decision.domains] == ["stock_research", "product_research"]
 
 
 @pytest.mark.parametrize(
@@ -119,6 +121,47 @@ def test_low_confidence_uncertainty_routes_to_clarify():
     assert decision.error_code == ""
 
 
+def test_clarification_reuses_the_models_own_context_aware_question():
+    """低置信度时优先转述模型自己（已结合上下文）的追问。
+
+    固定文案"请补充更具体的信息…"与上一轮无关，正是"系统没看上下文"的观感来源。
+    """
+    decision = classify_domains(
+        "我是稳健型选手，你有什么建议？",
+        "用户: 分析一下 110011 与 000001\n助手: 两只基金风险等级均为 R4",
+        classifier=_FakeClassifier(_payload([], uncertain=[{
+            "intent": "portfolio_analysis", "query": "我是稳健型选手", "confidence": 0.6,
+            "clarification_question": "您是想让我基于上一轮那两只基金给出稳健型配置建议吗？",
+        }])),
+    )
+
+    assert decision.execution_mode == "clarify"
+    assert decision.clarification == "您是想让我基于上一轮那两只基金给出稳健型配置建议吗？"
+
+
+def test_clarification_falls_back_only_when_model_gives_nothing():
+    decision = classify_domains(
+        "那个东西怎么样",
+        classifier=_FakeClassifier(
+            _payload([], uncertain=[{"intent": "stock_analysis", "confidence": 0.4, "query": "那个"}])
+        ),
+    )
+
+    assert decision.clarification == CLARIFICATION_FALLBACK
+
+
+def test_profile_facts_reach_the_routing_decision():
+    """模型自述候选随路由决策带出（落库前还要过内存层的确定性门控）。"""
+    facts = [{"field": "risk_preference", "value": "R2 中低风险", "quote": "我是稳健型选手"}]
+    payload = _payload(["portfolio_analysis"])
+    payload["profile_facts"] = facts
+
+    decision = classify_domains("我是稳健型选手，我的持仓怎么优化", classifier=_FakeClassifier(payload))
+
+    assert decision.profile_facts == facts
+    assert [domain.value for domain in decision.domains] == ["account_portfolio"]
+
+
 def test_root_graph_creates_deterministic_single_domain_task_id():
     captured = {}
 
@@ -134,6 +177,7 @@ def test_root_graph_creates_deterministic_single_domain_task_id():
 
     graph = build_supervisor_graph(
         SupervisorDependencies(
+            supervisor_model=make_fake_supervisor_model(),
             classifier=_FakeClassifier(_payload(["stock_analysis"])),
             domain_runner=domain_runner,
             # 注入空改写器：避免默认改写器（惰性构造 INTENT_MODEL）引入外部依赖。
@@ -159,6 +203,7 @@ def test_conversation_branch_never_enters_param_validation():
     """闲聊不抽取参数、不校验，直接由会话节点回复。"""
     graph = build_supervisor_graph(
         SupervisorDependencies(
+            supervisor_model=make_fake_supervisor_model(),
             classifier=_FakeClassifier(_payload(["casual_chat"])),
             conversation_runner=lambda state: {"final_response": "你好呀", "status": "success"},
         )
@@ -173,6 +218,7 @@ def test_conversation_branch_never_enters_param_validation():
 def test_root_graph_classification_failure_is_not_silently_treated_as_chat():
     graph = build_supervisor_graph(
         SupervisorDependencies(
+            supervisor_model=make_fake_supervisor_model(),
             classifier=_FakeClassifier(_payload([], error={"error_code": "intent_unavailable"})),
             conversation_runner=lambda state: {"final_response": "不应被调用", "status": "success"},
         )
@@ -187,6 +233,7 @@ def test_root_graph_classification_failure_is_not_silently_treated_as_chat():
 def test_root_graph_conversation_mode_delegates_to_conversation_runner():
     graph = build_supervisor_graph(
         SupervisorDependencies(
+            supervisor_model=make_fake_supervisor_model(),
             classifier=_FakeClassifier(_payload(["casual_chat"])),
             conversation_runner=lambda state: {"final_response": "你好，我是投顾助手。", "status": "success"},
         )
@@ -200,6 +247,7 @@ def test_root_graph_conversation_mode_delegates_to_conversation_runner():
 def test_missing_domain_runner_fails_explicitly_instead_of_silent_success():
     graph = build_supervisor_graph(
         SupervisorDependencies(
+            supervisor_model=make_fake_supervisor_model(),
             classifier=_FakeClassifier(_payload(["stock_analysis"])),
             rewriter=lambda state, domains: {},
         )
@@ -265,6 +313,7 @@ def test_multi_domain_classification_fans_out_one_task_per_domain():
 
     graph = build_supervisor_graph(
         SupervisorDependencies(
+            supervisor_model=make_fake_supervisor_model(),
             classifier=_FakeClassifier(payload),
             domain_runner=domain_runner,
             rewriter=lambda state, domains: {},
@@ -311,6 +360,7 @@ def test_dropped_low_confidence_intent_is_surfaced_not_silent():
 
     graph = build_supervisor_graph(
         SupervisorDependencies(
+            supervisor_model=make_fake_supervisor_model(),
             classifier=_FakeClassifier(payload),
             domain_runner=domain_runner,
             rewriter=lambda state, domains: {},
@@ -342,6 +392,7 @@ def test_fully_covered_request_has_no_clarification_note():
 
     graph = build_supervisor_graph(
         SupervisorDependencies(
+            supervisor_model=make_fake_supervisor_model(),
             classifier=_FakeClassifier(payload),
             domain_runner=domain_runner,
             rewriter=lambda state, domains: {},
@@ -428,6 +479,7 @@ def test_single_domain_passes_rewritten_description_without_params_or_sub_intent
 
     graph = build_supervisor_graph(
         SupervisorDependencies(
+            supervisor_model=make_fake_supervisor_model(),
             classifier=_FakeClassifier(_payload(["stock_analysis"])),
             domain_runner=domain_runner,
             rewriter=rewriter,

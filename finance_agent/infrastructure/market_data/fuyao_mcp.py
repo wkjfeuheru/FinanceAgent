@@ -546,6 +546,14 @@ class FuyaoMcpDataSource:
         """Fuyao 不提供财经快讯/政策新闻。"""
         raise UnsupportedProviderCapability("Fuyao 不提供财经快讯接口")
 
+    def get_board_list(self, board_type: str = "concept") -> Any:
+        """Fuyao 不提供板块/概念列表。"""
+        raise UnsupportedProviderCapability("Fuyao 不提供板块列表接口")
+
+    def get_board_constituents(self, board_name: str, board_type: str = "concept") -> Any:
+        """Fuyao 不提供板块成分。"""
+        raise UnsupportedProviderCapability("Fuyao 不提供板块成分接口")
+
 
 __all__ = [
     "FuyaoMcpClient",

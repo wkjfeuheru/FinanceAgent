@@ -44,6 +44,11 @@ class OrchestrationSettings(BaseModel):
     clarify_rounds: int = Field(default=2, ge=1)
     turn_timeout: float = Field(default=180.0, gt=0)
     turn_deadline: float = Field(default=120.0, gt=0)
+    #: 板块/概念筛选：每轮最多对多少只成分做确定性评估，以及最终返回多少只候选。
+    #: 上限刻意保守——每只候选要逐只取数（约 5 次 provider 调用），评估越多、
+    #: 整轮越容易撞上 turn_deadline；返回条数不得超过评估条数（见下）。
+    screen_max_evaluations: int = Field(default=10, ge=1, le=20)
+    screen_max_results: int = Field(default=5, ge=1, le=10)
     stream_chunk_size: int = Field(default=12, ge=1)
     stream_chunk_delay_ms: float = Field(default=18.0, ge=0)
     stream_max_seconds: float = Field(default=3.0, ge=0)
@@ -54,6 +59,11 @@ class OrchestrationSettings(BaseModel):
             raise ValueError(
                 "ORCHESTRATION_TURN_TIMEOUT 不得小于 ORCHESTRATION_TURN_DEADLINE"
                 "（等待上限短于执行上限会让用户先看到超时而执行仍在继续）"
+            )
+        if self.screen_max_results > self.screen_max_evaluations:
+            raise ValueError(
+                "ORCHESTRATION_SCREEN_MAX_RESULTS 不得大于 ORCHESTRATION_SCREEN_MAX_EVALUATIONS"
+                "（返回的候选只能来自已评估的标的）"
             )
         return self
 
@@ -100,6 +110,8 @@ def load_orchestration_settings() -> OrchestrationSettings:
         clarify_rounds=_env_int("ORCHESTRATION_CLARIFY_ROUNDS", 2),
         turn_timeout=_env_float("ORCHESTRATION_TURN_TIMEOUT", 180.0),
         turn_deadline=_env_float("ORCHESTRATION_TURN_DEADLINE", 120.0),
+        screen_max_evaluations=_env_int("ORCHESTRATION_SCREEN_MAX_EVALUATIONS", 10),
+        screen_max_results=_env_int("ORCHESTRATION_SCREEN_MAX_RESULTS", 5),
         stream_chunk_size=_env_int("ORCHESTRATION_STREAM_CHUNK_SIZE", 12),
         stream_chunk_delay_ms=_env_float("ORCHESTRATION_STREAM_CHUNK_DELAY_MS", 18.0),
         stream_max_seconds=_env_float("ORCHESTRATION_STREAM_MAX_SECONDS", 3.0),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -8,9 +9,55 @@ from typing import Any
 from finance_agent.orchestration.persistence_database import get_database
 from finance_agent.infrastructure.redis.memory import RedisMemoryStore
 
+logger = logging.getLogger(__name__)
+
 # 画像提取阈值常量（避免魔法数字散落）：
 # "数字+元" 低于该金额不视为预算——过滤股价、数量等小数字噪音。
 MIN_BUDGET_AMOUNT_YUAN = 100.0
+
+#: 风险偏好关键词表：``(画像卡取值, 关键词)``。**顺序即正确性**——按"先具体后宽泛"
+#: 排列：``中高风险`` 含 ``高风险``、``中低风险`` 含 ``低风险``，若宽泛取值先匹配，
+#: "我的风险偏好是中高风险"会被错记成 R5。正则抽取与模型候选门控共用这一份。
+#: 取值口径与 ``domains/products/rules.py`` 的 R1~R5 语义保持一致。
+RISK_KEYWORD_MAP: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("R4 中高风险", ("r4", "中高风险", "积极")),
+    ("R2 中低风险", ("r2", "中低风险", "稳健")),
+    ("R5 高风险", ("r5", "高风险", "进取", "激进")),
+    ("R1 低风险", ("r1", "低风险", "保守")),
+    ("R3 中风险", ("r3", "中风险", "平衡")),
+)
+
+#: 模型自述候选允许写入的字段（``stock_code`` 不走模型路径：金额语境的误判由
+#: 正则抽取规则承担，不让模型也踩一次）。
+MODEL_FACT_FIELDS = frozenset(
+    {"risk_preference", "budget_amount", "holding_period", "investment_goal"}
+)
+
+
+def match_risk_preference(text: str) -> str:
+    """从文本里识别风险偏好取值；识别不到返回空串。"""
+    lowered = str(text or "").lower()
+    for value, keywords in RISK_KEYWORD_MAP:
+        if any(keyword in lowered for keyword in keywords):
+            return value
+    return ""
+
+
+def amount_from_text(text: str) -> float | None:
+    """从文本里取预算金额（"10万"→100000）；取不到返回 None。"""
+    match = re.search(r"(\d+(?:\.\d+)?)\s*万", str(text or ""))
+    if match:
+        return float(match.group(1)) * 10000
+    match = re.search(r"(\d+(?:\.\d+)?)\s*元", str(text or ""))
+    if match and float(match.group(1)) >= MIN_BUDGET_AMOUNT_YUAN:
+        return float(match.group(1))
+    return None
+
+
+def horizon_from_text(text: str) -> str:
+    """从文本里取持有期（"持有1年"→"1年"）；取不到返回空串。"""
+    match = re.search(r"(\d+)\s*(天|周|个月|月|年)", str(text or ""))
+    return "".join(match.groups()) if match else ""
 
 
 @dataclass
@@ -169,54 +216,31 @@ class AgentMemoryContext:
         出未确认候选（须经 apply_confirmed_facts 门控才会写入长期画像）。
         """
         candidates: list[ProfileFactCandidate] = []
-        message = user_message.lower()
-        # 规则 1：风险偏好。关键词按 R5→R1 顺序匹配（先具体后宽泛，
-        # "中高风险"须先于"中风险"命中）。
-        risk_map = [
-            ("R5 高风险", ["r5", "高风险", "进取", "激进"]),
-            ("R4 中高风险", ["r4", "中高风险", "积极"]),
-            ("R3 中风险", ["r3", "中风险", "平衡"]),
-            ("R2 中低风险", ["r2", "中低风险", "稳健"]),
-            ("R1 低风险", ["r1", "低风险", "保守"]),
-        ]
+        # 规则 1：风险偏好。显式句式（"我的风险偏好是 X"）视为用户明确确认；
+        # 无显式句式时仅凭关键词猜测，标记为未确认（不直接写画像）。
         explicit_risk = re.search(
             r"(?:我的)?(?:风险偏好|风险承受能力|投资风格)(?:是|为|偏向|：|:)?\s*([^，。；;\n]+)",
             user_message,
         )
         if explicit_risk:
-            # 显式句式"风险偏好是 X"视为用户明确确认。
-            risk_text = explicit_risk.group(1).lower()
-            for value, keywords in risk_map:
-                if any(keyword in risk_text for keyword in keywords):
-                    candidates.append(ProfileFactCandidate("risk_preference", value, confirmed=True))
-                    break
+            value = match_risk_preference(explicit_risk.group(1))
+            if value:
+                candidates.append(ProfileFactCandidate("risk_preference", value, confirmed=True))
         else:
-            # 无显式句式时仅凭关键词猜测，标记为未确认（不直接写画像）。
-            for value, keywords in risk_map:
-                if any(keyword in message for keyword in keywords):
-                    candidates.append(ProfileFactCandidate("risk_preference", value))
-                    break
+            value = match_risk_preference(user_message)
+            if value:
+                candidates.append(ProfileFactCandidate("risk_preference", value))
 
         # 规则 2：持有期。"数字 + 天/周/月/年" 视为已确认（如"持有1年"）。
-        horizon_match = re.search(r"(\d+)\s*(天|周|个月|月|年)", user_message)
-        if horizon_match:
-            candidates.append(ProfileFactCandidate(
-                "holding_period", "".join(horizon_match.groups()), confirmed=True,
-            ))
+        horizon = horizon_from_text(user_message)
+        if horizon:
+            candidates.append(ProfileFactCandidate("holding_period", horizon, confirmed=True))
 
         # 规则 3：预算金额。优先"数字+万"（换算为元）；其次"数字+元"，
         # 低于 MIN_BUDGET_AMOUNT_YUAN 的小数字（股价、数量等噪音）不视为预算。
-        amount_match = re.search(r"(\d+(?:\.\d+)?)\s*万", user_message)
-        if amount_match:
-            candidates.append(ProfileFactCandidate(
-                "budget_amount", float(amount_match.group(1)) * 10000, confirmed=True,
-            ))
-        else:
-            amount_match = re.search(r"(\d+(?:\.\d+)?)\s*元", user_message)
-            if amount_match and float(amount_match.group(1)) >= MIN_BUDGET_AMOUNT_YUAN:
-                candidates.append(ProfileFactCandidate(
-                    "budget_amount", float(amount_match.group(1)), confirmed=True,
-                ))
+        amount = amount_from_text(user_message)
+        if amount is not None:
+            candidates.append(ProfileFactCandidate("budget_amount", amount, confirmed=True))
 
         # 规则 4：投资目标。仅显式句式"投资目标是 X"视为已确认。
         goal_match = re.search(
@@ -271,13 +295,97 @@ class AgentMemoryContext:
         customer_id: str,
         user_message: str,
         result: dict[str, Any] | None = None,
+        model_facts: list[dict[str, Any]] | None = None,
     ) -> bool:
-        """兼容旧调用方：仅依据用户原话写入，忽略模型和专家推测。"""
+        """兼容旧调用方：仅依据用户原话写入，忽略模型和专家推测。
+
+        ``model_facts`` 是分类器同一次调用产出的用户**自述**候选；它们必须逐条
+        通过 ``_validate_model_fact`` 的确定性门控才会被写入（见该方法注释）。
+        正则候选与通过门控的模型候选合并后**一次落库**，避免同一轮两次写画像。
+        """
         del result
-        return self.apply_confirmed_facts(
-            customer_id,
-            self.extract_profile_candidates(user_message),
-        )
+        candidates = self.extract_profile_candidates(user_message)
+        for fact in model_facts or []:
+            candidate = self._validate_model_fact(fact, user_message)
+            if candidate is not None:
+                candidates.append(candidate)
+        return self.apply_confirmed_facts(customer_id, candidates)
+
+    def apply_model_facts(
+        self,
+        customer_id: str,
+        facts: list[dict[str, Any]] | None,
+        user_message: str,
+    ) -> bool:
+        """把模型自述候选经确定性门控后写入长期画像（不带正则候选）。
+
+        与 ``update_profile_from_result`` 共用同一套门控；单独暴露便于直接调用与
+        单测（不必构造整轮对话）。
+        """
+        candidates = [
+            candidate
+            for candidate in (self._validate_model_fact(fact, user_message) for fact in facts or [])
+            if candidate is not None
+        ]
+        if not candidates:
+            return True
+        return self.apply_confirmed_facts(customer_id, candidates)
+
+    def _validate_model_fact(
+        self,
+        fact: Any,
+        user_message: str,
+    ) -> ProfileFactCandidate | None:
+        """模型候选 → 已确认候选的确定性门控（任何一项不过就丢弃）。
+
+        四道门（缺一不写）：
+        1. **字段白名单**：``stock_code`` 不走模型路径——金额与代码的混淆由正则
+           抽取规则统一处理，不让模型再踩一次；
+        2. **逐字引用**：``quote`` 必须是本轮用户原话的子串。模型不得凭上下文、
+           推断或助手上一轮的话写长期记忆；
+        3. **值域/关键词一致**：风险偏好必须与本仓库的风险关键词表把 ``quote``
+           映射到**同一取值**（"你觉得我适合什么"没有关键词 → 丢弃）；金额、持有期
+           必须与 ``quote`` 里的数字一致；投资目标必须是 ``quote`` 的子串；
+        4. 通过后仍要过 ``apply_confirmed_facts`` 的统一写入门。
+        """
+        if not isinstance(fact, dict):
+            return None
+        field = str(fact.get("field", "") or "").strip()
+        value = str(fact.get("value", "") or "").strip()
+        quote = str(fact.get("quote", "") or "").strip()
+        message = str(user_message or "")
+        if field not in MODEL_FACT_FIELDS or not value or not quote or quote not in message:
+            return None
+
+        if field == "risk_preference":
+            # 值必须与 quote 支持的是**同一档**：把 value 也过一遍同一张关键词表，
+            # 因此 "R2" 与 "R2 中低风险" 等价，而 "中高风险" 不会被写成 "R5 高风险"。
+            matched = match_risk_preference(quote)
+            if not matched or match_risk_preference(value) != matched:
+                return None
+            resolved: Any = matched
+        elif field == "budget_amount":
+            amount = amount_from_text(quote)
+            try:
+                claimed = float(value)
+            except ValueError:
+                return None
+            if amount is None or abs(amount - claimed) > 0.5:
+                return None
+            resolved = claimed
+        elif field == "holding_period":
+            evidence = horizon_from_text(quote)
+            if evidence:
+                if evidence != value:
+                    return None
+            elif value.replace("个", "") not in quote.replace("个", ""):
+                return None
+            resolved = value
+        else:
+            if value not in quote:
+                return None
+            resolved = value
+        return ProfileFactCandidate(field, resolved, source="user_message", confirmed=True)
 
     # ── 格式化工具 ───────────────────────────────────────────────
 

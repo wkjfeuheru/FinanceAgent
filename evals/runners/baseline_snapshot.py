@@ -18,6 +18,7 @@ from finance_agent.orchestration.contracts import (
     DomainOutcome,
     DomainTaskContext,
 )
+from evals.runners._fakes import deterministic_supervisor_model
 from finance_agent.orchestration.graphs.supervisor import (
     SupervisorDependencies,
     build_supervisor_graph,
@@ -105,6 +106,7 @@ def _codes_in(text: str) -> list[str]:
 def _build_root(intents: list[dict], gateway: Gateway) -> Any:
     return build_supervisor_graph(
         SupervisorDependencies(
+            supervisor_model=deterministic_supervisor_model(),
             classifier=_StaticClassifier(intents),
             domain_runner=_stock_runner(gateway),
             rewriter=lambda state, domains: {},

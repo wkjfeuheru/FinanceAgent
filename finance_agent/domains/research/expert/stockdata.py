@@ -260,7 +260,9 @@ def search_candidates(user_query: str, config: RunnableConfig, max_results: int 
     """搜索候选股票，返回代码、名称、行业和筛选理由。
 
     优先做**名称子串**强匹配（用户问题中出现官方股票名称，如"贵州茅台"），
-    无名称命中时再回退到行业/关键词匹配。
+    无名称命中时再回退到行业/关键词匹配（行业为申万二级名，如"白酒Ⅱ"）。
+    **主题/概念筛选**（如"AI 行业有哪些股票"）请改用 ``list_boards`` +
+    ``screen_board_candidates``：本工具只匹配名称与现有行业名，不是板块成分表。
     """
     limit = min(max(int(max_results), 1), 10)
     manager = get_provider_manager()

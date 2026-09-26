@@ -43,6 +43,8 @@
 
 ## 三、目标拓扑与关键机制
 
+> 注：下图是本节这次修订的目标拓扑；后续第八节把领域决策节点改为 LLM Supervisor。
+
 ```text
 START → classify ─┬─ conversation ─┐
                   ├─ clarify ──────┤
@@ -104,11 +106,31 @@ START → classify ─┬─ conversation ─┐
 
 ## 七、已知遗留（先于本次重构存在，未在范围内处理）
 
-- `evals/runners/intent_routing_eval.py` 的 `n3`（"我的持仓怎么样"，模型把已删除的
-  领域模式 `position_query` 当成 intent）期望 `account_portfolio`，而现行口径
-  （提示词 + `tests/integration/test_supervisor_graph_routing.py::test_plain_position_query_routes_to_casual_chat`）
-  是"纯明细查询归 casual_chat / 走 conversation"。fixture 与口径冲突，需要产品口径
-  决定后统一；当前加固后正确率 96.7%（阈值 0.9，基线校验通过）。
+- ~~`intent_routing_eval.py` 的 `n3` 口径冲突~~：随领域裁剪一并消失（该用例已改为
+  `allocation_review`，与现行口径一致；加固后正确率 100%）。
 - `tests/unit/test_faq_documents.py` 的 4 个 error 是沙箱临时目录限制（`tmp_path`
   无法创建），不是代码问题；同文件其余用例通过。
 - 工作区残留空目录 `.pytest-tmp`（沙箱拒绝递归删除）。
+
+## 八、后续修订：LLM Supervisor 领域决策
+
+在第七节基础上的又一次修订：把「选哪些业务领域」从确定性 `scope_tasks` 交给 LLM。
+
+- **形态**：新增 `graphs/llm_supervisor.py`，用 `create_agent` + `transfer_to_<domain>`
+  handoff 工具（参考 `langgraph_supervisor` 的形式）。根图 `classify` 之后的分支由
+  `scope_tasks` 改为 `supervisor` 节点。
+- **为什么 handoff 工具不直接返回跨图 `Command`**：LangGraph 1.2 在"同一轮多个工具各返回
+  `Command(graph=PARENT, goto=[Send(...)])`"时只保留最后一个分支，会静默丢成单领域。
+  因此工具只作决策探针（记录 LLM 选择 + 候选集校验），由 `make_supervisor_node` 统一
+  解析并一次性构造全部 `Send`，保证"LLM 决定 + 根图并行扇出"两者都成立。
+- **权威边界（混合）**：`classify` 的意图推导给出候选领域为**硬上界**，LLM 只能在候选内
+  取舍；越界 handoff 被拒，LLM 未选出任何有效领域时回退候选全集。`clarify` / 分类协议
+  错误仍由 `classify` + `route` 硬门控。
+- **不改写任务描述**：`task_rewrite`（含实体保真校验）仍是任务描述的权威；handoff 描述
+  仅在确定性改写退化为原句时兜底。
+- **领域裁剪**：本次同时删除 `market_insight` 整条纵向切片（`BusinessDomain` 四领域变三，
+  领域权威 `DOMAIN_SPECS`、意图表、投影、前端 `market_insight` 分支、evals/e2e 同步清理）。
+  对话路径仍为 4 条：stock / product / account + conversation。
+- **回退开关**：`ORCHESTRATION_SUPERVISOR_MODE`（`llm` 默认 / `legacy` 回退确定性
+  `scope_tasks`）。临时急停用，观察期后连同 `scope_tasks` 路径移除。
+- **部署**：拓扑再次变更，沿用第五节要求——停服并清空四张 LangGraph 检查点表。

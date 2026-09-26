@@ -5,7 +5,13 @@ import MessageList from './MessageList.vue'
 import MessageInput from './MessageInput.vue'
 import ParamDialog from './ParamDialog.vue'
 import { chatStream, getRunStatus, stopChat } from '@/features/chat/api'
-import type { ChatMessage, ChatRequest, HistoryMessage, PendingInput } from '@/features/chat/types'
+import type {
+  ChatMessage,
+  ChatRequest,
+  ChatResponse,
+  HistoryMessage,
+  PendingInput,
+} from '@/features/chat/types'
 
 const props = defineProps<{
   customerId: string
@@ -73,6 +79,10 @@ function loadHistoryMessages(history: HistoryMessage[]) {
     role: (m.role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
     content: m.content,
     timestamp: m.timestamp || now(),
+    // 历史里保存的是**图表最小载荷**（analysis_results / technical_analysis），
+    // 不是完整的 ChatResponse；只填这几个键即可让图表复原，
+    // 其余字段留空（结论卡片等依赖当轮响应的块不会渲染）。
+    data: m.metadata ? ({ ...m.metadata } as ChatResponse) : undefined,
   }))
   nextTick(() => {
     const el = document.querySelector('.message-list')

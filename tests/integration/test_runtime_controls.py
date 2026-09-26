@@ -5,6 +5,7 @@ import threading
 import pytest
 from fastapi import HTTPException
 
+from tests.conftest import make_fake_supervisor_model
 from finance_agent.orchestration.graphs.supervisor import (
     SupervisorDependencies,
     build_supervisor_graph,
@@ -88,6 +89,7 @@ def test_clarification_state_does_not_execute_subgraphs():
 
     graph = build_supervisor_graph(
         SupervisorDependencies(
+            supervisor_model=make_fake_supervisor_model(),
             classifier=_FakeClassifier({
                 "intents": [],
                 "uncertain_intents": [{"intent": "stock_analysis", "confidence": 0.4, "query": "那个"}],
@@ -102,6 +104,38 @@ def test_clarification_state_does_not_execute_subgraphs():
 
     assert run_of(result)["run_status"] == "completed"
     assert not called["domain"]
+
+
+def test_clarification_response_uses_the_models_specific_question():
+    """截图场景：低置信度追问必须转述模型给的、点名上下文的那一句。
+
+    固定文案"请补充更具体的信息，例如要分析的标的、市场范围或产品类型。"与上一轮
+    讨论过的标的无关，用户因此觉得"系统没看上下文"。
+    """
+    question = "您是想让我基于上一轮那两只基金给出稳健型配置建议吗？"
+    graph = build_supervisor_graph(
+        SupervisorDependencies(
+            supervisor_model=make_fake_supervisor_model(),
+            classifier=_FakeClassifier({
+                "intents": [],
+                "uncertain_intents": [{
+                    "intent": "portfolio_analysis", "query": "我是稳健型选手",
+                    "confidence": 0.6, "clarification_question": question,
+                }],
+                "finance_related": True,
+                "classification_error": {},
+            }),
+        )
+    )
+
+    result = graph.invoke({
+        "user_message": "我是稳健型选手，你有什么建议？",
+        "history": "用户: 帮我看看110011和000001\n助手: 两只基金的风险等级都是 R4。",
+        "run_id": "run-1",
+    })
+
+    assert run_of(result)["run_status"] == "completed"
+    assert run_of(result)["final_response"] == question
 
 
 def test_handle_message_output_includes_stock_structured_fields(monkeypatch):
@@ -163,7 +197,8 @@ def test_handle_message_output_includes_stock_structured_fields(monkeypatch):
         )
 
     system.supervisor = build_supervisor_graph(
-        SupervisorDependencies(classifier=_Classifier(), domain_runner=domain_runner)
+        SupervisorDependencies(
+            supervisor_model=make_fake_supervisor_model(),classifier=_Classifier(), domain_runner=domain_runner)
     )
 
     output = system.handle_message("分析600519", conversation_id="proj-test")

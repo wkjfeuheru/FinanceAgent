@@ -42,7 +42,6 @@ from finance_agent.orchestration.routing.intent import (  # noqa: E402
 from finance_agent.orchestration.graphs.supervisor import classify_domains  # noqa: E402
 
 _STRICT_ALLOWED_MODES = {
-    "market_insight": {"market_overview", "market_sentiment", "capital_flow", "policy_impact"},
     "stock_analysis": {"stock_analysis", "single_analysis"},
     "stock_recommendation": {"candidate_search", "stock_comparison"},
     "product_analysis": {"product_analysis", "product_lookup", "product_evaluation"},
@@ -52,7 +51,6 @@ _STRICT_ALLOWED_MODES = {
 
 _DOMAIN_ORDER = (
     BusinessDomain.STOCK_RESEARCH.value,
-    BusinessDomain.MARKET_INSIGHT.value,
     BusinessDomain.PRODUCT_RESEARCH.value,
     BusinessDomain.ACCOUNT_PORTFOLIO.value,
 )
@@ -97,7 +95,7 @@ def _payload(*items: dict, finance_related: bool = True) -> dict:
 
 
 # ── 标注语料 ────────────────────────────────────────────────────────────────
-# 覆盖 6 类意图 / 4 个业务领域 / 闲聊 / 澄清，并混入真实世界里的模型噪声。
+# 覆盖 5 类意图 / 3 个业务领域 / 闲聊 / 澄清，并混入真实世界里的模型噪声。
 
 def build_cases() -> list[Case]:
     cases: list[Case] = []
@@ -110,21 +108,21 @@ def build_cases() -> list[Case]:
     add(Case("s1", m, _payload(_intent("stock_analysis", m, m, execution_mode="stock_analysis")),
              ("stock_research",), "domain_workflow"))
 
-    m = "今天大盘怎么样"
-    add(Case("s2", m, _payload(_intent("market_insight", m, m, execution_mode="market_overview")),
-             ("market_insight",), "domain_workflow"))
+    m = "110011 怎么样"
+    add(Case("s2", m, _payload(_intent("product_analysis", m, m, execution_mode="product_lookup")),
+             ("product_research",), "domain_workflow"))
 
-    m = "市场情绪和赚钱效应如何"
-    add(Case("s3", m, _payload(_intent("market_insight", m, m, execution_mode="market_sentiment")),
-             ("market_insight",), "domain_workflow"))
+    m = "分析一下华夏成长基金"
+    add(Case("s3", m, _payload(_intent("product_analysis", m, m, execution_mode="product_evaluation")),
+             ("product_research",), "domain_workflow"))
 
-    m = "两融资金面最近怎么样"
-    add(Case("s4", m, _payload(_intent("market_insight", m, m, execution_mode="capital_flow")),
-             ("market_insight",), "domain_workflow"))
+    m = "我的持仓怎么优化"
+    add(Case("s4", m, _payload(_intent("portfolio_analysis", m, m, execution_mode="allocation_review")),
+             ("account_portfolio",), "domain_workflow"))
 
-    m = "最近有什么政策消息影响市场"
-    add(Case("s5", m, _payload(_intent("market_insight", m, m, execution_mode="policy_impact")),
-             ("market_insight",), "domain_workflow"))
+    m = "我账户里的资产配置合理吗"
+    add(Case("s5", m, _payload(_intent("portfolio_analysis", m, m, execution_mode="allocation_review")),
+             ("account_portfolio",), "domain_workflow"))
 
     m = "帮我推荐几个AI行业值得关注的股票"
     add(Case("s6", m, _payload(_intent("stock_recommendation", m, m, execution_mode="candidate_search")),
@@ -175,31 +173,31 @@ def build_cases() -> list[Case]:
                 execution_mode="product_analysis"),
     ), ("stock_research", "product_research"), "domain_workflow"))
 
-    m = "今天大盘怎么样，顺便看看我的持仓配置是否合理"
+    m = "分析贵州茅台，顺便看看我的持仓配置是否合理"
     add(Case("p2", m, _payload(
-        _intent("market_insight", "今天大盘怎么样", "今天大盘怎么样", execution_mode="market_overview"),
+        _intent("stock_analysis", "分析贵州茅台", "分析贵州茅台", execution_mode="stock_analysis"),
         _intent("portfolio_analysis", "看看我的持仓配置是否合理", "看看我的持仓配置是否合理", execution_mode="allocation_review"),
-    ), ("market_insight", "account_portfolio"), "domain_workflow"))
+    ), ("stock_research", "account_portfolio"), "domain_workflow"))
 
-    m = "分析600519并看看今天市场情绪"
+    m = "分析600519并看看110011这只基金"
     add(Case("p3", m, _payload(
         _intent("stock_analysis", "分析600519", "分析600519", execution_mode="stock_analysis"),
-        _intent("market_insight", "看看今天市场情绪", "看看今天市场情绪",
-                execution_mode="market_sentiment"),
-    ), ("stock_research", "market_insight"), "domain_workflow"))
+        _intent("product_analysis", "看看110011这只基金", "看看110011这只基金",
+                execution_mode="product_lookup"),
+    ), ("stock_research", "product_research"), "domain_workflow"))
 
-    m = "帮我看看大盘和我的账户配置要不要调整"
+    m = "帮我看看华夏成长基金和我的账户配置要不要调整"
     add(Case("p4", m, _payload(
-        _intent("market_insight", "看看大盘", "看看大盘", execution_mode="market_overview"),
+        _intent("product_analysis", "看看华夏成长基金", "看看华夏成长基金", execution_mode="product_lookup"),
         _intent("portfolio_analysis", "我的账户配置要不要调整", "我的账户配置要不要调整", execution_mode="allocation_review"),
-    ), ("market_insight", "account_portfolio"), "domain_workflow"))
+    ), ("product_research", "account_portfolio"), "domain_workflow"))
 
-    m = "分析茅台，看看大盘，再推荐只基金"
+    m = "分析茅台，看看110011，再看看我的持仓配置要不要调整"
     add(Case("p5", m, _payload(
         _intent("stock_analysis", "分析茅台", "分析茅台", execution_mode="stock_analysis"),
-        _intent("market_insight", "看看大盘", "看看大盘", execution_mode="market_overview"),
-        _intent("product_analysis", "推荐只基金", "推荐只基金", execution_mode="product_analysis"),
-    ), ("stock_research", "market_insight", "product_research"), "domain_workflow"))
+        _intent("product_analysis", "看看110011", "看看110011", execution_mode="product_lookup"),
+        _intent("portfolio_analysis", "我的持仓配置要不要调整", "我的持仓配置要不要调整", execution_mode="allocation_review"),
+    ), ("stock_research", "product_research", "account_portfolio"), "domain_workflow"))
 
     # —— 澄清（低置信度，不应执行）——
     m = "那个东西怎么样来着"
@@ -208,18 +206,18 @@ def build_cases() -> list[Case]:
              (), "clarify"))
 
     m = "最近怎么样"
-    add(Case("cl2", m, _payload(_intent("market_insight", m, m, confidence=0.55,
-                                       execution_mode="market_overview")),
+    add(Case("cl2", m, _payload(_intent("product_analysis", m, m, confidence=0.55,
+                                       execution_mode="product_lookup")),
              (), "clarify"))
 
     # —— 噪声：模型把 execution_mode 误填进 intent 字段（可修复）——
     # 当前代码应还原为所属意图；严格基线会整批失败。
-    m = "今天大盘怎么样"
+    m = "分析一下600519"
     add(Case("n1", m, _payload(
-        {"intent": "market_overview", "query": m, "confidence": 0.96,
-         "reason": "", "evidence": m, "execution_mode": "market_overview"},
-    ), ("market_insight",), "domain_workflow", tag="noise:mode_as_intent",
-        note="market_overview 被当成 intent"))
+        {"intent": "single_analysis", "query": m, "confidence": 0.96,
+         "reason": "", "evidence": m, "execution_mode": "single_analysis"},
+    ), ("stock_research",), "domain_workflow", tag="noise:mode_as_intent",
+        note="single_analysis 被当成 intent"))
 
     m = "帮我推荐几个AI行业的股票"
     add(Case("n2", m, _payload(
@@ -228,12 +226,12 @@ def build_cases() -> list[Case]:
     ), ("stock_research",), "domain_workflow", tag="noise:mode_as_intent",
         note="candidate_search 被当成 intent"))
 
-    m = "我的持仓怎么样"
+    m = "我的持仓怎么优化"
     add(Case("n3", m, _payload(
-        {"intent": "position_query", "query": m, "confidence": 0.97,
-         "reason": "", "evidence": m, "execution_mode": "position_query"},
+        {"intent": "allocation_review", "query": m, "confidence": 0.97,
+         "reason": "", "evidence": m, "execution_mode": "allocation_review"},
     ), ("account_portfolio",), "domain_workflow", tag="noise:mode_as_intent",
-        note="position_query 被当成 intent"))
+        note="allocation_review 被当成 intent"))
 
     # —— 噪声：复合请求中混入臆造意图 / 非法 execution_mode ——
     # 加固后：合法的兄弟意图必须存活；严格基线会整批失败。
@@ -245,12 +243,12 @@ def build_cases() -> list[Case]:
     ), ("stock_research",), "domain_workflow", tag="noise:unknown_sibling",
         note="未知 intent 兄弟条目应被丢弃，不牵连合法意图"))
 
-    m = "分析贵州茅台，并看看大盘"
+    m = "分析贵州茅台，并看看110011"
     add(Case("n5", m, _payload(
         _intent("stock_analysis", "分析贵州茅台", "分析贵州茅台", execution_mode="stock_analysis"),
-        {"intent": "market_insight", "query": "看看大盘", "confidence": 0.95,
-         "reason": "", "evidence": "看看大盘", "execution_mode": "market_mood_fake"},
-    ), ("stock_research", "market_insight"), "domain_workflow", tag="noise:bad_mode_sibling",
+        {"intent": "product_analysis", "query": "看看110011", "confidence": 0.95,
+         "reason": "", "evidence": "看看110011", "execution_mode": "product_mood_fake"},
+    ), ("stock_research", "product_research"), "domain_workflow", tag="noise:bad_mode_sibling",
         note="非法 execution_mode 应被归一，不牵连同批合法意图"))
 
     # —— 噪声：兄弟条目举证失败（编造证据）——

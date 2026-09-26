@@ -98,3 +98,69 @@ def final_message(text: str):
 def fake_tool_model():
     """把上面的工厂以 fixture 形式暴露，避免各测试文件重复定义假模型类。"""
     return make_fake_tool_model
+
+
+# ── Supervisor 决策节点的假模型 ────────────────────────────────────────────
+# 根图的 ``supervisor`` 节点用 ``create_agent`` 通过 ``transfer_to_<domain>`` 工具
+# 选定领域。测试里注入假模型即可绕过真实 LLM，且默认行为等价于旧确定性
+# ``scope_tasks``（选定候选全集）：对**全部已绑定域**并发起 handoff，候选集外的
+# 调用会被 handoff 工具拒绝并丢弃，最终结果恰好等于候选领域集合。
+
+def make_fake_supervisor_model(select=None):
+    """构造 supervisor 决策假模型。
+
+    绑定工具时决定要调用的领域：默认用全部已绑定域（= 选中候选全集），``select``
+    可指定子集（``BusinessDomain.value`` 或工具名 ``transfer_to_<domain>``）。
+
+    第 1 次调用返回并行 handoff 的工具调用；第 2 次返回无工具调用的收尾消息，结束
+    ReAct 循环。不再依赖 ``messages`` 迭代器（空工具集时不会触发 ``bind_tools``）。
+    """
+    from langchain_core.messages import AIMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+
+    from finance_agent.orchestration.graphs.llm_supervisor import TRANSFER_PREFIX
+
+    base = _fake_chat_models.GenericFakeChatModel
+
+    def _tool_name(item: str) -> str:
+        return item if item.startswith(TRANSFER_PREFIX) else f"{TRANSFER_PREFIX}{item}"
+
+    class _FakeSupervisorModel(base):  # type: ignore[misc, valid-type]
+        def __init__(self, **kwargs):
+            super().__init__(messages=iter([]), **kwargs)
+            object.__setattr__(self, "_bound", [])
+            object.__setattr__(self, "_turn", 0)
+
+        def bind_tools(self, tools, **kwargs):
+            bound = [str(getattr(entry, "name", "")) for entry in tools]
+            object.__setattr__(self, "_bound", [name for name in bound if name])
+            return self
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            turn = getattr(self, "_turn", 0)
+            object.__setattr__(self, "_turn", turn + 1)
+            if turn > 0:
+                return ChatResult(generations=[ChatGeneration(message=AIMessage(content="路由完成。"))])
+            bound = list(getattr(self, "_bound", []))
+            wanted = bound if select is None else [_tool_name(item) for item in select]
+            tool_calls = [
+                {
+                    "name": name,
+                    "args": {"task_description": "按用户请求处理该领域任务。"},
+                    "id": f"sup-{index}",
+                    "type": "tool_call",
+                }
+                for index, name in enumerate(wanted)
+                if name in bound
+            ]
+            return ChatResult(
+                generations=[ChatGeneration(message=AIMessage(content="", tool_calls=tool_calls))]
+            )
+
+    return _FakeSupervisorModel()
+
+
+@pytest.fixture
+def fake_supervisor_model():
+    """把 supervisor 决策假模型作为 fixture 暴露。"""
+    return make_fake_supervisor_model

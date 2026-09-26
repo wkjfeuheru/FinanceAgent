@@ -60,13 +60,13 @@ def test_product_task_prompt_carries_profile():
 def test_context_defaults_params_and_profile_to_empty():
     context = DomainTaskContext(
         task=PlanTask(
-            task_id="t", domain=BusinessDomain.MARKET_INSIGHT, goal="大盘", instruction="大盘",
+            task_id="t", domain=BusinessDomain.PRODUCT_RESEARCH, goal="产品", instruction="产品",
             expected_output="domain_outcome",
         ),
         thread_id="v1:CUST1:conv-1",
         customer_id="CUST1",
         conversation_id="conv-1",
-        user_message="大盘",
+        user_message="产品",
     )
 
     assert context.params == {}

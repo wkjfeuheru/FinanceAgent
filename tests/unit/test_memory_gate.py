@@ -92,3 +92,144 @@ def test_legacy_update_ignores_expert_profile_result():
     assert saved == []
     assert profile.investment_goal == ""
     assert profile.stock_codes == []
+
+
+# ── 模型自述候选（模型自主判断 + 确定性门控）────────────────────────────────
+
+def test_model_declared_risk_preference_is_persisted():
+    """用户自述"我是稳健型选手"由模型判断为值得记住的事实，门控通过后写入。"""
+    profile = UserProfileCard(customer_id="CUST001")
+    context, saved = build_memory_context(profile)
+    message = "我是稳健型选手，你有什么建议？"
+
+    assert context.update_profile_from_result(
+        "CUST001", message, None,
+        [{"field": "risk_preference", "value": "R2 中低风险", "quote": "我是稳健型选手"}],
+    ) is True
+
+    assert len(saved) == 1
+    assert profile.risk_preference == "R2 中低风险"
+    assert profile.confirmed_facts["risk_preference"] == "R2 中低风险"
+
+
+def test_model_fact_requires_verbatim_quote_from_this_turn():
+    """quote 不在本轮用户原话里 → 丢弃：模型不得凭上下文或推测写长期记忆。"""
+    profile = UserProfileCard(customer_id="CUST001")
+    context, saved = build_memory_context(profile)
+
+    assert context.apply_model_facts(
+        "CUST001",
+        [{"field": "risk_preference", "value": "R5 高风险", "quote": "我的风险偏好是高风险"}],
+        "我是稳健型选手，你有什么建议？",
+    ) is True
+
+    assert saved == []
+    assert profile.risk_preference == ""
+
+
+def test_model_fact_value_must_match_quote_keywords():
+    """值域/关键词必须一致：quote 说"激进"，就不能写成 R2。"""
+    profile = UserProfileCard(customer_id="CUST001")
+    context, saved = build_memory_context(profile)
+
+    context.apply_model_facts(
+        "CUST001",
+        [{"field": "risk_preference", "value": "R2 中低风险", "quote": "我比较激进"}],
+        "我比较激进",
+    )
+
+    assert saved == []
+    assert profile.risk_preference == ""
+
+
+def test_bare_risk_level_is_normalized_to_the_canonical_value():
+    """"R2" 与 "R2 中低风险" 是同一档；但模型把"中高风险"写成 R5 必须被拒绝。"""
+    profile = UserProfileCard(customer_id="CUST001")
+    context, saved = build_memory_context(profile)
+
+    context.apply_model_facts(
+        "CUST001",
+        [{"field": "risk_preference", "value": "R2", "quote": "我是稳健型选手"}],
+        "我是稳健型选手",
+    )
+    assert len(saved) == 1
+    assert profile.risk_preference == "R2 中低风险"
+
+    context2, saved2 = build_memory_context(UserProfileCard(customer_id="CUST002"))
+    context2.apply_model_facts(
+        "CUST002",
+        [{"field": "risk_preference", "value": "R5 高风险", "quote": "我能承受中高风险"}],
+        "我能承受中高风险",
+    )
+    assert saved2 == []
+
+
+def test_model_fact_without_risk_keyword_is_rejected():
+    """没有关键词支持的猜测（"你觉得我适合什么"）不得成为长期事实。"""
+    profile = UserProfileCard(customer_id="CUST001")
+    context, saved = build_memory_context(profile)
+
+    context.apply_model_facts(
+        "CUST001",
+        [{"field": "risk_preference", "value": "R5 高风险", "quote": "你觉得我适合什么"}],
+        "你觉得我适合什么？",
+    )
+
+    assert saved == []
+    assert profile.risk_preference == ""
+
+
+def test_model_facts_cannot_write_stock_codes():
+    """代码不走模型路径：金额与代码的混淆由正则抽取规则统一处理。"""
+    profile = UserProfileCard(customer_id="CUST001")
+    context, saved = build_memory_context(profile)
+
+    context.apply_model_facts(
+        "CUST001",
+        [{"field": "stock_code", "value": "600519", "quote": "关注600519"}],
+        "关注600519",
+    )
+
+    assert saved == []
+    assert profile.stock_codes == []
+
+
+def test_model_budget_and_horizon_must_match_numbers_in_quote():
+    profile = UserProfileCard(customer_id="CUST001")
+    context, saved = build_memory_context(profile)
+
+    context.apply_model_facts(
+        "CUST001",
+        [
+            {"field": "budget_amount", "value": "100000", "quote": "我的预算是10万"},
+            {"field": "holding_period", "value": "1年", "quote": "打算持有1年"},
+        ],
+        "我的预算是10万，打算持有1年",
+    )
+
+    assert len(saved) == 1
+    assert profile.budget_amount == 100000
+    assert profile.holding_period == "1年"
+
+    # 数字对不上 → 丢弃（模型把 "10万" 写成 1000 时不得落库）
+    context2, saved2 = build_memory_context(UserProfileCard(customer_id="CUST002"))
+    context2.apply_model_facts(
+        "CUST002",
+        [{"field": "budget_amount", "value": "1000", "quote": "我的预算是10万"}],
+        "我的预算是10万",
+    )
+    assert saved2 == []
+
+
+def test_model_investment_goal_must_be_supported_by_quote():
+    profile = UserProfileCard(customer_id="CUST001")
+    context, saved = build_memory_context(profile)
+
+    context.apply_model_facts(
+        "CUST001",
+        [{"field": "investment_goal", "value": "翻倍", "quote": "我想稳健增值"}],
+        "我想稳健增值",
+    )
+
+    assert saved == []
+    assert profile.investment_goal == ""

@@ -37,7 +37,6 @@ export interface ChatResponse {
   analysis_results: ResearchAnalysisResult[]
   personalization_status?: string
   product_analysis?: ProductAnalysisPayload
-  market_insight?: Record<string, any>
   /** 账户领域载荷：资金/持仓查询与配置诊断共用。 */
   account?: AccountPayload
   compliance_result: Record<string, any>
@@ -90,6 +89,20 @@ export interface HistoryMessage {
   role: string
   content: string
   timestamp?: string
+  /**
+   * 落库时随消息一起保存的元数据。
+   *
+   * 目前只用于**图表最小载荷**：后端写助手消息时把 `analysis_results` /
+   * `technical_analysis` 两个键存进来，使历史会话也能复原图表。
+   * `conversation_messages.metadata` 是 jsonb，读取接口原本就原样返回它，
+   * 前端此前从未消费。旧消息没有这些键，图表自然不显示。
+   */
+  metadata?: {
+    task_plan?: string[]
+    analysis_results?: Record<string, any>[]
+    technical_analysis?: Record<string, any>
+    [key: string]: any
+  }
 }
 
 /** 历史响应 */

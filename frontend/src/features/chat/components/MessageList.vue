@@ -3,7 +3,14 @@ import { ref, watch, nextTick, computed } from 'vue'
 import { User, Headset, Loading } from '@element-plus/icons-vue'
 import type { ChatMessage, ChatResponse } from '@/features/chat/types'
 import type { ResearchAnalysisResult, TechnicalIndicatorSet } from '@/features/research/types'
+import {
+  buildScoreCompareChart,
+  buildTechnicalOverviewChart,
+} from '@/features/chat/chartData'
+import { renderMarkdownStreaming } from '@/shared/markdown'
 import AllocationCard from '@/features/portfolio/components/AllocationCard.vue'
+import ScoreCompareChart from '@/features/chat/components/ScoreCompareChart.vue'
+import TechnicalOverviewChart from '@/features/chat/components/TechnicalOverviewChart.vue'
 
 const props = defineProps<{
   messages: ChatMessage[]
@@ -124,6 +131,46 @@ function indicatorRows(
   return rows
 }
 
+/**
+ * 助手正文的 Markdown 渲染。
+ *
+ * 只在**助手**气泡生效：用户随手输入的 `*`、股票代码里的 `#` 都不该被当成语法。
+ * 加载中时末尾块尚未确定，保持纯文本（见 `shared/markdown.ts` 的流式规则）。
+ */
+function renderedContent(msg: ChatMessage): { settled: string; pending: string } {
+  if (msg.role !== 'assistant') return { settled: msg.content || '', pending: '' }
+  return renderMarkdownStreaming(msg.content || '', !msg.loading)
+}
+
+/**
+ * 单条消息的图表规格。
+ *
+ * 数据只来自既有的确定性结构化载荷（`analysis_results` / `technical_analysis`），
+ * 字段缺失时对应函数返回 null，组件自然不渲染。
+ */
+function chartsOf(msg: ChatMessage) {
+  const data = msg.data
+  return {
+    scores: buildScoreCompareChart(data?.analysis_results),
+    technical: buildTechnicalOverviewChart(data?.technical_analysis),
+  }
+}
+
+/**
+ * 渲染模型：把每条消息的 Markdown 与图表规格预先算好。
+ *
+ * 用 `computed` 而不是在模板里直接调函数：模板中的方法调用**每次重渲染都会重跑**
+ * （流式输出时每个 delta 都会触发），长会话下等于对全部历史消息反复做文本分块与
+ * Markdown 渲染。`computed` 只在 `messages` 变化时重算一次。
+ */
+const messageViews = computed(() =>
+  props.messages.map((msg) => ({
+    msg,
+    content: renderedContent(msg),
+    charts: chartsOf(msg),
+  })),
+)
+
 const isEmpty = computed(
   () => props.messages.length === 0 && !props.loading,
 )
@@ -140,29 +187,29 @@ const isEmpty = computed(
 
     <template v-else>
       <div
-        v-for="(msg, idx) in messages"
+        v-for="(row, idx) in messageViews"
         :key="idx"
         class="message-item"
-        :class="msg.role"
+        :class="row.msg.role"
       >
         <el-avatar
           :size="36"
-          :icon="msg.role === 'user' ? User : Headset"
+          :icon="row.msg.role === 'user' ? User : Headset"
           class="avatar"
-          :class="msg.role === 'user' ? 'avatar-user' : 'avatar-assistant'"
+          :class="row.msg.role === 'user' ? 'avatar-user' : 'avatar-assistant'"
         />
         <div class="bubble-wrap">
           <div class="meta">
             <span class="role-name">
-              {{ msg.role === 'user' ? '我' : '智能投顾' }}
+              {{ row.msg.role === 'user' ? '我' : '智能投顾' }}
             </span>
-            <span class="time">{{ formatTime(msg.timestamp) }}</span>
+            <span class="time">{{ formatTime(row.msg.timestamp) }}</span>
           </div>
           <div class="bubble markdown-body">
-            <div v-if="msg.loading && !msg.content && msg.progressSteps?.length" class="progress-panel">
+            <div v-if="row.msg.loading && !row.msg.content && row.msg.progressSteps?.length" class="progress-panel">
               <div class="progress-title">正在分析</div>
               <div
-                v-for="step in msg.progressSteps"
+                v-for="step in row.msg.progressSteps"
                 :key="step.stage"
                 class="progress-step"
                 :class="step.status"
@@ -174,22 +221,35 @@ const isEmpty = computed(
                 <span>{{ step.message }}</span>
               </div>
             </div>
-            <template v-else-if="msg.loading && !msg.content">
+            <template v-else-if="row.msg.loading && !row.msg.content">
               <span class="typing">
                 <el-icon class="typing-dot"><Loading /></el-icon>
                 正在分析...
               </span>
             </template>
             <template v-else>
-              <div v-if="msg.stage && msg.loading" class="stage-tip">
+              <div v-if="row.msg.stage && row.msg.loading" class="stage-tip">
                 <el-icon class="spin"><Loading /></el-icon>
-                <span>{{ msg.stage }}</span>
+                <span>{{ row.msg.stage }}</span>
               </div>
-              <div v-text="msg.content"></div>
+              <!-- 已定稿块渲染为 Markdown；末尾未定块按纯文本续在后面，避免流式闪烁 -->
+              <div v-if="row.content.settled" v-html="row.content.settled"></div>
+              <div
+                v-if="row.content.pending"
+                class="pending-text"
+                v-text="row.content.pending"
+              ></div>
             </template>
           </div>
+
+          <!-- 图表：只由确定性结构化数据派生，与正文同为已校验的数字 -->
+          <ScoreCompareChart v-if="row.charts.scores" :spec="row.charts.scores" />
+          <TechnicalOverviewChart
+            v-if="row.charts.technical.length"
+            :specs="row.charts.technical"
+          />
           <section
-            v-for="(result, resultIndex) in msg.data?.analysis_results || []"
+            v-for="(result, resultIndex) in row.msg.data?.analysis_results || []"
             :key="`${idx}-${resultIndex}`"
             class="research-result"
           >
@@ -212,7 +272,7 @@ const isEmpty = computed(
             </div>
           </section>
           <section
-            v-for="panel in technicalPanels(msg.data)"
+            v-for="panel in technicalPanels(row.msg.data)"
             :key="`${idx}-tech-${panel.code}`"
             class="technical-panel"
           >
@@ -225,10 +285,10 @@ const isEmpty = computed(
             </div>
             <div v-if="indicatorRows(panel.indicators).length" class="indicator-grid">
               <span
-                v-for="row in indicatorRows(panel.indicators)"
-                :key="row.label"
+                v-for="indicator in indicatorRows(panel.indicators)"
+                :key="indicator.label"
                 class="indicator-item"
-              >{{ row.label }} {{ row.value }}</span>
+              >{{ indicator.label }} {{ indicator.value }}</span>
             </div>
             <div v-if="panel.indicators.summary?.signals?.length" class="signal-list">
               <span class="signal-title">看多信号</span>
@@ -240,8 +300,8 @@ const isEmpty = computed(
             </div>
           </section>
           <AllocationCard
-            v-if="msg.data?.account?.allocation_review?.position_count"
-            :review="msg.data.account.allocation_review"
+            v-if="row.msg.data?.account?.allocation_review?.position_count"
+            :review="row.msg.data.account.allocation_review"
           />
         </div>
       </div>
@@ -340,6 +400,72 @@ const isEmpty = computed(
 }
 .message-item.assistant .bubble {
   border-left: 3px solid var(--color-primary);
+}
+/* 渲染成块级 HTML 后，块与块之间的间距由 margin 决定；再叠一个 pre-wrap 会把
+   HTML 源码里的换行也显示成空行。 */
+.message-item.assistant .bubble {
+  white-space: normal;
+}
+/* 未定稿的尾块按纯文本续在末尾，保留模型写的换行 */
+.pending-text {
+  white-space: pre-wrap;
+}
+
+/* Markdown 元素样式。`.bubble.markdown-body` 的两个类都在同一个元素上，因此
+   必须写成复合选择器；`v-html` 注入的 DOM 不带 scoped 属性，故用 `:deep()`。 */
+.bubble.markdown-body :deep(p) { margin: 0 0 8px; }
+/* 首尾块不额外留白，避免气泡上下出现多余空隙（用 :first-of-type 而不是子选择器，
+   兼容性更稳）。 */
+.bubble.markdown-body :deep(p:first-of-type) { margin-top: 0; }
+.bubble.markdown-body :deep(p:last-of-type) { margin-bottom: 0; }
+.bubble.markdown-body :deep(h1),
+.bubble.markdown-body :deep(h2),
+.bubble.markdown-body :deep(h3),
+.bubble.markdown-body :deep(h4) {
+  margin: 12px 0 6px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--color-text);
+}
+.bubble.markdown-body :deep(ul),
+.bubble.markdown-body :deep(ol) {
+  margin: 0 0 8px;
+  padding-left: 20px;
+}
+.bubble.markdown-body :deep(li) { margin: 2px 0; }
+.bubble.markdown-body :deep(strong) { font-weight: 700; color: var(--color-text); }
+.bubble.markdown-body :deep(code) {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 1px 4px;
+  background: var(--color-primary-soft);
+  color: var(--color-primary);
+}
+.bubble.markdown-body :deep(a) { color: var(--color-primary); text-decoration: underline; }
+/* 表格是极窄气泡里唯一能承载多标的对比的排版，横向可滚动而不撑破气泡 */
+.bubble.markdown-body :deep(table) {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0 0 8px;
+  font-size: 12px;
+  display: block;
+  overflow-x: auto;
+}
+.bubble.markdown-body :deep(th),
+.bubble.markdown-body :deep(td) {
+  border: 1px solid var(--color-border);
+  padding: 4px 8px;
+  text-align: left;
+  white-space: nowrap;
+}
+.bubble.markdown-body :deep(th) {
+  background: var(--color-surface-alt);
+  font-weight: 600;
+}
+.bubble.markdown-body :deep(hr) {
+  border: none;
+  border-top: 1px solid var(--color-border);
+  margin: 10px 0;
 }
 
 .typing {

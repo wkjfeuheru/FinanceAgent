@@ -110,12 +110,6 @@ def test_response_envelope_maps_to_legacy_chat_response():
                 },
             ),
             ExpertResult(
-                expert_name="market_insight",
-                status=ExpertStatus.SUCCESS,
-                summary="市场洞察完成",
-                result_data={"market_insight": {"mode": "market_overview", "status": "success"}},
-            ),
-            ExpertResult(
                 expert_name="product_analysis",
                 status=ExpertStatus.SUCCESS,
                 summary="产品分析完成",
@@ -127,12 +121,11 @@ def test_response_envelope_maps_to_legacy_chat_response():
     legacy = to_chat_response(response)
 
     assert legacy.response == "综合分析完成"
-    assert legacy.task_plan == ["stock_analysis", "market_insight", "product_analysis"]
+    assert legacy.task_plan == ["stock_analysis", "product_analysis"]
     assert legacy.stock_data == {"code": "600519"}
     assert legacy.fundamental_analysis == {"pe": 20.5}
     assert legacy.technical_analysis == {"trend": "up"}
     assert legacy.analysis_results[0]["rule_version"] == "research_rules/v1"
-    assert legacy.market_insight == {"mode": "market_overview", "status": "success"}
     assert legacy.product_analysis == {"report": "适合稳健投资者"}
 
 

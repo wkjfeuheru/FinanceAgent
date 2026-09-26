@@ -29,25 +29,25 @@ from tests.conftest import final_message, make_fake_tool_model, tool_call
 def _context() -> DomainTaskContext:
     return DomainTaskContext(
         task=PlanTask(
-            task_id="run-1:market_insight",
-            domain=BusinessDomain.MARKET_INSIGHT,
-            goal="看看今天大盘",
-            instruction="看看今天大盘",
+            task_id="run-1:product_research",
+            domain=BusinessDomain.PRODUCT_RESEARCH,
+            goal="分析华夏成长基金",
+            instruction="分析华夏成长基金",
             expected_output="domain_outcome",
         ),
         thread_id="v1:CUST1:conv-1",
         customer_id="CUST1",
         conversation_id="conv-1",
-        user_message="看看今天大盘",
+        user_message="分析华夏成长基金",
     )
 
 
 def _expert(messages, *, max_steps: int = 4):
     """编译一个用假模型驱动的市场专家（工具白名单为空，足够驱动循环）。"""
     return build_expert_graph(
-        BusinessDomain.MARKET_INSIGHT,
+        BusinessDomain.PRODUCT_RESEARCH,
         tools=[],
-        system_prompt="你是市场分析助手。",
+        system_prompt="你是产品分析助手。",
         max_steps=max_steps,
         model=make_fake_tool_model(messages),
     )
@@ -108,7 +108,7 @@ def test_stop_mid_loop_ends_before_the_next_model_call():
         state["calls"] += 1
         return "" if state["calls"] <= 1 else RUN_CANCELLED_WARNING
 
-    sink = ExpertSink(domain=BusinessDomain.MARKET_INSIGHT)
+    sink = ExpertSink(domain=BusinessDomain.PRODUCT_RESEARCH)
     agent = create_agent(
         make_fake_tool_model([
             tool_call("probe", {"x": "first"}),
@@ -135,10 +135,10 @@ def test_stop_mid_loop_ends_before_the_next_model_call():
 
 def test_without_stop_check_the_loop_runs_normally():
     """未注入停止查询时行为不变（多加一层检查不得影响正常路径）。"""
-    graph = _expert([final_message("大盘情绪偏暖。")])
+    graph = _expert([final_message("该基金业绩稳健。")])
 
     outcome = graph.invoke({"context": _context()})["domain_outcome"]
 
-    assert outcome.summary == "大盘情绪偏暖。"
+    assert outcome.summary == "该基金业绩稳健。"
     assert RUN_CANCELLED_WARNING not in outcome.limitations
     assert TURN_DEADLINE_WARNING not in outcome.limitations

@@ -83,31 +83,22 @@ def check(name, cond, detail=""):
 
 
 # 市场数据源失败时，领域会返回既有降级文案；路由错或 500 仍然失败。
-_MARKET_DEGRADED = {
-    "market_overview": "市场概览数据暂不可用",
-    "market_sentiment": "市场情绪数据暂不可用",
-    "capital_flow": "资金面数据暂不可用",
-    "policy_impact": "政策事件数据暂不可用",
-}
-
-# 每条领域链路：消息、task_plan 领域、正文应含词、正文不得含词、允许的降级文案。
+# 每条领域链路：消息、task_plan 领域、正文应含词、正文不得含词。
 DOMAIN_CASES = [
-    ("什么是T+1交易？", None, ["T+1"], [], None),
-    ("今天大盘怎么样", "market_insight", ["上证指数"], [], "market_overview"),
-    ("市场情绪怎么样，涨跌家数多少", "market_insight", ["涨跌家数"], [], "market_sentiment"),
-    ("最近资金面如何", "market_insight", ["融资融券"], [], "capital_flow"),
-    ("最近有什么政策事件，对市场有什么影响", "market_insight", ["政策"], ["建议买入", "建议卖出"], "policy_impact"),
-    ("分析600519", "stock_research", ["600519"], [], None),
-    ("分析贵州茅台", "stock_research", ["600519"], [], None),
-    ("推荐几只消费龙头股", "stock_research", ["确定性研究结论"], [], None),
-    ("比较贵州茅台和五粮液", "stock_research", ["600519", "000858"], [], None),
-    ("分析一下华夏成长基金", "product_research", ["产品"], [], None),
-    ("110011怎么样", "product_research", ["110011"], [], None),
-    ("比较华夏成长混合和易方达中小盘混合", "product_research", ["华夏成长", "易方达"], [], None),
+    ("什么是T+1交易？", None, ["T+1"], []),
+    ("分析600519", "stock_research", ["600519"], []),
+    ("分析贵州茅台", "stock_research", ["600519"], []),
+    # 主题/板块筛选：能力重建后走"板块成分 + 确定性评分排序"，正文内容随板块而变，
+    # 因此这里只断言路由与通用质量；内容断言见下面的"主题/板块筛选"段落。
+    ("推荐几只消费龙头股", "stock_research", [], []),
+    ("比较贵州茅台和五粮液", "stock_research", ["600519", "000858"], []),
+    ("分析一下华夏成长基金", "product_research", ["产品"], []),
+    ("110011怎么样", "product_research", ["110011"], []),
+    ("比较华夏成长混合和易方达中小盘混合", "product_research", ["华夏成长", "易方达"], []),
 ]
 
 
-def assert_chat(token, message, *, domain=None, needles=(), forbidden=(), degraded=None, mode=None):
+def assert_chat(token, message, *, domain=None, needles=(), forbidden=(), mode=None):
     """同步对话：200、完成、正文命中关键词；有领域时 task_plan 含该领域。"""
     st, r = call("POST", "/api/chat", token=token, body={"message": message, "conversation_id": ""})
     text = r.get("response") or "" if isinstance(r, dict) else ""
@@ -115,14 +106,13 @@ def assert_chat(token, message, *, domain=None, needles=(), forbidden=(), degrad
     plan = r.get("task_plan") or [] if isinstance(r, dict) else []
     hit = all(n in text for n in needles)
     clean = not any(n in text for n in forbidden)
-    degraded_ok = bool(degraded and _MARKET_DEGRADED[degraded] in text)
     ok = (
         st == 200
         and status == "completed"
         and bool(text.strip())
         and "内部错误" not in text
         and clean
-        and (hit or degraded_ok)
+        and hit
     )
     check(
         f"chat '{message}' content ok",
@@ -198,9 +188,9 @@ def main() -> int:
     check("stream emits stage + response", '"type": "stage"' in raw.replace('"type":"stage"', '"type": "stage"') and '"type": "response"' in raw.replace('"type":"response"', '"type": "response"'), raw[:120])
 
     print("\n== 领域链路（真实内容断言）==")
-    for msg, domain, needles, forbidden, degraded in DOMAIN_CASES:
+    for msg, domain, needles, forbidden in DOMAIN_CASES:
         mode = "conversation" if domain is None else None
-        assert_chat(ta, msg, domain=domain, needles=needles, forbidden=forbidden, degraded=degraded, mode=mode)
+        assert_chat(ta, msg, domain=domain, needles=needles, forbidden=forbidden, mode=mode)
 
     composite = "分析贵州茅台并比较合适的基金产品"
     r = assert_chat(
@@ -210,6 +200,50 @@ def main() -> int:
     )
     body = r.get("response") or ""
     check("composite not duplicated", body.count("确定性研究结论（600519）") <= 1, f"count={body.count('确定性研究结论（600519）')}")
+
+    print("\n== 主题/板块筛选 ==")
+    # 截图里的失败场景：以前这里是固定拒绝文案，现在必须真的走板块取数 + 规则评分。
+    retired_refusal = "当前不支持按主题或板块自动筛选股票，请提供具体股票名称或代码进行分析。"
+    st, screen = call("POST", "/api/chat", token=ta, body={
+        "message": "帮我推荐几个AI行业值得关注的股票", "conversation_id": "",
+    })
+    stext = (screen.get("response") or "") if isinstance(screen, dict) else ""
+    check(
+        "board screening answers instead of the retired refusal",
+        st == 200
+        and isinstance(screen, dict)
+        and screen.get("run_status") in {"completed", "partial"}
+        and bool(stext.strip())
+        and "内部错误" not in stext
+        and retired_refusal not in stext,
+        f"{st} status={screen.get('run_status') if isinstance(screen, dict) else screen} text={stext[:160]}",
+    )
+    check(
+        "board screening routes to stock_research",
+        "stock_research" in ((screen.get("task_plan") or []) if isinstance(screen, dict) else []),
+        str(screen.get("task_plan") if isinstance(screen, dict) else screen),
+    )
+    listed = len((screen.get("analysis_results") or []) if isinstance(screen, dict) else [])
+    # 板块数据源故障（东财 *.push2.eastmoney.com 在部分网络环境会连续不可达）与
+    # "关键词没匹配到"是两种不同的失败，回答里的措辞必须区分。
+    source_outage = any(token in stext for token in ("数据源暂不可用", "板块数据源", "取数失败"))
+    keyword_miss = any(token in stext for token in ("未匹配", "请给出更具体的板块"))
+    check(
+        "board screening lists scored candidates or gives a clear reason",
+        listed >= 3 or source_outage or keyword_miss or any(token in stext for token in ("请提供", "请给出")),
+        f"listed={listed} text={stext[:140]}",
+    )
+    check(
+        "board screening keeps the non-recommendation wording",
+        listed < 3 or "不构成" in stext,
+        f"listed={listed} text={stext[:140]}",
+    )
+    # 截图缺陷的回归护栏：数据源不可用时不得把故障说成"没匹配到、请换关键词"。
+    check(
+        "board source outage is not reported as a keyword mismatch",
+        not (source_outage and keyword_miss),
+        f"listed={listed} text={stext[:180]}",
+    )
 
     print("\n== 账户只读 ==")
     st, dep = call("POST", "/api/portfolio/deposit", token=ta, body={"amount": 100000, "idempotency_key": f"e2e-dep-{suf}"})
@@ -228,6 +262,43 @@ def main() -> int:
     st, acct2 = call("GET", "/api/portfolio/account", token=ta)
     after_mv = acct2.get("market_value") if isinstance(acct2, dict) else None
     check("trade guidance did not change holdings", before_mv == after_mv, f"before={before_mv} after={after_mv}")
+
+    print("\n== 多轮上下文 ==")
+    from finance_agent.orchestration.graphs.supervisor import CLARIFICATION_FALLBACK
+
+    st, multi = call("POST", f"/api/conversations/{ca}", token=ta)
+    multi_cid = multi.get("conversation_id") if isinstance(multi, dict) else ""
+    st, first = call("POST", "/api/chat", token=ta, body={
+        "message": "我的持仓配置合理吗", "conversation_id": multi_cid,
+    })
+    check(
+        "multi-turn first message completes",
+        st == 200 and isinstance(first, dict) and first.get("run_status") == "completed",
+        f"{st} {str(first)[:160]}",
+    )
+    # 截图的失败场景：没有点名标的的延续性追问，不得退回固定澄清文案。
+    st, follow = call("POST", "/api/chat", token=ta, body={
+        "message": "我是稳健型选手，你有什么建议？", "conversation_id": multi_cid,
+    })
+    ftext = (follow.get("response") or "") if isinstance(follow, dict) else ""
+    check(
+        "follow-up uses context instead of the canned clarification",
+        st == 200
+        and isinstance(follow, dict)
+        and follow.get("run_status") == "completed"
+        and bool(ftext.strip())
+        and "内部错误" not in ftext
+        and ftext.strip() != CLARIFICATION_FALLBACK,
+        f"{st} status={follow.get('run_status') if isinstance(follow, dict) else follow} text={ftext[:160]}",
+    )
+    # 用户自述的事实必须被记住（模型自主判断 + 确定性门控），下一轮专家才看得到。
+    st, prof = call("GET", f"/api/profile/{ca}", token=ta)
+    pref = prof.get("risk_preference") if isinstance(prof, dict) else None
+    check(
+        "self-declared risk preference is remembered",
+        st == 200 and bool(pref),
+        f"{st} profile={str(prof)[:160]}",
+    )
 
     print("\n== 合规 ==")
     edu = assert_chat(ta, "什么是操纵市场？", needles=["操纵市场"], mode="conversation")

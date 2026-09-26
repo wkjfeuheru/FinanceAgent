@@ -379,23 +379,11 @@ def build_expert_graph(
                     limitations=["domain_mismatch"],
                 )
             }
-        if domain is BusinessDomain.STOCK_RESEARCH:
-            from finance_agent.domains.research.expert import (
-                UNSUPPORTED_SCREENING_MESSAGE,
-                is_unsupported_stock_screening_request,
-            )
-
-            request_text = "\n".join((context.user_message, context.task.goal, context.task.instruction))
-            if is_unsupported_stock_screening_request(request_text):
-                return {
-                    "domain_outcome": DomainOutcome(
-                        task_id=context.task.task_id,
-                        domain=domain,
-                        status="partial",
-                        summary=UNSUPPORTED_SCREENING_MESSAGE,
-                        limitations=["stock_screening_unsupported"],
-                    )
-                }
+        # 主题/板块筛选不再在这里被短路：过去用正则判定"推荐/筛选 + 主题/板块"就
+        # 直接返回固定拒绝文案（模型都不会被调用），代价是"帮我推荐几个AI行业
+        # 值得关注的股票"永远拿不到答案。现在改由专家的 ``list_boards`` /
+        # ``screen_board_candidates`` 取真实板块数据 + 确定性评分，匹配不到时
+        # 由工具返回引导文案，不在这里猜。
         return {}
 
     def run_agent_node(state: ExpertState, config: RunnableConfig) -> dict[str, Any]:

@@ -89,6 +89,28 @@ class StockDataProvider(Protocol):
         """
         ...
 
+    def get_board_list(self, board_type: str = "concept") -> Any:
+        """获取板块列表（``board_type`` 取 ``concept`` 概念 / ``industry`` 行业）。
+
+        出口为统一记录列表：``name/code/change_pct/up_count/down_count/leader``。
+        该能力目前只有 AKShare 声明；其余源应抛 ``UnsupportedProviderCapability``
+        （能力缺口不是故障，不会被熔断）。
+
+        **取数失败返回空列表而不是抛异常**：空结果不计失败、不熔断，不可用语义由
+        ``ProviderManager`` 在降级链末尾统一抛 ``ProviderUnavailableError`` 表达。
+        """
+        ...
+
+    def get_board_constituents(self, board_name: str, board_type: str = "concept") -> Any:
+        """获取指定板块的成分股。
+
+        出口为统一记录列表：``code/name/change_pct/turnover_amount/price``。
+        ``board_name`` 必须是板块列表里的**名称**（与上游接口口径一致）；板块名解析
+        不到时返回空列表，绝不返回"另一个板块"的成分。取数失败的语义同
+        ``get_board_list``（空列表、不熔断）。
+        """
+        ...
+
 
 class UnsupportedProviderCapability(ProviderError):
     """Provider 不支持请求的能力。"""

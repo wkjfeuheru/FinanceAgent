@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from finance_agent.domains.portfolio.errors import PricingUnavailableError
 from finance_agent.domains.portfolio.fees import to_rate
